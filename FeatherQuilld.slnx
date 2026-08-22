@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/sdk/">
+    <Project Path="sdk/FeatherQuilld.Plugins.Sdk/FeatherQuilld.Plugins.Sdk.csproj" />
+  </Folder>
+  <Folder Name="/plugins/">
+    <Project Path="plugins/Hello/Hello.csproj" />
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="compose.yaml" />
+  </Folder>
+  <Project Path="FeatherQuilld.csproj" />
+</Solution>

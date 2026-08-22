@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <RootNamespace>FeatherQuilld.Plugins.Sdk</RootNamespace>
+        <AssemblyName>FeatherQuilld.Plugins.Sdk</AssemblyName>
+        <Version>0.1.0</Version>
+        <Description>SDK for FeatherQuilld plugins — lifecycle, events, and routes.</Description>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
+</Project>

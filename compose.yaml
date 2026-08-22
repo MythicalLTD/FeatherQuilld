@@ -1,0 +1,7 @@
+﻿services:
+  featherquilld:
+    image: featherquilld
+    build:
+      context: .
+      dockerfile: Dockerfile
+
