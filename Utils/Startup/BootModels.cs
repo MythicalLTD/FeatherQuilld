@@ -12,6 +12,19 @@ public sealed class BootStepResult
 {
     public BootStepStatus Status { get; set; } = BootStepStatus.Success;
     public List<string> Details { get; init; } = [];
+
+    public static BootStepResult Merge(params BootStepResult[] results)
+    {
+        var merged = new BootStepResult();
+        if (results.Any(r => r.Status == BootStepStatus.Failed))
+            merged.Status = BootStepStatus.Failed;
+        else if (results.Any(r => r.Status == BootStepStatus.Warning))
+            merged.Status = BootStepStatus.Warning;
+        else if (results.All(r => r.Status == BootStepStatus.Skipped))
+            merged.Status = BootStepStatus.Skipped;
+
+        return merged;
+    }
 }
 
 /// <summary>Collects boot-time messages without writing to the log file/console.</summary>

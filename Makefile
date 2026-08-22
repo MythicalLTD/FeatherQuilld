@@ -5,7 +5,7 @@ PORT         ?= 8989
 DOCKER_IMAGE ?= featherquilld
 DOCKER_TAG   ?= latest
 
-.PHONY: help restore build build-plugins run watch stop publish clean docker docker-run test fmt
+.PHONY: help restore build build-plugins run watch stop publish clean docker docker-run test fmt configure
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -22,6 +22,9 @@ build-plugins: ## Build and deploy sample plugins
 run: build ## Run the daemon (CONFIG_FILE=config.yml)
 	FEATHERQUILLD_CONFIG=$(CONFIG_FILE) ASPNETCORE_ENVIRONMENT=Development \
 		dotnet run --project FeatherQuilld.csproj -c $(CONFIG) --no-launch-profile -- --config $(CONFIG_FILE)
+
+configure: build ## Interactive node setup (join-data or manual + optional systemd)
+	dotnet run --project FeatherQuilld.csproj -c $(CONFIG) --no-launch-profile -- configure --override --config $(CONFIG_FILE)
 
 watch: ## Run with hot reload
 	FEATHERQUILLD_CONFIG=$(CONFIG_FILE) ASPNETCORE_ENVIRONMENT=Development \

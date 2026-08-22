@@ -1,6 +1,10 @@
 using FeatherQuilld.Plugins.Sdk.Events;
 using FeatherQuilld.Utils.Config;
+using FeatherQuilld.Utils.Services;
+using FeatherQuilld.Utils.Startup;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Text.Json.Serialization;
 
 namespace FeatherQuilld.Controllers;
 
@@ -11,33 +15,44 @@ namespace FeatherQuilld.Controllers;
 public sealed class SystemController : ApiControllerBase
 {
     private readonly Config _config;
+    private readonly DaemonState _state;
     private readonly IEventBus _events;
 
-    public SystemController(Config config, IEventBus events)
+    public SystemController(Config config, DaemonState state, IEventBus events)
     {
         _config = config;
+        _state = state;
         _events = events;
     }
 
-    /// <summary>Liveness probe.</summary>
+    /// <summary>Health probe used by FeatherPanel admin.</summary>
     [HttpGet("health")]
-    [ProducesResponseType(typeof(HealthResponse), StatusCodes.Status200OK)]
-    public ActionResult<HealthResponse> Health()
+    [Authorize]
+    [ProducesResponseType(typeof(DaemonHealthResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(DaemonHealthResponse), StatusCodes.Status503ServiceUnavailable)]
+    public ActionResult<DaemonHealthResponse> Health()
     {
         var healthEvent = new HealthCheckEvent { Context = HttpContext };
         var hook = _events.Emit(healthEvent);
 
-        if (hook.IsCancelled && healthEvent.Response is HealthResponse cancelled)
-            return Ok(cancelled);
+        if (hook.IsCancelled && healthEvent.Response is DaemonHealthResponse cancelled)
+            return _state.IsHealthy ? Ok(cancelled) : StatusCode(503, cancelled);
 
-        if (hook.IsReplaced && hook.Replacement is HealthResponse replaced)
-            return Ok(replaced);
+        if (hook.IsReplaced && hook.Replacement is DaemonHealthResponse replaced)
+            return _state.IsHealthy ? Ok(replaced) : StatusCode(503, replaced);
 
-        return Ok(new HealthResponse("ok", _config.AppName, DateTimeOffset.UtcNow));
+        var response = new DaemonHealthResponse(
+            _state.HealthStatus,
+            StartupBanner.Version,
+            _config.Uuid,
+            _state.UptimeSeconds);
+
+        return _state.IsHealthy ? Ok(response) : StatusCode(503, response);
     }
 
     /// <summary>Basic daemon identity (non-secret).</summary>
     [HttpGet("info")]
+    [Authorize]
     [ProducesResponseType(typeof(SystemInfoResponse), StatusCodes.Status200OK)]
     public ActionResult<SystemInfoResponse> Info() =>
         Ok(new SystemInfoResponse(
@@ -50,6 +65,7 @@ public sealed class SystemController : ApiControllerBase
 
     /// <summary>Loaded plugins (non-secret metadata).</summary>
     [HttpGet("plugins")]
+    [Authorize]
     [ProducesResponseType(typeof(IReadOnlyList<PluginInfoResponse>), StatusCodes.Status200OK)]
     public ActionResult<IReadOnlyList<PluginInfoResponse>> Plugins(
         [FromServices] Utils.Plugins.PluginManager pluginManager) =>
@@ -60,7 +76,11 @@ public sealed class SystemController : ApiControllerBase
             p.Instance.Metadata.Description)).ToList());
 }
 
-public sealed record HealthResponse(string Status, string AppName, DateTimeOffset Timestamp);
+public sealed record DaemonHealthResponse(
+    string Status,
+    string Version,
+    Guid Uuid,
+    [property: JsonPropertyName("uptime_seconds")] long UptimeSeconds);
 
 public sealed record SystemInfoResponse(
     string AppName,

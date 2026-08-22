@@ -5,6 +5,7 @@ using FeatherQuilld.Plugins.Sdk.Events;
 using FeatherQuilld.Plugins.Sdk.Routing;
 using FeatherQuilld.Utils.Plugins.Events;
 using FeatherQuilld.Utils.Plugins.Routing;
+using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Startup;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -372,16 +373,10 @@ public sealed class PluginManager
         return errors;
     }
 
-    private string ResolvePluginDirectory(string configured)
-    {
-        if (Path.IsPathRooted(configured))
-            return configured;
-
-        if (configured.StartsWith('.') || configured.Contains('/'))
-            return Path.GetFullPath(configured);
-
-        return Path.Combine(_config.System.RootDirectory, configured);
-    }
+    private string ResolvePluginDirectory(string configured) =>
+        Path.IsPathRooted(configured)
+            ? configured
+            : Path.Combine(SystemConfig.DefaultRootDirectory, configured);
 
     private IReadOnlyDictionary<string, object?> GetPluginSettings(string pluginId) =>
         new Dictionary<string, object?>();

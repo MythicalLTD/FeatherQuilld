@@ -14,7 +14,7 @@
     </ItemGroup>
 
     <PropertyGroup>
-        <PluginOutputDir>$(MSBuildProjectDirectory)\..\..\featherquilld-data\plugins\hello</PluginOutputDir>
+        <PluginOutputDir>/var/lib/featherquilld/plugins/hello</PluginOutputDir>
     </PropertyGroup>
 
     <Target Name="DeployPlugin" AfterTargets="Build">

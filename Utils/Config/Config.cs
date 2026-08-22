@@ -1,4 +1,7 @@
 using FeatherQuilld.Utils.Config.Api;
+using FeatherQuilld.Utils.Config.Docker;
+using FeatherQuilld.Utils.Config.Remote;
+using FeatherQuilld.Utils.Config.Sftp;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Plugins;
 using YamlDotNet.Serialization;
@@ -12,7 +15,7 @@ public class Config
     public const string DefaultFileName = "config.yml";
 
     [YamlIgnore]
-    public string FilePath { get; private set; } = DefaultPath();
+    public string FilePath { get; set; } = DefaultPath();
 
     public bool Debug { get; set; }
     public bool Quiet { get; set; }
@@ -23,6 +26,12 @@ public class Config
     public ApiConfig Api { get; set; } = new();
     public SystemConfig System { get; set; } = new();
     public PluginsConfig Plugins { get; set; } = new();
+    public RemoteConfig Remote { get; set; } = new();
+    public SftpConfig Sftp { get; set; } = new();
+    public DockerConfig Docker { get; set; } = new();
+
+    [YamlIgnore]
+    public string BearerToken => $"{TokenId}.{Token}";
 
     public static string DefaultPath() =>
         IoPath.Combine("/etc/featherquilld", DefaultFileName);
@@ -39,6 +48,7 @@ public class Config
         if (!File.Exists(path))
         {
             var config = new Config { FilePath = path };
+            config.ApplyDefaultPaths();
             try
             {
                 config.EnsureDirectories();
@@ -56,9 +66,75 @@ public class Config
         }
 
         var yaml = File.ReadAllText(path);
-        var loaded = CreateDeserializer().Deserialize<Config>(yaml) ?? new Config();
+        var loaded = DeserializeYaml(yaml) ?? new Config();
         loaded.FilePath = path;
         return loaded;
+    }
+
+    public static Config DeserializeYaml(string yaml) =>
+        CreateDeserializer().Deserialize<Config>(yaml) ?? new Config();
+
+    public static string SerializeYaml(Config config) =>
+        CreateSerializer().Serialize(config);
+
+    /// <summary>
+    /// Validates required join/bootstrap fields.
+    /// </summary>
+    public void ValidateJoin()
+    {
+        if (Uuid == Guid.Empty)
+            throw new InvalidOperationException("Join config is missing uuid.");
+
+        if (string.IsNullOrWhiteSpace(TokenId))
+            throw new InvalidOperationException("Join config is missing token_id.");
+
+        if (string.IsNullOrWhiteSpace(Token))
+            throw new InvalidOperationException("Join config is missing token.");
+
+        if (string.IsNullOrWhiteSpace(Remote.Panel))
+            throw new InvalidOperationException("Join config is missing remote.panel.");
+    }
+
+    /// <summary>
+    /// Merges runtime config from the panel. Runtime values win except auth credentials.
+    /// </summary>
+    public void MergeRuntime(Config runtime)
+    {
+        var uuid = Uuid;
+        var tokenId = TokenId;
+        var token = Token;
+        var filePath = FilePath;
+
+        Debug = runtime.Debug;
+        Quiet = runtime.Quiet;
+        AppName = runtime.AppName;
+        Api = runtime.Api;
+        System = runtime.System;
+        Plugins = runtime.Plugins;
+        Remote = runtime.Remote;
+        Sftp = runtime.Sftp;
+        Docker = runtime.Docker;
+
+        Uuid = uuid;
+        TokenId = tokenId;
+        Token = token;
+        FilePath = filePath;
+    }
+
+    /// <summary>
+    /// Applies canonical default paths for a fresh local install.
+    /// </summary>
+    public void ApplyDefaultPaths()
+    {
+        var root = SystemConfig.DefaultRootDirectory;
+
+        System.RootDirectory = root;
+        System.Data = IoPath.Combine(root, "volumes");
+        System.Websites = IoPath.Combine(root, "websites");
+        System.ArchiveDirectory = IoPath.Combine(root, "archives");
+        System.BackupDirectory = IoPath.Combine(root, "backups");
+        System.LogDirectory = SystemConfig.DefaultLogDirectory;
+        Plugins.Directory = SystemConfig.DefaultPluginsDirectory;
     }
 
     public void Save()
@@ -67,7 +143,7 @@ public class Config
         if (!string.IsNullOrEmpty(directory))
             Directory.CreateDirectory(directory);
 
-        var yaml = CreateSerializer().Serialize(this);
+        var yaml = SerializeYaml(this);
         File.WriteAllText(FilePath, yaml);
     }
 
@@ -76,50 +152,38 @@ public class Config
         Directory.CreateDirectory(System.RootDirectory);
         Directory.CreateDirectory(System.LogDirectory);
         Directory.CreateDirectory(System.Data);
+        Directory.CreateDirectory(System.Websites);
         Directory.CreateDirectory(System.ArchiveDirectory);
         Directory.CreateDirectory(System.BackupDirectory);
         Directory.CreateDirectory(System.TmpDirectory);
-
-        var directory = Path.IsPathRooted(Plugins.Directory)
-            ? Plugins.Directory
-            : IoPath.Combine(System.RootDirectory, Plugins.Directory);
-        Directory.CreateDirectory(directory);
+        Directory.CreateDirectory(Plugins.Directory);
     }
+
+    public bool HasPanelCredentials() =>
+        !string.IsNullOrWhiteSpace(Remote.Panel)
+        && !string.IsNullOrWhiteSpace(TokenId)
+        && !string.IsNullOrWhiteSpace(Token);
 
     private static Config CreateLocalFallback()
     {
-        var root = IoPath.GetFullPath("featherquilld-data");
         var config = new Config
         {
             FilePath = IoPath.Combine(Directory.GetCurrentDirectory(), DefaultFileName),
-            System =
-            {
-                RootDirectory = root,
-                LogDirectory = IoPath.Combine(root, "logs"),
-                Data = IoPath.Combine(root, "volumes"),
-                ArchiveDirectory = IoPath.Combine(root, "archives"),
-                BackupDirectory = IoPath.Combine(root, "backups"),
-                TmpDirectory = IoPath.Combine(root, "tmp"),
-                User =
-                {
-                    Rootless = { Enabled = true },
-                    PasswdFile = IoPath.Combine(root, "passwd"),
-                },
-            },
         };
 
+        config.ApplyDefaultPaths();
         config.EnsureDirectories();
         config.Save();
         return config;
     }
 
-    private static ISerializer CreateSerializer() =>
+    internal static ISerializer CreateSerializer() =>
         new SerializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .ConfigureDefaultValuesHandling(DefaultValuesHandling.Preserve)
             .Build();
 
-    private static IDeserializer CreateDeserializer() =>
+    internal static IDeserializer CreateDeserializer() =>
         new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .IgnoreUnmatchedProperties()
