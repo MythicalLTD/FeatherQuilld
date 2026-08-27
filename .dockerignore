@@ -23,3 +23,9 @@
 **/values.dev.yaml
 LICENSE
 README.md
+featherpanel/
+wings/
+fusequota/
+id_rsa
+sync.bash
+**/.cursor

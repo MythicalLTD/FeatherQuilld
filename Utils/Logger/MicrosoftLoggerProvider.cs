@@ -41,7 +41,19 @@ public sealed class MicrosoftLoggerProvider(Logger logger) : ILoggerProvider
 
             if (exception is not null)
             {
-                logger.Error(type, string.IsNullOrEmpty(message) ? exception.Message : message, exception);
+                var text = string.IsNullOrEmpty(message) ? exception.Message : message;
+                // Cancellation during soft shutdown is expected — never escalate to ERROR.
+                if (exception is OperationCanceledException or TaskCanceledException &&
+                    level < LoggerLevel.Error)
+                {
+                    logger.Log(type, level, text);
+                    return;
+                }
+
+                if (level >= LoggerLevel.Error)
+                    logger.Error(type, text, exception);
+                else
+                    logger.Log(type, level, $"{text}: {exception.GetType().Name}: {exception.Message}");
                 return;
             }
 

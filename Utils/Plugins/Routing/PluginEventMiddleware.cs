@@ -1,4 +1,4 @@
-using FeatherQuilld.Plugins.Sdk.Events;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Plugins.Events;
 
 namespace FeatherQuilld.Utils.Plugins.Routing;

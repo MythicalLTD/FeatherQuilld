@@ -196,8 +196,10 @@ public static class HomePage
 
                 <nav>
                   {{docsLink}}
-                  {{Link("/api/system/health", IconPulse, "Health", "Liveness probe")}}
-                  {{Link("/api/system/info", IconInfo, "System Info", "Identity and config")}}
+                  {{Link("/api/system/health", IconPulse, "Health", "Liveness + panel status")}}
+                  {{Link("/api/system", IconInfo, "System", "OS / CPU / version")}}
+                  {{Link("/api/system/utilization", IconInfo, "Utilization", "CPU / memory / disk")}}
+                  {{Link("/api/system/diagnostics", IconBlocks, "Diagnostics", "Self-test checks")}}
                   {{Link("/api/system/plugins", IconBlocks, "Plugins", "Loaded extensions")}}
                 </nav>
 

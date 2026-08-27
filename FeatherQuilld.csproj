@@ -13,17 +13,36 @@
 
     <ItemGroup>
         <Compile Remove="plugins/**" />
-        <Compile Remove="sdk/**" />
+        <Compile Remove="FeatherQuilld.Plugins/**" />
+        <Compile Remove="FeatherQuilld.Plugins.Sdk/**" />
         <Compile Remove="FeatherQuilld.PluginSdk/**" />
+        <Compile Remove="FeatherQuilld.Tests/**" />
+        <Compile Remove="fusequota/**" />
+        <Compile Remove="wings/**" />
+        <Content Remove="fusequota/**" />
+        <Content Remove="wings/**" />
+        <None Remove="fusequota/**" />
+        <None Remove="wings/**" />
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="sdk\FeatherQuilld.Plugins.Sdk\FeatherQuilld.Plugins.Sdk.csproj" />
+        <InternalsVisibleTo Include="FeatherQuilld.Tests" />
     </ItemGroup>
 
     <ItemGroup>
+        <ProjectReference Include="FeatherQuilld.Plugins\FeatherQuilld.Plugins.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="AWSSDK.S3" Version="3.7.400" />
+        <PackageReference Include="Certes" Version="3.0.4" />
+        <PackageReference Include="Cronos" Version="0.8.4" />
+        <PackageReference Include="d0x2a.EmbeddedSsh" Version="1.1.0" />
+        <PackageReference Include="Docker.DotNet" Version="3.125.15" />
+        <PackageReference Include="FxSsh" Version="1.2.0" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
         <PackageReference Include="Newtonsoft.Json" Version="13.0.5-beta1" />
+        <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
         <PackageReference Include="Scalar.AspNetCore" Version="2.16.20" />
         <PackageReference Include="Spectre.Console" Version="0.57.3-alpha.0.7" />
         <PackageReference Include="YamlDotNet" Version="18.1.0" />

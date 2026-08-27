@@ -1,8 +1,8 @@
 using System.Reflection;
 using System.Runtime.Loader;
-using FeatherQuilld.Plugins.Sdk.Abstractions;
-using FeatherQuilld.Plugins.Sdk.Events;
-using FeatherQuilld.Plugins.Sdk.Routing;
+using FeatherQuilld.Plugins.Abstractions;
+using FeatherQuilld.Plugins.Events;
+using FeatherQuilld.Plugins.Routing;
 using FeatherQuilld.Utils.Plugins.Events;
 using FeatherQuilld.Utils.Plugins.Routing;
 using FeatherQuilld.Utils.Config.System;
@@ -15,7 +15,7 @@ using YamlDotNet.Serialization.NamingConventions;
 using ConfigModel = FeatherQuilld.Utils.Config.Config;
 using HostLogger = FeatherQuilld.Utils.Logger.Logger;
 using LoggerTypes = FeatherQuilld.Utils.Logger.LoggerTypes;
-using PluginContext = FeatherQuilld.Plugins.Sdk.Context.PluginContext;
+using PluginContext = FeatherQuilld.Plugins.Context.PluginContext;
 
 namespace FeatherQuilld.Utils.Plugins;
 
@@ -24,8 +24,7 @@ public sealed class PluginManager
 {
     private static readonly HashSet<string> SkippedAssemblies = new(StringComparer.OrdinalIgnoreCase)
     {
-        "FeatherQuilld.Plugins.Sdk",
-        "FeatherQuilld.PluginSdk",
+        "FeatherQuilld.Plugins",
     };
 
     private readonly ConfigModel _config;
@@ -308,14 +307,14 @@ public sealed class PluginManager
         }
     }
 
-    private static FeatherQuilld.Plugins.Sdk.Metadata.PluginMetadata MergeMetadata(
-        FeatherQuilld.Plugins.Sdk.Metadata.PluginMetadata fromPlugin,
+    private static FeatherQuilld.Plugins.Metadata.PluginMetadata MergeMetadata(
+        FeatherQuilld.Plugins.Metadata.PluginMetadata fromPlugin,
         PluginManifest? manifest)
     {
         if (manifest is null)
             return fromPlugin;
 
-        return new FeatherQuilld.Plugins.Sdk.Metadata.PluginMetadata
+        return new FeatherQuilld.Plugins.Metadata.PluginMetadata
         {
             Id = manifest.Id ?? fromPlugin.Id,
             Name = manifest.Name ?? fromPlugin.Name,
@@ -345,7 +344,7 @@ public sealed class PluginManager
     }
 
     private static List<string> Verify(
-        FeatherQuilld.Plugins.Sdk.Metadata.PluginMetadata meta,
+        FeatherQuilld.Plugins.Metadata.PluginMetadata meta,
         Version hostVersion,
         ISet<string> seenIds,
         PluginsConfig config)
@@ -401,7 +400,7 @@ public sealed class PluginManager
 
         protected override Assembly? Load(AssemblyName assemblyName)
         {
-            if (assemblyName.Name is "FeatherQuilld.Plugins.Sdk" or "FeatherQuilld.PluginSdk")
+            if (assemblyName.Name is "FeatherQuilld.Plugins" or "FeatherQuilld.PluginSdk")
                 return typeof(IPlugin).Assembly;
 
             var path = _resolver.ResolveAssemblyToPath(assemblyName);

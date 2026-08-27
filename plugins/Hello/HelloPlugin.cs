@@ -1,7 +1,7 @@
-using FeatherQuilld.Plugins.Sdk.Abstractions;
-using FeatherQuilld.Plugins.Sdk.Context;
-using FeatherQuilld.Plugins.Sdk.Events;
-using FeatherQuilld.Plugins.Sdk.Metadata;
+using FeatherQuilld.Plugins.Abstractions;
+using FeatherQuilld.Plugins.Context;
+using FeatherQuilld.Plugins.Events;
+using FeatherQuilld.Plugins.Metadata;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 

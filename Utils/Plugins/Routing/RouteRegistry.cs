@@ -1,8 +1,8 @@
 using System.Text.RegularExpressions;
-using FeatherQuilld.Plugins.Sdk.Events;
-using FeatherQuilld.Plugins.Sdk.Routing;
+using FeatherQuilld.Plugins.Events;
+using FeatherQuilld.Plugins.Routing;
 using Microsoft.AspNetCore.Http;
-using SdkRouteBuilder = FeatherQuilld.Plugins.Sdk.Routing.RouteBuilder;
+using SdkRouteBuilder = FeatherQuilld.Plugins.Routing.RouteBuilder;
 
 namespace FeatherQuilld.Utils.Plugins.Routing;
 

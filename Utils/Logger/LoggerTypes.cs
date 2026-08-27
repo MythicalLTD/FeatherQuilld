@@ -5,5 +5,9 @@ public enum LoggerTypes
     Application,
     Plugin,
     PluginLoader,
-    WebServer
+    WebServer,
+    WebSpaces,
+    Disk,
+    Proxy,
+    SelfTest,
 }

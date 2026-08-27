@@ -26,14 +26,10 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
-        if (!Request.Headers.TryGetValue("Authorization", out var headerValues))
-            return Task.FromResult(AuthenticateResult.Fail("Missing Authorization header."));
+        var token = ExtractToken();
+        if (string.IsNullOrEmpty(token))
+            return Task.FromResult(AuthenticateResult.Fail("Missing Authorization header or token query."));
 
-        var header = headerValues.ToString();
-        if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-            return Task.FromResult(AuthenticateResult.Fail("Authorization header must use Bearer scheme."));
-
-        var token = header["Bearer ".Length..].Trim();
         if (!string.Equals(token, _config.BearerToken, StringComparison.Ordinal))
             return Task.FromResult(AuthenticateResult.Fail("Invalid bearer token."));
 
@@ -42,5 +38,25 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
         var ticket = new AuthenticationTicket(principal, Scheme.Name);
 
         return Task.FromResult(AuthenticateResult.Success(ticket));
+    }
+
+    private string? ExtractToken()
+    {
+        if (Request.Headers.TryGetValue("Authorization", out var headerValues))
+        {
+            var header = headerValues.ToString();
+            if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                return header["Bearer ".Length..].Trim();
+        }
+
+        // WebSocket clients often pass the bearer via ?token=
+        if (Request.Query.TryGetValue("token", out var queryToken))
+        {
+            var value = queryToken.ToString().Trim();
+            if (!string.IsNullOrEmpty(value))
+                return value;
+        }
+
+        return null;
     }
 }

@@ -10,7 +10,7 @@
     </PropertyGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\sdk\FeatherQuilld.Plugins.Sdk\FeatherQuilld.Plugins.Sdk.csproj" />
+        <ProjectReference Include="..\..\FeatherQuilld.Plugins\FeatherQuilld.Plugins.csproj" />
     </ItemGroup>
 
     <PropertyGroup>

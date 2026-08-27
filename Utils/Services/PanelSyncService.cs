@@ -14,11 +14,11 @@ public sealed class PanelSyncService : BackgroundService
 
     private readonly AppConfig _config;
     private readonly DaemonState _state;
-    private readonly PanelClient _panelClient;
+    private readonly IPanelClient _panelClient;
     private readonly AppLogger? _logger;
     private readonly SemaphoreSlim _syncLock = new(1, 1);
 
-    public PanelSyncService(AppConfig config, DaemonState state, PanelClient panelClient, AppLogger? logger = null)
+    public PanelSyncService(AppConfig config, DaemonState state, IPanelClient panelClient, AppLogger? logger = null)
     {
         _config = config;
         _state = state;
@@ -36,11 +36,18 @@ public sealed class PanelSyncService : BackgroundService
 
         _logger?.Info(LoggerTypes.Application, $"Panel sync started (interval {DefaultPollInterval.TotalSeconds}s).");
 
-        await SyncOnceAsync(stoppingToken);
-
-        using var timer = new PeriodicTimer(DefaultPollInterval);
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        try
+        {
             await SyncOnceAsync(stoppingToken);
+
+            using var timer = new PeriodicTimer(DefaultPollInterval);
+            while (await timer.WaitForNextTickAsync(stoppingToken))
+                await SyncOnceAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Soft shutdown — do not log as panel sync failure.
+        }
     }
 
     public async Task SyncOnceAsync(CancellationToken cancellationToken = default)

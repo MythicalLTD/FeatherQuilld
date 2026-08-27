@@ -14,15 +14,67 @@ public class SystemConfig
     public string Websites { get; set; } = "/var/lib/featherquilld/websites";
     public string ArchiveDirectory { get; set; } = "/var/lib/featherquilld/archives";
 
-    [YamlMember(Alias = "backups")]
+    [YamlMember(Alias = "backup_directory")]
     public string BackupDirectory { get; set; } = "/var/lib/featherquilld/backups";
 
+    public BackupsConfig Backups { get; set; } = new();
+
     public string TmpDirectory { get; set; } = "/tmp/featherquilld";
+    public string EggsDirectory { get; set; } = "/var/lib/featherquilld/eggs";
+    public string VmountDirectory { get; set; } = "/var/lib/featherquilld/vmounts";
+    public string FusequotaPath { get; set; } = "fusequota";
+
+    /// <summary><c>none</c> or <c>fuse_quota</c>. Empty/none + quotas.enabled → fuse_quota.</summary>
+    public string DiskLimiterMode { get; set; } = "none";
+
+    public ProxyConfig Proxy { get; set; } = new();
     public string Username { get; set; } = "featherquilld";
     public string Timezone { get; set; } = "UTC";
     public SystemUserConfig User { get; set; } = new();
     public int DiskCheckInterval { get; set; } = 150;
     public QuotasConfig Quotas { get; set; } = new();
+
+    /// <summary>
+    /// Effective limiter: explicit mode, or FuseQuota when quotas are enabled.
+    /// </summary>
+    [YamlIgnore]
+    public DiskLimiterModeKind EffectiveDiskLimiterMode
+    {
+        get
+        {
+            var mode = (DiskLimiterMode ?? "none").Trim().ToLowerInvariant().Replace('-', '_');
+            if (mode is "fuse_quota" or "fusequota")
+                return DiskLimiterModeKind.FuseQuota;
+            if (Quotas.Enabled)
+                return DiskLimiterModeKind.FuseQuota;
+            return DiskLimiterModeKind.None;
+        }
+    }
+}
+
+public enum DiskLimiterModeKind
+{
+    None,
+    FuseQuota,
+}
+
+public class ProxyConfig
+{
+    public bool Enabled { get; set; } = true;
+    /// <summary><c>caddy</c>, <c>nginx</c>, or <c>traefik</c>.</summary>
+    public string Provider { get; set; } = "caddy";
+    public string ConfigPath { get; set; } = "";
+    public string AcmeEmail { get; set; } = "";
+
+    /// <summary>Use Let's Encrypt staging directory (safer for tests).</summary>
+    [YamlMember(Alias = "acme_staging")]
+    public bool AcmeStaging { get; set; }
+
+    /// <summary>Inclusive low end of loopback backend ports for Docker runtimes.</summary>
+    public int BackendPortMin { get; set; } = 20000;
+
+    /// <summary>Inclusive high end of loopback backend ports for Docker runtimes.</summary>
+    public int BackendPortMax { get; set; } = 29999;
 }
 
 public class SystemUserConfig
@@ -44,4 +96,60 @@ public class RootlessConfig
 public class QuotasConfig
 {
     public bool Enabled { get; set; }
+}
+
+public class BackupsConfig
+{
+    /// <summary><c>local</c>, <c>s3</c>, <c>restic</c>, or <c>pbs</c>.</summary>
+    public string Provider { get; set; } = "local";
+
+    public BackupS3Config S3 { get; set; } = new();
+    public BackupResticConfig Restic { get; set; } = new();
+    public BackupPbsConfig Pbs { get; set; } = new();
+}
+
+public class BackupS3Config
+{
+    public string Endpoint { get; set; } = "";
+    public string Region { get; set; } = "us-east-1";
+    public string Bucket { get; set; } = "featherquilld-backups";
+
+    [YamlMember(Alias = "access_key")]
+    public string AccessKey { get; set; } = "";
+
+    [YamlMember(Alias = "secret_key")]
+    public string SecretKey { get; set; } = "";
+
+    public string Prefix { get; set; } = "webspaces/";
+
+    [YamlMember(Alias = "force_path_style")]
+    public bool ForcePathStyle { get; set; }
+}
+
+
+public class BackupResticConfig
+{
+    /// <summary>restic repository URL (e.g. s3:s3.amazonaws.com/bucket or /var/backups/restic).</summary>
+    public string Repository { get; set; } = "";
+
+    /// <summary>Password for the repository (RESTIC_PASSWORD).</summary>
+    public string Password { get; set; } = "";
+
+    /// <summary>Optional path to restic binary (default: restic on PATH).</summary>
+    public string Binary { get; set; } = "restic";
+}
+
+public class BackupPbsConfig
+{
+    /// <summary>Proxmox Backup Server repository, e.g. user@pbs@host:datastore.</summary>
+    public string Repository { get; set; } = "";
+
+    /// <summary>API token / password for PBS.</summary>
+    public string Password { get; set; } = "";
+
+    /// <summary>Optional fingerprint for TLS verification.</summary>
+    public string Fingerprint { get; set; } = "";
+
+    /// <summary>Optional path to proxmox-backup-client (default on PATH).</summary>
+    public string Binary { get; set; } = "proxmox-backup-client";
 }

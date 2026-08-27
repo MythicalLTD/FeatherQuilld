@@ -6,3 +6,15 @@ riderModule.iml
 logs/
 config.yml
 config.cfg
+
+# IDE / local Rider state
+.idea/
+*.user
+*.DotSettings.user
+
+# Reference clones only — not part of FeatherQuilld
+/wings/
+/fusequota/
+/featherpanel/
+id_rsa
+sync.bash

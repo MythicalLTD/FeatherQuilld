@@ -15,6 +15,9 @@ public class DockerConfig
     public List<string> SystemIps { get; set; } = [];
     public bool EnableNativeKvm { get; set; } = true;
     public DockerLogConfig LogConfig { get; set; } = new();
+
+    /// <summary>Docker engine Unix socket (or <c>unix:///path</c>).</summary>
+    public string Socket { get; set; } = "/var/run/docker.sock";
 }
 
 public class DockerNetworkConfig

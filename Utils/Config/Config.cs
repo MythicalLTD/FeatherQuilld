@@ -104,6 +104,10 @@ public class Config
         var tokenId = TokenId;
         var token = Token;
         var filePath = FilePath;
+        // Wings FORBIDDEN_PATHS "remote" analog: keep local callback URL/paths.
+        var localPanel = Remote.Panel;
+        var localConfigPath = Remote.ConfigPath;
+        var localHealthPath = Remote.HealthPath;
 
         Debug = runtime.Debug;
         Quiet = runtime.Quiet;
@@ -119,6 +123,13 @@ public class Config
         TokenId = tokenId;
         Token = token;
         FilePath = filePath;
+
+        if (!string.IsNullOrWhiteSpace(localPanel))
+            Remote.Panel = localPanel;
+        if (!string.IsNullOrWhiteSpace(localConfigPath))
+            Remote.ConfigPath = localConfigPath;
+        if (!string.IsNullOrWhiteSpace(localHealthPath))
+            Remote.HealthPath = localHealthPath;
     }
 
     /// <summary>
@@ -133,6 +144,8 @@ public class Config
         System.Websites = IoPath.Combine(root, "websites");
         System.ArchiveDirectory = IoPath.Combine(root, "archives");
         System.BackupDirectory = IoPath.Combine(root, "backups");
+        System.EggsDirectory = IoPath.Combine(root, "eggs");
+        System.VmountDirectory = IoPath.Combine(root, "vmounts");
         System.LogDirectory = SystemConfig.DefaultLogDirectory;
         Plugins.Directory = SystemConfig.DefaultPluginsDirectory;
     }
@@ -155,6 +168,9 @@ public class Config
         Directory.CreateDirectory(System.Websites);
         Directory.CreateDirectory(System.ArchiveDirectory);
         Directory.CreateDirectory(System.BackupDirectory);
+        Directory.CreateDirectory(System.EggsDirectory);
+        Directory.CreateDirectory(System.VmountDirectory);
+        Directory.CreateDirectory(IoPath.Combine(System.RootDirectory, "proxy"));
         Directory.CreateDirectory(System.TmpDirectory);
         Directory.CreateDirectory(Plugins.Directory);
     }

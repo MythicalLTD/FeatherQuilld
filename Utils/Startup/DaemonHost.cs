@@ -1,11 +1,16 @@
 using FeatherQuilld.Middleware;
 using FeatherQuilld.Utils.Plugins;
+using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.Remote;
 using FeatherQuilld.Utils.Services;
+using FeatherQuilld.Utils.WebSpaces;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi;
+using Prometheus;
 using Scalar.AspNetCore;
+using System.Threading.RateLimiting;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 using AppLogger = FeatherQuilld.Utils.Logger.Logger;
 using FeatherQuilld.Utils.Logger;
@@ -66,7 +71,22 @@ public sealed class DaemonHost
                     ConfigureOpenApi(builder, config);
 
                 app = builder.Build();
+
+                // Eager-load WebSpaces so FuseQuota remounts / proxy rebuild happen at boot.
+                var spaces = app.Services.GetRequiredService<WebSpaceStore>();
+                var scheduleManager = app.Services.GetRequiredService<WebSpaceScheduleManager>();
+                spaces.BindScheduleManager(scheduleManager);
+
                 return BootStepResult.Merge(loadResult, configureResult);
+            })
+            .Step("Self-tests", reporter =>
+            {
+                ArgumentNullException.ThrowIfNull(app);
+                ArgumentNullException.ThrowIfNull(logger);
+
+                var spaces = app.Services.GetRequiredService<WebSpaceStore>();
+                var diagnostics = app.Services.GetRequiredService<Utils.SystemInfo.DiagnosticsRegistry>();
+                return StartupSelfTest.Run(config, spaces, logger, reporter, diagnostics);
             })
             .Step("Configuring HTTP pipeline", _ =>
             {
@@ -96,6 +116,8 @@ public sealed class DaemonHost
         Logger.Info(LoggerTypes.Application, $"{config.AppName} starting ({App.Environment.EnvironmentName})");
         Logger.Info(LoggerTypes.Application, $"Config → {config.FilePath}");
         Logger.Info(LoggerTypes.Application, $"Logs → {Logger.LogsDirectory}");
+        Logger.Debug(LoggerTypes.Application,
+            $"paths data={config.System.Data} eggs={config.System.EggsDirectory} vmounts={config.System.VmountDirectory}");
         Logger.Info(LoggerTypes.WebServer, $"Listening on {config.Api.Host}:{config.Api.Port}");
 
         if (config.HasPanelCredentials())
@@ -106,6 +128,23 @@ public sealed class DaemonHost
 
         if (Plugins.Plugins.Count > 0)
             Logger.Info(LoggerTypes.PluginLoader, $"{Plugins.Plugins.Count} plugin(s) active");
+
+        var spaces = App.Services.GetService<WebSpaceStore>();
+        if (spaces is not null)
+            Logger.Info(LoggerTypes.WebSpaces, $"{spaces.List().Count} WebSpace(s) loaded");
+
+        if (config.Sftp.Enabled)
+            Logger.Info(LoggerTypes.Application, $"SFTP → 0.0.0.0:{config.Sftp.Port}");
+        else
+            Logger.Info(LoggerTypes.Application, "SFTP disabled");
+
+        Logger.Info(LoggerTypes.Disk,
+            $"Disk limiter effective={config.System.EffectiveDiskLimiterMode} (configured={config.System.DiskLimiterMode})");
+        Logger.Info(LoggerTypes.Proxy,
+            $"Reverse proxy {(config.System.Proxy.Enabled ? "on" : "off")} ({config.System.Proxy.Provider})");
+
+        if (config.Debug)
+            Logger.Debug(LoggerTypes.Application, "Debug logging enabled");
     }
 
     public void Run() => App.Run();
@@ -121,7 +160,67 @@ public sealed class DaemonHost
         builder.Services.AddSingleton(config.Docker);
         builder.Services.AddSingleton<DaemonState>();
         builder.Services.AddSingleton<PanelClient>();
+        builder.Services.AddSingleton<IPanelClient>(sp => sp.GetRequiredService<PanelClient>());
         builder.Services.AddHostedService<PanelSyncService>();
+        builder.Services.AddSingleton<ReverseProxyManager>();
+        builder.Services.AddSingleton<StaticFileServerManager>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<StaticFileServerManager>());
+        builder.Services.AddSingleton(sp =>
+            new Utils.Docker.PortAllocator(config.System.Proxy));
+        builder.Services.AddSingleton(sp =>
+            new Utils.Docker.WebSpaceInstaller(config.Docker, sp.GetService<AppLogger>()));
+        builder.Services.AddSingleton(sp =>
+            new Utils.Docker.WebSpaceRuntime(config.Docker, sp.GetService<AppLogger>()));
+        builder.Services.AddSingleton<WebSpaceStore>();
+        builder.Services.AddSingleton<Utils.WebSpaces.IWebSpaceFsAccess>(sp =>
+            sp.GetRequiredService<WebSpaceStore>());
+        builder.Services.AddSingleton<Utils.WebSpaces.Backups.IBackupObjectStore>(sp =>
+        {
+            var cfg = sp.GetRequiredService<AppConfig>();
+            var provider = (cfg.System.Backups?.Provider ?? "local").Trim().ToLowerInvariant();
+            return provider switch
+            {
+                "s3" => new Utils.WebSpaces.Backups.S3BackupStore(cfg.System),
+                "restic" => new Utils.WebSpaces.Backups.ResticBackupStore(cfg.System),
+                "pbs" => new Utils.WebSpaces.Backups.PbsBackupStore(cfg.System),
+                _ => new Utils.WebSpaces.Backups.LocalBackupStore(cfg.System),
+            };
+        });
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceBackupService>();
+        builder.Services.AddSingleton(sp =>
+            new Utils.WebSpaces.BackupJobProgressService(sp.GetRequiredService<AppConfig>()));
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceUtilizationService>(sp =>
+            new Utils.WebSpaces.WebSpaceUtilizationService(
+                sp.GetRequiredService<AppConfig>().Docker,
+                sp.GetRequiredService<WebSpaceStore>(),
+                sp.GetService<AppLogger>()));
+        builder.Services.AddSingleton(sp =>
+            new Utils.WebSpaces.TransferProgressService(sp.GetRequiredService<AppConfig>()));
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceTransferService>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceFileService>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceScheduleManager>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceActivityReporter>();
+        builder.Services.AddHostedService<Utils.WebSpaces.WebSpaceScheduleHostedService>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceUserAccessService>();
+        builder.Services.AddSingleton<Utils.Auth.ConsoleJwtValidator>();
+        builder.Services.AddSingleton<Utils.SystemInfo.HostMetricsSampler>();
+        builder.Services.AddSingleton<Utils.SystemInfo.DiagnosticsRegistry>();
+        builder.Services.AddHostedService<Utils.Sftp.SftpHostedService>();
+        builder.Services.AddSingleton<Utils.Proxy.NginxAcmeService>();
+
+        builder.Services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.AddPolicy("expensive", context =>
+                RateLimitPartition.GetFixedWindowLimiter(
+                    context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                    _ => new FixedWindowRateLimiterOptions
+                    {
+                        PermitLimit = 20,
+                        Window = TimeSpan.FromMinutes(1),
+                        QueueLimit = 0,
+                    }));
+        });
     }
 
     private static void ConfigureAuthentication(WebApplicationBuilder builder)
@@ -228,8 +327,13 @@ public sealed class DaemonHost
             app.UseHttpsRedirection();
 
         app.UseCors();
+        app.UseRateLimiter();
+        app.UseWebSockets();
         app.UseAuthentication();
         app.UseAuthorization();
+
+        app.UseHttpMetrics();
+        app.MapMetrics().AllowAnonymous();
 
         pluginManager.ConfigurePipeline(app);
 
@@ -255,8 +359,15 @@ public sealed class DaemonHost
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             logger.Info(LoggerTypes.Application, "Shutting down…");
-            pluginManager.OnApplicationStoppingAsync(app.Lifetime.ApplicationStopping)
-                .GetAwaiter().GetResult();
+            try
+            {
+                pluginManager.OnApplicationStoppingAsync(app.Lifetime.ApplicationStopping)
+                    .GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                // Soft shutdown — plugins may observe the stopping token.
+            }
         });
     }
 
