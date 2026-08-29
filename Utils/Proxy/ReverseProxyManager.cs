@@ -1,4 +1,5 @@
 using System.Text;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.WebSpaces;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
@@ -16,13 +17,15 @@ public sealed class ReverseProxyManager
     private readonly AppConfig _config;
     private readonly AppLogger? _logger;
     private readonly NginxAcmeService? _acme;
+    private readonly IEventBus _events;
     private readonly object _gate = new();
 
-    public ReverseProxyManager(AppConfig config, AppLogger? logger = null, NginxAcmeService? acme = null)
+    public ReverseProxyManager(AppConfig config, AppLogger? logger = null, NginxAcmeService? acme = null, IEventBus? events = null)
     {
         _config = config;
         _logger = logger;
         _acme = acme;
+        _events = events.OrNoOp();
     }
 
     public string NormalizedProvider =>
@@ -34,6 +37,24 @@ public sealed class ReverseProxyManager
         };
 
     public void Rebuild(IEnumerable<WebSpace> spaces)
+    {
+        var snapshot = spaces as IList<WebSpace> ?? spaces.ToList();
+        _events.WithHooks(
+            new ProxyRebuildBeforeEvent
+            {
+                WebSpaceCount = snapshot.Count,
+                Provider = NormalizedProvider,
+            },
+            err => new ProxyRebuildAfterEvent
+            {
+                WebSpaceCount = snapshot.Count,
+                Provider = NormalizedProvider,
+                Error = err,
+            },
+            () => RebuildCore(snapshot));
+    }
+
+    private void RebuildCore(IList<WebSpace> spaces)
     {
         if (!_config.System.Proxy.Enabled)
         {
@@ -115,8 +136,7 @@ public sealed class ReverseProxyManager
         var basePath = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota
             ? FeatherQuilld.Utils.WebSpaces.Disk.FuseQuotaLimiter.GetMountPath(_config.System, space.Uuid)
             : Path.Combine(_config.System.Data, space.Uuid.ToString());
-        var doc = string.IsNullOrWhiteSpace(space.DocumentRoot) ? "public" : space.DocumentRoot;
-        return Path.Combine(basePath, doc);
+        return WebSpaceStore.ResolveContentRootPath(basePath, space.DocumentRoot);
     }
 
     private string BuildCaddy(IEnumerable<WebSpace> spaces)

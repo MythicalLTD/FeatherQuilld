@@ -1,6 +1,7 @@
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Logger;
 using FeatherQuilld.Utils.WebSpaces.Backups;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
@@ -16,19 +17,22 @@ public sealed class WebSpaceBackupService
     private readonly IBackupObjectStore _store;
     private readonly BackupJobProgressService? _jobs;
     private readonly AppLogger? _logger;
+    private readonly IEventBus _events;
 
     public WebSpaceBackupService(
         AppConfig config,
         WebSpaceStore spaces,
         IBackupObjectStore store,
         AppLogger? logger = null,
-        BackupJobProgressService? jobs = null)
+        BackupJobProgressService? jobs = null,
+        IEventBus? events = null)
     {
         _config = config;
         _spaces = spaces;
         _store = store;
         _logger = logger;
         _jobs = jobs;
+        _events = events.OrNoOp();
         Directory.CreateDirectory(_config.System.BackupDirectory);
         Directory.CreateDirectory(_config.System.TmpDirectory);
     }
@@ -93,7 +97,18 @@ public sealed class WebSpaceBackupService
 
     public BackupJobState? GetJob(Guid jobId) => _jobs?.Get(jobId);
 
-    private object CreateInternal(Guid uuid, bool stopDuringBackup = false)
+    private object CreateInternal(Guid uuid, bool stopDuringBackup = false) =>
+        _events.WithHooks(
+            new BackupCreateBeforeEvent { WebSpaceUuid = uuid, StopDuringBackup = stopDuringBackup },
+            (result, err) => new BackupCreateAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Result = result,
+                Error = err,
+            },
+            () => CreateInternalCore(uuid, stopDuringBackup));
+
+    private object CreateInternalCore(Guid uuid, bool stopDuringBackup)
     {
         var space = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         var backupUuid = Guid.NewGuid();
@@ -134,18 +149,45 @@ public sealed class WebSpaceBackupService
                 catch (Exception ex) { _logger?.Warning(LoggerTypes.WebSpaces, $"backup restart: {ex.Message}"); }
             }
         }
+    
     }
 
-    public bool Delete(Guid uuid, Guid backupUuid)
+    public bool Delete(Guid uuid, Guid backupUuid) =>
+        _events.WithHooks(
+            new BackupDeleteBeforeEvent { WebSpaceUuid = uuid, BackupUuid = backupUuid },
+            (deleted, err) => new BackupDeleteAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                BackupUuid = backupUuid,
+                Deleted = deleted,
+                Error = err,
+            },
+            () => DeleteCore(uuid, backupUuid));
+
+    private bool DeleteCore(Guid uuid, Guid backupUuid)
     {
         _ = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         return _store.DeleteAsync(uuid, backupUuid).GetAwaiter().GetResult();
+    
     }
 
-    public Task<int> ReconcileAsync(Guid uuid, CancellationToken ct = default)
+    public Task<int> ReconcileAsync(Guid uuid, CancellationToken ct = default) =>
+        _events.WithHooksAsync(
+            new BackupReconcileBeforeEvent { WebSpaceUuid = uuid },
+            (count, err) => new BackupReconcileAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Count = count,
+                Error = err,
+            },
+            token => ReconcileCoreAsync(uuid, token),
+            ct);
+
+    private async Task<int> ReconcileCoreAsync(Guid uuid, CancellationToken ct)
     {
         _ = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
-        return _store.ReconcileAsync(uuid, ct);
+        return await _store.ReconcileAsync(uuid, ct).ConfigureAwait(false);
+    
     }
 
     /// <summary>Open a readable stream for download (caller disposes).</summary>
@@ -168,7 +210,18 @@ public sealed class WebSpaceBackupService
         return null;
     }
 
-    public void Restore(Guid uuid, Guid backupUuid)
+    public void Restore(Guid uuid, Guid backupUuid) =>
+        _events.WithHooks(
+            new BackupRestoreBeforeEvent { WebSpaceUuid = uuid, BackupUuid = backupUuid },
+            err => new BackupRestoreAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                BackupUuid = backupUuid,
+                Error = err,
+            },
+            () => RestoreCore(uuid, backupUuid));
+
+    private void RestoreCore(Guid uuid, Guid backupUuid)
     {
         var space = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         if (!_store.Exists(uuid, backupUuid))
@@ -215,9 +268,21 @@ public sealed class WebSpaceBackupService
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
         }
+    
     }
 
-    public object Import(Guid uuid, Stream archiveStream)
+    public object Import(Guid uuid, Stream archiveStream) =>
+        _events.WithHooks(
+            new BackupImportBeforeEvent { WebSpaceUuid = uuid },
+            (result, err) => new BackupImportAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Result = result,
+                Error = err,
+            },
+            () => ImportCore(uuid, archiveStream));
+
+    private object ImportCore(Guid uuid, Stream archiveStream)
     {
         _ = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         var backupUuid = Guid.NewGuid();
@@ -247,6 +312,7 @@ public sealed class WebSpaceBackupService
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
         }
+    
     }
 
     private static bool WebSpaceRuntimeNeeds(WebSpace space) =>

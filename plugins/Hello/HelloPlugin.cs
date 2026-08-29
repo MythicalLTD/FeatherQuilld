@@ -14,8 +14,8 @@ public sealed class HelloPlugin : IPlugin
     {
         Id = "hello",
         Name = "Hello Plugin",
-        Version = "0.1.0",
-        Description = "Adds a greeting route and hooks the health endpoint.",
+        Version = "0.2.0",
+        Description = "Adds a greeting route and hooks health, power, and route after events.",
         Author = "FeatherQuilld",
         MinHostVersion = "0.1.0",
     };
@@ -36,9 +36,24 @@ public sealed class HelloPlugin : IPlugin
             return HookResult.Continue();
         });
 
+        context.Events.On<WebSpacePowerBeforeEvent>(evt =>
+        {
+            context.Logger.LogInformation(
+                "Power {Action} requested for {Uuid}",
+                evt.Action,
+                evt.WebSpaceUuid);
+            return HookResult.Continue();
+        });
+
         context.Routes.Before("/api/system/*", ctx =>
         {
             context.Logger.LogDebug("Request → {Method} {Path}", ctx.Request.Method, ctx.Request.Path);
+            return HookResult.Continue();
+        });
+
+        context.Routes.After("/api/system/*", (ctx, _) =>
+        {
+            context.Logger.LogDebug("Response ← {StatusCode} {Path}", ctx.Response.StatusCode, ctx.Request.Path);
             return HookResult.Continue();
         });
     }

@@ -222,7 +222,7 @@ public sealed record DaemonHealthResponse(
     [property: JsonPropertyName("panel_reachable")] bool PanelReachable = true,
     [property: JsonPropertyName("last_panel_error")] string? LastPanelError = null,
     [property: JsonPropertyName("webspaces_count")] int WebspacesCount = 0,
-    [property: JsonPropertyName("disk_limiter")] string DiskLimiter = "none",
+    [property: JsonPropertyName("disk_limiter")] string DiskLimiter = "fusequota",
     [property: JsonPropertyName("fusequota_available")] bool FusequotaAvailable = false,
     [property: JsonPropertyName("cpu_percent")] double CpuPercent = 0,
     [property: JsonPropertyName("memory_used_bytes")] ulong MemoryUsedBytes = 0,

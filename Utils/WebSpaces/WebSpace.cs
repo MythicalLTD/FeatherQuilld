@@ -15,7 +15,7 @@ public sealed class WebSpace
     public bool Ssl { get; set; }
     public int BackendPort { get; set; }
     public int ContainerPort { get; set; }
-    public string DocumentRoot { get; set; } = "public";
+    public string DocumentRoot { get; set; } = "";
     public string? ContainerImage { get; set; }
     public string? Startup { get; set; }
     public string? ContainerId { get; set; }

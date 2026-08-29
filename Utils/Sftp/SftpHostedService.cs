@@ -11,6 +11,7 @@ using d0x2a.EmbeddedSsh.HostKeys;
 using d0x2a.EmbeddedSsh.Protocol.Messages;
 using FxSsh;
 using FxSsh.Services;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Logger;
 using FeatherQuilld.Utils.Remote;
 using FeatherQuilld.Utils.WebSpaces;
@@ -31,6 +32,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
     private readonly WebSpaceStore _spaces;
     private readonly IPanelClient _panel;
     private readonly AppLogger? _logger;
+    private readonly IEventBus _events;
     private readonly ConcurrentDictionary<string, SftpAuthResult> _authBySession = new();
     private readonly ConcurrentDictionary<uint, byte> _sftpChannels = new();
     private FxSshServer? _fxServer;
@@ -41,12 +43,14 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         AppConfig config,
         WebSpaceStore spaces,
         IPanelClient panel,
-        AppLogger? logger = null)
+        AppLogger? logger = null,
+        IEventBus? events = null)
     {
         _config = config;
         _spaces = spaces;
         _panel = panel;
         _logger = logger;
+        _events = events.OrNoOp();
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -234,7 +238,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
 
             Directory.CreateDirectory(auth.RootPath);
             await using var transport = new EmbeddedSshTransportChannel(channel);
-            _ = new RootedSftpSession(transport, auth.RootPath, auth.IsReadOnly);
+            _ = OpenSession(transport, auth, auth.User);
             _logger?.Debug(LoggerTypes.Application, $"SFTP subsystem attached root={auth.RootPath}");
 
             while (!ct.IsCancellationRequested && !channel.IsClosed)
@@ -389,7 +393,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         Directory.CreateDirectory(auth.RootPath);
         try
         {
-            _ = new RootedSftpSession(e.Channel, auth.RootPath, auth.IsReadOnly);
+            _ = OpenSession(e.Channel, auth, e.AttachedUserauthArgs?.Username);
             _logger?.Debug(LoggerTypes.Application, $"SFTP subsystem attached root={auth.RootPath}");
         }
         catch (Exception ex)
@@ -401,6 +405,28 @@ public sealed class SftpHostedService : IHostedService, IDisposable
 
     private SftpAuthResult? Authenticate(string authMethod, string username, string password, string? publicKey)
     {
+        try
+        {
+            return _events.WithHooks(
+                new SftpAuthBeforeEvent { Username = username, AuthMethod = authMethod },
+                (result, err) => new SftpAuthAfterEvent
+                {
+                    Username = username,
+                    AuthMethod = authMethod,
+                    WebSpaceUuid = result is not null && Guid.TryParse(result.Server, out var g) ? g : null,
+                    Authenticated = result is not null && err is null,
+                    Error = err,
+                },
+                () => AuthenticateCore(authMethod, username, password, publicKey));
+        }
+        catch (PluginHookCancelledException)
+        {
+            return null;
+        }
+    }
+
+    private SftpAuthResult? AuthenticateCore(string authMethod, string username, string password, string? publicKey)
+    {
         var result = _panel.AuthenticateSftpAsync(authMethod, username, password, publicKey)
             .GetAwaiter().GetResult();
 
@@ -411,7 +437,36 @@ public sealed class SftpHostedService : IHostedService, IDisposable
             return null;
 
         result.RootPath = _spaces.EffectiveFsPath(uuid);
+        if (string.IsNullOrWhiteSpace(result.User))
+            result.User = username;
         return result;
+    }
+
+    private RootedSftpSession OpenSession(object channelOrTransport, SftpAuthResult auth, string? username)
+    {
+        Guid.TryParse(auth.Server, out var uuid);
+        var user = username ?? auth.User ?? "";
+        try
+        {
+            return _events.WithHooks(
+                new SftpSessionOpenBeforeEvent { WebSpaceUuid = uuid, Username = user },
+                (_, err) => new SftpSessionOpenAfterEvent
+                {
+                    WebSpaceUuid = uuid,
+                    Username = user,
+                    Error = err,
+                },
+                () => channelOrTransport switch
+                {
+                    SessionChannel ch => new RootedSftpSession(ch, auth.RootPath, auth.IsReadOnly, uuid, user, _events),
+                    ISftpTransportChannel transport => new RootedSftpSession(transport, auth.RootPath, auth.IsReadOnly, uuid, user, _events),
+                    _ => throw new InvalidOperationException("Unsupported SFTP channel type."),
+                });
+        }
+        catch (PluginHookCancelledException)
+        {
+            throw;
+        }
     }
 
     private sealed class PanelSftpAuthenticator : IAuthenticator

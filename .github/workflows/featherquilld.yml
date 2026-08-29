@@ -6,12 +6,14 @@ on:
       - '**.cs'
       - '**.csproj'
       - '**.sln'
+      - '**.slnx'
       - '.github/workflows/featherquilld.yml'
   pull_request:
     paths:
       - '**.cs'
       - '**.csproj'
       - '**.sln'
+      - '**.slnx'
       - '.github/workflows/featherquilld.yml'
   workflow_dispatch:
 
@@ -34,13 +36,13 @@ jobs:
           dotnet-version: '10.0.x'
 
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore FeatherQuilld.slnx
 
       - name: Build
-        run: dotnet build --no-restore --configuration ${{ matrix.configuration }}
+        run: dotnet build FeatherQuilld.slnx --no-restore --configuration ${{ matrix.configuration }}
 
       - name: Test
-        run: dotnet test --no-build --configuration ${{ matrix.configuration }} --nologo
+        run: dotnet test FeatherQuilld.slnx --no-build --configuration ${{ matrix.configuration }} --nologo
 
   docker-smoke:
     runs-on: ubuntu-latest

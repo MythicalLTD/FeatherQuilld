@@ -9,21 +9,10 @@
         <InformationalVersion>0.1.0</InformationalVersion>
         <Authors>FeatherQuilld</Authors>
         <Description>FeatherQuilld daemon — light as a feather, sharp as a quill.</Description>
+        <!-- Sibling trees live under the Web project root; without excludes the SDK
+             globs them as Content and copies gigabytes into bin/ on every build. -->
+        <DefaultItemExcludes>$(DefaultItemExcludes);FeatherQuilld.Tests/**;FeatherQuilld.Plugins/**;FeatherQuilld.Plugins.Sdk/**;FeatherQuilld.PluginSdk/**;plugins/**;featherpanel/**;fusequota/**;wings/**;deploy/**;scripts/**</DefaultItemExcludes>
     </PropertyGroup>
-
-    <ItemGroup>
-        <Compile Remove="plugins/**" />
-        <Compile Remove="FeatherQuilld.Plugins/**" />
-        <Compile Remove="FeatherQuilld.Plugins.Sdk/**" />
-        <Compile Remove="FeatherQuilld.PluginSdk/**" />
-        <Compile Remove="FeatherQuilld.Tests/**" />
-        <Compile Remove="fusequota/**" />
-        <Compile Remove="wings/**" />
-        <Content Remove="fusequota/**" />
-        <Content Remove="wings/**" />
-        <None Remove="fusequota/**" />
-        <None Remove="wings/**" />
-    </ItemGroup>
 
     <ItemGroup>
         <InternalsVisibleTo Include="FeatherQuilld.Tests" />

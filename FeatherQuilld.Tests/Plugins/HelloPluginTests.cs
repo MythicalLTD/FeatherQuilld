@@ -16,7 +16,7 @@ public class HelloPluginTests
         var plugin = new HelloPlugin();
         Assert.Equal("hello", plugin.Metadata.Id);
         Assert.Equal("Hello Plugin", plugin.Metadata.Name);
-        Assert.Equal("0.1.0", plugin.Metadata.Version);
+        Assert.Equal("0.2.0", plugin.Metadata.Version);
         Assert.False(string.IsNullOrWhiteSpace(plugin.Metadata.Author));
     }
 

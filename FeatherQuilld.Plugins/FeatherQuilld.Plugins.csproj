@@ -6,8 +6,8 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <RootNamespace>FeatherQuilld.Plugins</RootNamespace>
         <AssemblyName>FeatherQuilld.Plugins</AssemblyName>
-        <Version>0.1.0</Version>
-        <Description>SDK for FeatherQuilld plugins — lifecycle, events, and routes.</Description>
+        <Version>0.2.0</Version>
+        <Description>SDK for FeatherQuilld plugins — lifecycle, domain events, and routes.</Description>
     </PropertyGroup>
 
     <ItemGroup>

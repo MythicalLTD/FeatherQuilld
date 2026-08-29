@@ -42,12 +42,18 @@ public class RouteRegistryTests
     }
 
     [Fact]
-    public void ApplyAlterations_MatchesPattern()
+    public async Task RunAfterHooks_MatchesAndRuns()
     {
         var reg = new RouteRegistry();
-        reg.MapGet("/api/hello", () => "h");
-        reg.Alter("/api/hello", d => d.Name = "altered");
-        reg.ApplyAlterations();
-        Assert.Equal("altered", reg.Routes[0].Name);
+        var ran = false;
+        reg.After("/api/*", (_, _) =>
+        {
+            ran = true;
+            return HookResult.Continue();
+        });
+        var ctx = new DefaultHttpContext();
+        ctx.Request.Path = "/api/hello";
+        await reg.RunAfterHooksAsync(ctx, null);
+        Assert.True(ran);
     }
 }

@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Text;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.IO;
 using FxSsh.Services;
 
@@ -61,6 +62,9 @@ public sealed class RootedSftpSession : IDisposable
     private readonly ISftpTransportChannel _channel;
     private readonly string _root;
     private readonly bool _readOnly;
+    private readonly Guid _webSpaceUuid;
+    private readonly string _username;
+    private readonly IEventBus _events;
     private readonly object _ioLock = new();
     private readonly List<byte> _recv = new(16 * 1024);
     private readonly ConcurrentDictionary<string, OpenHandle> _handles = new();
@@ -72,7 +76,29 @@ public sealed class RootedSftpSession : IDisposable
     {
     }
 
+    public RootedSftpSession(
+        SessionChannel channel,
+        string rootPath,
+        bool readOnly,
+        Guid webSpaceUuid,
+        string username,
+        IEventBus? events)
+        : this(new FxSshTransportChannel(channel), rootPath, readOnly, webSpaceUuid, username, events)
+    {
+    }
+
     public RootedSftpSession(ISftpTransportChannel channel, string rootPath, bool readOnly)
+        : this(channel, rootPath, readOnly, Guid.Empty, "", null)
+    {
+    }
+
+    public RootedSftpSession(
+        ISftpTransportChannel channel,
+        string rootPath,
+        bool readOnly,
+        Guid webSpaceUuid,
+        string username,
+        IEventBus? events)
     {
         _channel = channel ?? throw new ArgumentNullException(nameof(channel));
         if (string.IsNullOrWhiteSpace(rootPath))
@@ -81,6 +107,9 @@ public sealed class RootedSftpSession : IDisposable
         Directory.CreateDirectory(rootPath);
         _root = RootedPath.CanonicalizeRoot(RootedPath.ResolveExisting(Path.GetFullPath(rootPath)));
         _readOnly = readOnly;
+        _webSpaceUuid = webSpaceUuid;
+        _username = username ?? "";
+        _events = events.OrNoOp();
 
         Directory.CreateDirectory(_root);
 
@@ -100,6 +129,33 @@ public sealed class RootedSftpSession : IDisposable
         foreach (var h in _handles.Values)
             h.Dispose();
         _handles.Clear();
+
+        if (_webSpaceUuid != Guid.Empty)
+        {
+            _ = _events.Emit(new SftpSessionCloseAfterEvent
+            {
+                WebSpaceUuid = _webSpaceUuid,
+                Username = _username,
+            });
+        }
+    }
+
+    private bool EmitMutatingBefore<TBefore, TAfter>(
+        TBefore before,
+        Func<Exception?, TAfter> afterFactory,
+        Action action)
+        where TBefore : class
+        where TAfter : class
+    {
+        try
+        {
+            _events.WithHooks(before, afterFactory, action);
+            return true;
+        }
+        catch (PluginHookCancelledException)
+        {
+            return false;
+        }
     }
 
     private void OnChannelClosed(object? sender, EventArgs e) => Dispose();
@@ -525,11 +581,23 @@ public sealed class RootedSftpSession : IDisposable
             return;
         }
 
+        var virt = RootedPath.ToVirtual(_root, h.Path);
         try
         {
-            h.Stream.Seek((long)offset, SeekOrigin.Begin);
-            h.Stream.Write(data, 0, data.Length);
-            h.Stream.Flush();
+            if (!EmitMutatingBefore(
+                    new SftpWriteBeforeEvent { WebSpaceUuid = _webSpaceUuid, Path = virt },
+                    err => new SftpWriteAfterEvent { WebSpaceUuid = _webSpaceUuid, Path = virt, Error = err },
+                    () =>
+                    {
+                        h.Stream.Seek((long)offset, SeekOrigin.Begin);
+                        h.Stream.Write(data, 0, data.Length);
+                        h.Stream.Flush();
+                    }))
+            {
+                SendStatus(id, FxPermissionDenied, "cancelled by plugin");
+                return;
+            }
+
             SendStatus(id, FxOk, "OK");
         }
         catch
@@ -550,7 +618,7 @@ public sealed class RootedSftpSession : IDisposable
 
         var path = r.ReadString();
         _ = r.ReadAttrs();
-        if (!TryMapPath(path, out var full, out _))
+        if (!TryMapPath(path, out var full, out var virt))
         {
             SendStatus(id, FxNoSuchFile, "invalid path");
             return;
@@ -558,14 +626,25 @@ public sealed class RootedSftpSession : IDisposable
 
         try
         {
-            if (Directory.Exists(full))
+            if (!EmitMutatingBefore(
+                    new SftpMkdirBeforeEvent { WebSpaceUuid = _webSpaceUuid, Path = virt },
+                    err => new SftpMkdirAfterEvent { WebSpaceUuid = _webSpaceUuid, Path = virt, Error = err },
+                    () =>
+                    {
+                        if (Directory.Exists(full))
+                            throw new IOException("already exists");
+                        Directory.CreateDirectory(full);
+                    }))
             {
-                SendStatus(id, FxFailure, "already exists");
+                SendStatus(id, FxPermissionDenied, "cancelled by plugin");
                 return;
             }
 
-            Directory.CreateDirectory(full);
             SendStatus(id, FxOk, "OK");
+        }
+        catch (IOException)
+        {
+            SendStatus(id, FxFailure, "already exists");
         }
         catch (UnauthorizedAccessException)
         {
@@ -588,7 +667,7 @@ public sealed class RootedSftpSession : IDisposable
         }
 
         var path = r.ReadString();
-        if (!TryMapPath(path, out var full, out _))
+        if (!TryMapPath(path, out var full, out var virt))
         {
             SendStatus(id, FxNoSuchFile, "invalid path");
             return;
@@ -602,7 +681,15 @@ public sealed class RootedSftpSession : IDisposable
                 return;
             }
 
-            Directory.Delete(full, recursive: false);
+            if (!EmitMutatingBefore(
+                    new SftpRmdirBeforeEvent { WebSpaceUuid = _webSpaceUuid, Path = virt },
+                    err => new SftpRmdirAfterEvent { WebSpaceUuid = _webSpaceUuid, Path = virt, Error = err },
+                    () => Directory.Delete(full, recursive: false)))
+            {
+                SendStatus(id, FxPermissionDenied, "cancelled by plugin");
+                return;
+            }
+
             SendStatus(id, FxOk, "OK");
         }
         catch (IOException)
@@ -630,7 +717,7 @@ public sealed class RootedSftpSession : IDisposable
         }
 
         var path = r.ReadString();
-        if (!TryMapPath(path, out var full, out _))
+        if (!TryMapPath(path, out var full, out var virt))
         {
             SendStatus(id, FxNoSuchFile, "invalid path");
             return;
@@ -638,15 +725,22 @@ public sealed class RootedSftpSession : IDisposable
 
         try
         {
-            if (File.Exists(full))
-            {
-                File.Delete(full);
-                SendStatus(id, FxOk, "OK");
-            }
-            else
+            if (!File.Exists(full))
             {
                 SendStatus(id, FxNoSuchFile, "no such file");
+                return;
             }
+
+            if (!EmitMutatingBefore(
+                    new SftpRemoveBeforeEvent { WebSpaceUuid = _webSpaceUuid, Path = virt },
+                    err => new SftpRemoveAfterEvent { WebSpaceUuid = _webSpaceUuid, Path = virt, Error = err },
+                    () => File.Delete(full)))
+            {
+                SendStatus(id, FxPermissionDenied, "cancelled by plugin");
+                return;
+            }
+
+            SendStatus(id, FxOk, "OK");
         }
         catch (UnauthorizedAccessException)
         {
@@ -670,7 +764,7 @@ public sealed class RootedSftpSession : IDisposable
 
         var oldPath = r.ReadString();
         var newPath = r.ReadString();
-        if (!TryMapPath(oldPath, out var oldFull, out _) || !TryMapPath(newPath, out var newFull, out _))
+        if (!TryMapPath(oldPath, out var oldFull, out var oldVirt) || !TryMapPath(newPath, out var newFull, out var newVirt))
         {
             SendStatus(id, FxNoSuchFile, "invalid path");
             return;
@@ -678,20 +772,34 @@ public sealed class RootedSftpSession : IDisposable
 
         try
         {
-            if (File.Exists(oldFull))
-            {
-                File.Move(oldFull, newFull);
-                SendStatus(id, FxOk, "OK");
-            }
-            else if (Directory.Exists(oldFull))
-            {
-                Directory.Move(oldFull, newFull);
-                SendStatus(id, FxOk, "OK");
-            }
-            else
+            if (!File.Exists(oldFull) && !Directory.Exists(oldFull))
             {
                 SendStatus(id, FxNoSuchFile, "no such file");
+                return;
             }
+
+            if (!EmitMutatingBefore(
+                    new SftpRenameBeforeEvent { WebSpaceUuid = _webSpaceUuid, From = oldVirt, To = newVirt },
+                    err => new SftpRenameAfterEvent
+                    {
+                        WebSpaceUuid = _webSpaceUuid,
+                        From = oldVirt,
+                        To = newVirt,
+                        Error = err,
+                    },
+                    () =>
+                    {
+                        if (File.Exists(oldFull))
+                            File.Move(oldFull, newFull);
+                        else
+                            Directory.Move(oldFull, newFull);
+                    }))
+            {
+                SendStatus(id, FxPermissionDenied, "cancelled by plugin");
+                return;
+            }
+
+            SendStatus(id, FxOk, "OK");
         }
         catch (UnauthorizedAccessException)
         {
@@ -715,13 +823,21 @@ public sealed class RootedSftpSession : IDisposable
 
         var path = r.ReadString();
         var attrs = r.ReadAttrs();
-        if (!TryMapPath(path, out var full, out _))
+        if (!TryMapPath(path, out var full, out var virt))
         {
             SendStatus(id, FxNoSuchFile, "invalid path");
             return;
         }
 
-        ApplyAttrsPartial(full, attrs);
+        if (!EmitMutatingBefore(
+                new SftpSetstatBeforeEvent { WebSpaceUuid = _webSpaceUuid, Path = virt },
+                err => new SftpSetstatAfterEvent { WebSpaceUuid = _webSpaceUuid, Path = virt, Error = err },
+                () => ApplyAttrsPartial(full, attrs)))
+        {
+            SendStatus(id, FxPermissionDenied, "cancelled by plugin");
+            return;
+        }
+
         SendStatus(id, FxOk, "OK");
     }
 
@@ -743,7 +859,16 @@ public sealed class RootedSftpSession : IDisposable
             return;
         }
 
-        ApplyAttrsPartial(h.Path, attrs);
+        var virt = RootedPath.ToVirtual(_root, h.Path);
+        if (!EmitMutatingBefore(
+                new SftpSetstatBeforeEvent { WebSpaceUuid = _webSpaceUuid, Path = virt },
+                err => new SftpSetstatAfterEvent { WebSpaceUuid = _webSpaceUuid, Path = virt, Error = err },
+                () => ApplyAttrsPartial(h.Path, attrs)))
+        {
+            SendStatus(id, FxPermissionDenied, "cancelled by plugin");
+            return;
+        }
+
         SendStatus(id, FxOk, "OK");
     }
 

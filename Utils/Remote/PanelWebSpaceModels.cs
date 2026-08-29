@@ -90,7 +90,7 @@ public sealed class PanelWebSpaceBuild
 public sealed class PanelWebSpaceMeta
 {
     [JsonPropertyName("document_root")]
-    public string DocumentRoot { get; set; } = "public";
+    public string DocumentRoot { get; set; } = "";
 }
 
 public sealed class PanelInstallScript

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Docker;
 using FeatherQuilld.Utils.Proxy;
@@ -33,6 +34,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     private readonly NginxAcmeService? _acme;
     private readonly StaticFileServerManager? _staticFiles;
     private readonly AppLogger? _logger;
+    private readonly IEventBus _events;
     private WebSpaceScheduleManager? _schedules;
     private readonly ConcurrentDictionary<Guid, WebSpace> _spaces = new();
     private readonly object _mutateGate = new();
@@ -46,7 +48,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         WebSpaceRuntime runtime,
         AppLogger? logger = null,
         NginxAcmeService? acme = null,
-        StaticFileServerManager? staticFiles = null)
+        StaticFileServerManager? staticFiles = null,
+        IEventBus? events = null)
     {
         _config = config;
         _panel = panel;
@@ -57,6 +60,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         _runtime = runtime;
         _logger = logger;
         _acme = acme;
+        _events = events.OrNoOp();
 
         Directory.CreateDirectory(_config.System.Data);
         Directory.CreateDirectory(_config.System.VmountDirectory);
@@ -114,6 +118,14 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     public WebSpace CreateFromPanel(CreateWebSpaceRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
+        return _events.WithHooks(
+            new WebSpaceCreateBeforeEvent { WebSpaceUuid = request.Uuid },
+            (_, err) => new WebSpaceCreateAfterEvent { WebSpaceUuid = request.Uuid, Error = err },
+            () => CreateFromPanelCore(request));
+    }
+
+    private WebSpace CreateFromPanelCore(CreateWebSpaceRequest request)
+    {
         if (request.Uuid == Guid.Empty)
             throw new ArgumentException("uuid is required.");
 
@@ -165,9 +177,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 Ssl = remote.Ssl,
                 BackendPort = remote.BackendPort,
                 ContainerPort = containerPort,
-                DocumentRoot = string.IsNullOrWhiteSpace(remote.Meta?.DocumentRoot)
-                    ? "public"
-                    : remote.Meta!.DocumentRoot.Trim().Trim('/'),
+                DocumentRoot = NormalizeDocumentRoot(remote.Meta?.DocumentRoot),
                 ContainerImage = string.IsNullOrWhiteSpace(remote.Webplate?.DockerImage)
                     ? null
                     : remote.Webplate!.DockerImage.Trim(),
@@ -273,7 +283,13 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     }
 
     /// <summary>Pull latest panel config and apply domains, ssl, disk, document_root, proxy.</summary>
-    public WebSpace ApplyConfigFromPanel(Guid uuid)
+    public WebSpace ApplyConfigFromPanel(Guid uuid) =>
+        _events.WithHooks(
+            new WebSpaceSyncBeforeEvent { WebSpaceUuid = uuid },
+            (_, err) => new WebSpaceSyncAfterEvent { WebSpaceUuid = uuid, Error = err },
+            () => ApplyConfigFromPanelCore(uuid));
+
+    private WebSpace ApplyConfigFromPanelCore(Guid uuid)
     {
         lock (_mutateGate)
         {
@@ -301,9 +317,9 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             space.Domains = domains;
             space.Ssl = remote.Ssl;
             space.DiskLimitBytes = diskBytes;
-            space.DocumentRoot = string.IsNullOrWhiteSpace(remote.Meta?.DocumentRoot)
+            space.DocumentRoot = remote.Meta is null
                 ? space.DocumentRoot
-                : remote.Meta!.DocumentRoot.Trim().Trim('/');
+                : NormalizeDocumentRoot(remote.Meta.DocumentRoot);
             space.UpdatedAt = DateTimeOffset.UtcNow;
 
             var useFuse = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota;
@@ -323,18 +339,22 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         }
     }
 
-    public WebSpace Power(Guid uuid, string action)
-    {
-        lock (_mutateGate)
-        {
-            var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
-            PowerInternal(space, action);
-            Persist(space);
-            SyncPanelState(space);
-            RebuildProxy();
-            return space;
-        }
-    }
+    public WebSpace Power(Guid uuid, string action) =>
+        _events.WithHooks(
+            new WebSpacePowerBeforeEvent { WebSpaceUuid = uuid, Action = action },
+            (_, err) => new WebSpacePowerAfterEvent { WebSpaceUuid = uuid, Action = action, Error = err },
+            () =>
+            {
+                lock (_mutateGate)
+                {
+                    var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+                    PowerInternal(space, action);
+                    Persist(space);
+                    SyncPanelState(space);
+                    RebuildProxy();
+                    return space;
+                }
+            });
 
     public WebSpaceStatusResponse Status(Guid uuid)
     {
@@ -353,7 +373,18 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         return ToStatus(space);
     }
 
-    public bool Delete(Guid uuid)
+    public bool Delete(Guid uuid) =>
+        _events.WithHooks(
+            new WebSpaceDeleteBeforeEvent { WebSpaceUuid = uuid },
+            (deleted, err) => new WebSpaceDeleteAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Deleted = deleted,
+                Error = err,
+            },
+            () => DeleteCore(uuid));
+
+    private bool DeleteCore(Guid uuid)
     {
         lock (_mutateGate)
         {
@@ -440,7 +471,19 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     }
 
     /// <summary>Force ACME reissue for this WebSpace's domains, then rebuild the proxy.</summary>
-    public async Task<object> RenewSslAsync(Guid uuid, CancellationToken cancellationToken = default)
+    public Task<object> RenewSslAsync(Guid uuid, CancellationToken cancellationToken = default) =>
+        _events.WithHooksAsync(
+            new WebSpaceSslRenewBeforeEvent { WebSpaceUuid = uuid },
+            (result, err) => new WebSpaceSslRenewAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Result = result,
+                Error = err,
+            },
+            ct => RenewSslCoreAsync(uuid, ct),
+            cancellationToken);
+
+    private async Task<object> RenewSslCoreAsync(Guid uuid, CancellationToken cancellationToken)
     {
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         if (!space.Ssl)
@@ -553,20 +596,69 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     }
 
     /// <summary>Send a console command to the WebSpace runtime stdin.</summary>
-    public async Task SendConsoleCommandAsync(
+    public Task SendConsoleCommandAsync(
         Guid uuid,
         string command,
-        CancellationToken cancellationToken = default)
-    {
-        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
-        if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
-            throw new InvalidOperationException("Static WebSpace has no console stdin.");
+        CancellationToken cancellationToken = default) =>
+        _events.WithHooksAsync(
+            new WebSpaceConsoleCommandBeforeEvent { WebSpaceUuid = uuid, Command = command ?? "" },
+            err => new WebSpaceConsoleCommandAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Command = command ?? "",
+                Error = err,
+            },
+            async ct =>
+            {
+                var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+                if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
+                    throw new InvalidOperationException("Static WebSpace has no console stdin.");
 
-        await _runtime.SendStdinAsync(uuid, command ?? "", cancellationToken);
-    }
+                await _runtime.SendStdinAsync(uuid, command ?? "", ct);
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// Run a one-shot command in the WebSpace container (docker exec).
+    /// For schedule tasks such as WordPress / WHMCS cron.
+    /// </summary>
+    public Task<(long ExitCode, string Output)> ExecCommandAsync(
+        Guid uuid,
+        string command,
+        CancellationToken cancellationToken = default) =>
+        _events.WithHooksAsync(
+            new WebSpaceExecBeforeEvent { WebSpaceUuid = uuid, Command = command ?? "" },
+            (result, err) => new WebSpaceExecAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Command = command ?? "",
+                ExitCode = result.ExitCode,
+                Output = result.Output,
+                Error = err,
+            },
+            async ct =>
+            {
+                var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+                if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
+                    throw new InvalidOperationException("Static WebSpace cannot exec schedule commands.");
+
+                return await _runtime.ExecCommandAsync(uuid, space.Runtime, command ?? "", ct);
+            },
+            cancellationToken);
 
     /// <summary>Stop runtime, optionally wipe files, re-run install from panel.</summary>
-    public WebSpace Reinstall(Guid uuid, bool wipeFiles = true, bool startOnCompletion = false)
+    public WebSpace Reinstall(Guid uuid, bool wipeFiles = true, bool startOnCompletion = false) =>
+        _events.WithHooks(
+            new WebSpaceReinstallBeforeEvent
+            {
+                WebSpaceUuid = uuid,
+                WipeFiles = wipeFiles,
+                StartOnCompletion = startOnCompletion,
+            },
+            (_, err) => new WebSpaceReinstallAfterEvent { WebSpaceUuid = uuid, Error = err },
+            () => ReinstallCore(uuid, wipeFiles, startOnCompletion));
+
+    private WebSpace ReinstallCore(Guid uuid, bool wipeFiles, bool startOnCompletion)
     {
         lock (_mutateGate)
         {
@@ -812,8 +904,10 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
 
     private static void SeedDocumentRoot(WebSpace space, string dataPath)
     {
-        var root = string.IsNullOrWhiteSpace(space.DocumentRoot) ? "public" : space.DocumentRoot;
-        var index = Path.Combine(dataPath, root, "index.html");
+        var rel = NormalizeDocumentRoot(space.DocumentRoot);
+        var index = string.IsNullOrEmpty(rel)
+            ? Path.Combine(dataPath, "index.html")
+            : Path.Combine(dataPath, rel, "index.html");
         Directory.CreateDirectory(Path.GetDirectoryName(index)!);
         if (File.Exists(index))
             return;
@@ -826,6 +920,22 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
              <body><h1>{space.Name}</h1><p>WebSpace {space.Uuid} · webplate <code>{space.WebPlateId}</code> ({space.Runtime})</p></body>
              </html>
              """);
+    }
+
+    /// <summary>Blank / "." → site root (empty relative path).</summary>
+    internal static string NormalizeDocumentRoot(string? documentRoot)
+    {
+        if (string.IsNullOrWhiteSpace(documentRoot))
+            return "";
+        var trimmed = documentRoot.Trim().Trim('/');
+        return trimmed is "" or "." ? "" : trimmed;
+    }
+
+    /// <summary>Resolve absolute content path; blank document root uses the WebSpace data root.</summary>
+    internal static string ResolveContentRootPath(string basePath, string? documentRoot)
+    {
+        var rel = NormalizeDocumentRoot(documentRoot);
+        return string.IsNullOrEmpty(rel) ? basePath : Path.Combine(basePath, rel);
     }
 
     private void EnsureDomainsAvailable(IEnumerable<string> domains, Guid? except)

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using FeatherQuilld.Plugins.Events;
 using System.Net;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Docker;
@@ -23,14 +24,16 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
 {
     private readonly AppConfig _config;
     private readonly AppLogger? _logger;
+    private readonly IEventBus _events;
     private readonly ConcurrentDictionary<Guid, RunningServer> _servers = new();
     private readonly object _gate = new();
     private bool _disposed;
 
-    public StaticFileServerManager(AppConfig config, AppLogger? logger = null)
+    public StaticFileServerManager(AppConfig config, AppLogger? logger = null, IEventBus? events = null)
     {
         _config = config;
         _logger = logger;
+        _events = events.OrNoOp();
     }
 
     public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
@@ -52,6 +55,15 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
     /// Start/stop/reload loopback file servers to match current Traefik static WebSpaces.
     /// </summary>
     public void Sync(IEnumerable<WebSpace> spaces)
+    {
+        var snapshot = spaces as IList<WebSpace> ?? spaces.ToList();
+        _events.WithHooks(
+            new StaticFileSyncBeforeEvent { WebSpaceCount = snapshot.Count },
+            err => new StaticFileSyncAfterEvent { WebSpaceCount = snapshot.Count, Error = err },
+            () => SyncCore(snapshot));
+    }
+
+    private void SyncCore(IEnumerable<WebSpace> spaces)
     {
         if (_disposed)
             return;
@@ -119,6 +131,7 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
                 }
             }
         }
+    
     }
 
     private RunningServer StartServer(Guid uuid, int port, string root)
@@ -180,8 +193,7 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
         var basePath = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota
             ? FuseQuotaLimiter.GetMountPath(_config.System, space.Uuid)
             : Path.Combine(_config.System.Data, space.Uuid.ToString());
-        var doc = string.IsNullOrWhiteSpace(space.DocumentRoot) ? "public" : space.DocumentRoot;
-        return Path.Combine(basePath, doc);
+        return WebSpaceStore.ResolveContentRootPath(basePath, space.DocumentRoot);
     }
 
     public void Dispose()

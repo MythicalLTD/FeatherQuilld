@@ -1,6 +1,7 @@
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Net.Http.Headers;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Docker;
 using FeatherQuilld.Utils.Logger;
 using FeatherQuilld.Utils.Remote;
@@ -18,6 +19,7 @@ public sealed class WebSpaceTransferService
     private readonly TransferProgressService _progress;
     private readonly HttpClient _http;
     private readonly AppLogger? _logger;
+    private readonly IEventBus _events;
 
     public WebSpaceTransferService(
         AppConfig config,
@@ -25,7 +27,8 @@ public sealed class WebSpaceTransferService
         IPanelClient panel,
         TransferProgressService? progress = null,
         HttpClient? http = null,
-        AppLogger? logger = null)
+        AppLogger? logger = null,
+        IEventBus? events = null)
     {
         _config = config;
         _spaces = spaces;
@@ -33,6 +36,7 @@ public sealed class WebSpaceTransferService
         _progress = progress ?? new TransferProgressService();
         _http = http ?? CreateHttpClient();
         _logger = logger;
+        _events = events.OrNoOp();
     }
 
     public TransferProgressState? GetProgress(Guid uuid) => _progress.Get(uuid);
@@ -43,13 +47,26 @@ public sealed class WebSpaceTransferService
     /// <summary>
     /// Stop runtime, stream tar.gz to destination <paramref name="uploadUrl"/>, delete local on success.
     /// </summary>
-    public async Task OutgoingAsync(
+    public Task OutgoingAsync(
         Guid uuid,
         string uploadUrl,
         string bearerToken,
         bool startOnCompletion = true,
         bool includeBackups = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        _events.WithHooksAsync(
+            new TransferOutgoingBeforeEvent { WebSpaceUuid = uuid, UploadUrl = uploadUrl, StartOnCompletion = startOnCompletion },
+            err => new TransferOutgoingAfterEvent { WebSpaceUuid = uuid, Error = err },
+            token => OutgoingCoreAsync(uuid, uploadUrl, bearerToken, startOnCompletion, includeBackups, token),
+            cancellationToken);
+
+    private async Task OutgoingCoreAsync(
+        Guid uuid,
+        string uploadUrl,
+        string bearerToken,
+        bool startOnCompletion,
+        bool includeBackups,
+        CancellationToken cancellationToken)
     {
         _progress.MarkRunning(uuid, "outgoing");
         var space = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
@@ -129,14 +146,26 @@ public sealed class WebSpaceTransferService
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
             try { if (Directory.Exists(stageDir)) Directory.Delete(stageDir, recursive: true); } catch { /* ignore */ }
         }
+    
     }
 
     /// <summary>Accept archive on this node; extract and register WebSpace from panel config.</summary>
-    public async Task IncomingAsync(
+    public Task IncomingAsync(
         Guid uuid,
         Stream archive,
         bool startOnCompletion,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        _events.WithHooksAsync(
+            new TransferIncomingBeforeEvent { WebSpaceUuid = uuid, StartOnCompletion = startOnCompletion },
+            err => new TransferIncomingAfterEvent { WebSpaceUuid = uuid, Error = err },
+            token => IncomingCoreAsync(uuid, archive, startOnCompletion, token),
+            cancellationToken);
+
+    private async Task IncomingCoreAsync(
+        Guid uuid,
+        Stream archive,
+        bool startOnCompletion,
+        CancellationToken cancellationToken)
     {
         _progress.MarkRunning(uuid, "incoming", "Receiving archive…");
         try
@@ -174,6 +203,7 @@ public sealed class WebSpaceTransferService
             _progress.MarkFailed(uuid, "incoming", ex.Message);
             throw;
         }
+    
     }
 
     /// <summary>Stage WebSpace files plus optional local backup sidecar under <c>__quilld_backups__</c>.</summary>

@@ -1,7 +1,7 @@
 id: hello
 name: Hello Plugin
-version: 0.1.0
-description: Adds a greeting route and hooks system requests.
+version: 0.2.0
+description: Adds a greeting route and hooks health, power, and route after events.
 author: FeatherQuilld
 main: FeatherQuilld.Plugins.Hello.dll
 enabled: true

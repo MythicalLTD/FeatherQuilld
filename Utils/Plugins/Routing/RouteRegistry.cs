@@ -32,10 +32,10 @@ public sealed class RouteRegistry : IRouteRegistry
         Map("PATCH", pattern, handler, name);
 
     public void Before(string pattern, Func<HttpContext, HookResult> hook, int priority = 0) =>
-        _beforeHooks.Add(new RouteHook(pattern, priority, (ctx, _) => Task.FromResult(hook(ctx))));
+        _beforeHooks.Add(new RouteHook(pattern, priority, (ctx, _, _) => Task.FromResult(hook(ctx))));
 
     public void After(string pattern, Func<HttpContext, object?, HookResult> hook, int priority = 0) =>
-        _afterHooks.Add(new RouteHook(pattern, priority, (ctx, _) => Task.FromResult(hook(ctx, null))));
+        _afterHooks.Add(new RouteHook(pattern, priority, (ctx, result, _) => Task.FromResult(hook(ctx, result))));
 
     public void Alter(string pattern, Action<RouteDescriptor> alter) =>
         _alterations.Add((pattern, alter));
@@ -60,9 +60,24 @@ public sealed class RouteRegistry : IRouteRegistry
             if (!MatchesPattern(path, hook.Pattern))
                 continue;
 
-            var result = await hook.Handler(context, CancellationToken.None).ConfigureAwait(false);
+            var result = await hook.Handler(context, null, CancellationToken.None).ConfigureAwait(false);
             if (result.Action != HookAction.Continue)
                 return result;
+        }
+
+        return HookResult.Continue();
+    }
+
+    /// <summary>Runs after-hooks (observe-only; Cancel/Replace ignored for control flow).</summary>
+    internal async Task<HookResult> RunAfterHooksAsync(HttpContext context, object? result)
+    {
+        var path = context.Request.Path.Value ?? "/";
+        foreach (var hook in _afterHooks.OrderBy(h => h.Priority))
+        {
+            if (!MatchesPattern(path, hook.Pattern))
+                continue;
+
+            _ = await hook.Handler(context, result, CancellationToken.None).ConfigureAwait(false);
         }
 
         return HookResult.Continue();
@@ -98,5 +113,5 @@ public sealed class RouteRegistry : IRouteRegistry
     private sealed record RouteHook(
         string Pattern,
         int Priority,
-        Func<HttpContext, CancellationToken, Task<HookResult>> Handler);
+        Func<HttpContext, object?, CancellationToken, Task<HookResult>> Handler);
 }

@@ -1,3 +1,4 @@
+using FeatherQuilld.Controllers;
 using FeatherQuilld.Middleware;
 using FeatherQuilld.Utils.Plugins;
 using FeatherQuilld.Utils.Proxy;
@@ -59,7 +60,8 @@ public sealed class DaemonHost
                 ArgumentNullException.ThrowIfNull(pluginManager);
 
                 var loadResult = pluginManager.DiscoverAndLoad(reporter);
-                var mvc = builder.Services.AddControllers();
+                var mvc = builder.Services.AddControllers(options =>
+                    options.Filters.Add<PluginHookCancelledExceptionFilter>());
                 var configureResult = pluginManager.ConfigureServices(builder.Services, reporter);
                 pluginManager.AddControllerParts(mvc);
 
@@ -322,6 +324,10 @@ public sealed class DaemonHost
     {
         app.UseForwardedHeaders();
         app.UseExceptionHandler();
+
+        // Match ConfigureLogging: Development or config.debug → per-request traces.
+        if (app.Environment.IsDevelopment() || config.Debug)
+            app.UseMiddleware<RequestResponseLoggingMiddleware>();
 
         if (config.Api.Ssl.Enabled)
             app.UseHttpsRedirection();

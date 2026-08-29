@@ -5,7 +5,7 @@ PORT         ?= 8989
 DOCKER_IMAGE ?= featherquilld
 DOCKER_TAG   ?= latest
 
-.PHONY: help restore build build-plugins run watch stop publish clean docker docker-run test fmt configure
+.PHONY: help restore build build-plugins build-fusequota run watch stop publish clean docker docker-run test fmt configure
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -13,7 +13,16 @@ help: ## Show this help
 restore: ## Restore NuGet packages
 	dotnet restore FeatherQuilld.slnx
 
-build: build-plugins ## Build host + plugins (CONFIG=Debug|Release)
+build-fusequota: ## Build fusequota into ./bins (required for default disk quotas)
+	@if [ ! -f fusequota/external/libfuse/meson.build ]; then \
+		git -C fusequota submodule update --init --recursive; \
+	fi
+	$(MAKE) -C fusequota
+	mkdir -p bins
+	cp -f fusequota/build/fusequota bins/fusequota
+	chmod +x bins/fusequota
+
+build: build-plugins build-fusequota ## Build host + plugins + fusequota (CONFIG=Debug|Release)
 	dotnet build FeatherQuilld.csproj -c $(CONFIG) --nologo
 
 build-plugins: ## Build and deploy sample plugins
@@ -21,7 +30,7 @@ build-plugins: ## Build and deploy sample plugins
 
 run: build ## Run the daemon (CONFIG_FILE=config.yml)
 	FEATHERQUILLD_CONFIG=$(CONFIG_FILE) ASPNETCORE_ENVIRONMENT=Development \
-		dotnet run --project FeatherQuilld.csproj -c $(CONFIG) --no-launch-profile -- --config $(CONFIG_FILE)
+		dotnet run --project FeatherQuilld.csproj -c $(CONFIG) --no-build --no-launch-profile -- --config $(CONFIG_FILE)
 
 configure: build ## Interactive node setup (join-data or manual + optional systemd)
 	dotnet run --project FeatherQuilld.csproj -c $(CONFIG) --no-launch-profile -- configure --override --config $(CONFIG_FILE)
@@ -38,12 +47,14 @@ stop: ## Kill whatever is listening on PORT (default 8989)
 	sleep 0.3; \
 	kill -9 $$pids 2>/dev/null || true
 
-publish: build-plugins ## Publish Release build to ./publish
+publish: build-plugins build-fusequota ## Publish Release build to ./publish
 	dotnet publish FeatherQuilld.csproj -c Release -o ./publish --nologo
+	cp -f bins/fusequota ./publish/fusequota
 
 clean: ## Remove build artifacts
 	dotnet clean FeatherQuilld.slnx --nologo
-	rm -rf ./bin ./obj ./publish
+	rm -rf ./bin ./obj ./publish ./bins
+	-$(MAKE) -C fusequota clean
 
 docker: ## Build Docker image
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .

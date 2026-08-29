@@ -1,13 +1,11 @@
 <Solution>
-  <Folder Name="/">
-    <Project Path="FeatherQuilld.Plugins/FeatherQuilld.Plugins.csproj" />
-  </Folder>
   <Folder Name="/plugins/">
     <Project Path="plugins/Hello/Hello.csproj" />
   </Folder>
   <Folder Name="/Solution Items/">
     <File Path="compose.yaml" />
   </Folder>
+  <Project Path="FeatherQuilld.Plugins/FeatherQuilld.Plugins.csproj" />
   <Project Path="FeatherQuilld.csproj" />
   <Project Path="FeatherQuilld.Tests/FeatherQuilld.Tests.csproj" />
 </Solution>

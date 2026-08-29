@@ -1,4 +1,5 @@
 using Cronos;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Remote;
 using FeatherQuilld.Utils.WebSpaces.Schedules;
 
@@ -9,8 +10,10 @@ public sealed class WebSpaceScheduleManager(
     WebSpaceBackupService backupService,
     IPanelClient panel,
     WebSpaceActivityReporter? activityReporter,
-    ILogger<WebSpaceScheduleManager> logger)
+    ILogger<WebSpaceScheduleManager> logger,
+    IEventBus? events = null)
 {
+    private readonly IEventBus _events = events.OrNoOp();
     private readonly Dictionary<string, List<ScheduledEntry>> _entries = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _running = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
@@ -161,7 +164,19 @@ public sealed class WebSpaceScheduleManager(
         }
     }
 
-    private async Task ExecuteScheduleAsync(string webSpaceUuid, WebSpaceScheduleDefinition schedule, CancellationToken cancellationToken)
+    private Task ExecuteScheduleAsync(string webSpaceUuid, WebSpaceScheduleDefinition schedule, CancellationToken cancellationToken) =>
+        _events.WithHooksAsync(
+            new ScheduleExecuteBeforeEvent { WebSpaceUuid = webSpaceUuid, ScheduleId = schedule.Id },
+            err => new ScheduleExecuteAfterEvent
+            {
+                WebSpaceUuid = webSpaceUuid,
+                ScheduleId = schedule.Id,
+                Error = err,
+            },
+            token => ExecuteScheduleCoreAsync(webSpaceUuid, schedule, token),
+            cancellationToken);
+
+    private async Task ExecuteScheduleCoreAsync(string webSpaceUuid, WebSpaceScheduleDefinition schedule, CancellationToken cancellationToken)
     {
         lock (_lock)
         {
@@ -217,16 +232,34 @@ public sealed class WebSpaceScheduleManager(
                 _running.Remove(webSpaceUuid);
             }
         }
+    
     }
 
-    private Task ExecuteTaskAsync(string webSpaceUuid, WebSpaceScheduleTaskDefinition task, CancellationToken cancellationToken)
+    private Task ExecuteTaskAsync(string webSpaceUuid, WebSpaceScheduleTaskDefinition task, CancellationToken cancellationToken) =>
+        _events.WithHooksAsync(
+            new ScheduleTaskExecuteBeforeEvent
+            {
+                WebSpaceUuid = webSpaceUuid,
+                ScheduleId = task.Id,
+                Action = task.Action,
+            },
+            err => new ScheduleTaskExecuteAfterEvent
+            {
+                WebSpaceUuid = webSpaceUuid,
+                ScheduleId = task.Id,
+                Action = task.Action,
+                Error = err,
+            },
+            token => ExecuteTaskCoreAsync(webSpaceUuid, task, token),
+            cancellationToken);
+
+    private async Task ExecuteTaskCoreAsync(string webSpaceUuid, WebSpaceScheduleTaskDefinition task, CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(webSpaceUuid, out var uuid))
         {
             throw new InvalidOperationException($"Invalid webspace uuid '{webSpaceUuid}'.");
         }
 
-        _ = cancellationToken;
         switch (task.Action.Trim().ToLowerInvariant())
         {
             case "power":
@@ -242,12 +275,45 @@ public sealed class WebSpaceScheduleManager(
             case "backup":
                 backupService.Create(uuid, stopDuringBackup: true);
                 break;
+            case "command":
+            case "exec":
+            {
+                var command = ScheduleCommandPayload.Parse(task.Payload);
+                logger.LogInformation(
+                    "Schedule command for webspace {Uuid}: {Command}",
+                    webSpaceUuid,
+                    command);
+                var (exitCode, output) = await spaces.ExecCommandAsync(uuid, command, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(output))
+                {
+                    logger.LogInformation(
+                        "Schedule command output for webspace {Uuid} (exit {ExitCode}): {Output}",
+                        webSpaceUuid,
+                        exitCode,
+                        Truncate(output, 4000));
+                }
+
+                if (exitCode != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Schedule command exited with code {exitCode}.");
+                }
+
+                break;
+            }
             default:
                 logger.LogWarning("Unknown schedule action {Action} for webspace {Uuid}", task.Action, webSpaceUuid);
                 break;
         }
+    
+    }
 
-        return Task.CompletedTask;
+    private static string Truncate(string value, int max)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length <= max)
+            return value;
+        return value[..max] + "…";
     }
 
     private static TimeZoneInfo ResolveTimeZone(string timezone)

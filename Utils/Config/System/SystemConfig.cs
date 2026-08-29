@@ -24,8 +24,8 @@ public class SystemConfig
     public string VmountDirectory { get; set; } = "/var/lib/featherquilld/vmounts";
     public string FusequotaPath { get; set; } = "fusequota";
 
-    /// <summary><c>none</c> or <c>fuse_quota</c>. Empty/none + quotas.enabled → fuse_quota.</summary>
-    public string DiskLimiterMode { get; set; } = "none";
+    /// <summary><c>none</c> or <c>fuse_quota</c>. Default is FuseQuota; empty/none + quotas.enabled → fuse_quota.</summary>
+    public string DiskLimiterMode { get; set; } = "fuse_quota";
 
     public ProxyConfig Proxy { get; set; } = new();
     public string Username { get; set; } = "featherquilld";
@@ -35,16 +35,18 @@ public class SystemConfig
     public QuotasConfig Quotas { get; set; } = new();
 
     /// <summary>
-    /// Effective limiter: explicit mode, or FuseQuota when quotas are enabled.
+    /// Effective limiter: FuseQuota by default; explicit <c>none</c> disables unless quotas.enabled.
     /// </summary>
     [YamlIgnore]
     public DiskLimiterModeKind EffectiveDiskLimiterMode
     {
         get
         {
-            var mode = (DiskLimiterMode ?? "none").Trim().ToLowerInvariant().Replace('-', '_');
-            if (mode is "fuse_quota" or "fusequota")
+            var mode = (DiskLimiterMode ?? "fuse_quota").Trim().ToLowerInvariant().Replace('-', '_');
+            if (mode is "fuse_quota" or "fusequota" or "")
                 return DiskLimiterModeKind.FuseQuota;
+            if (mode is "none" or "off" or "disabled")
+                return Quotas.Enabled ? DiskLimiterModeKind.FuseQuota : DiskLimiterModeKind.None;
             if (Quotas.Enabled)
                 return DiskLimiterModeKind.FuseQuota;
             return DiskLimiterModeKind.None;
@@ -95,7 +97,8 @@ public class RootlessConfig
 
 public class QuotasConfig
 {
-    public bool Enabled { get; set; }
+    /// <summary>Hard disk quotas via FuseQuota. On by default for WebSpaces.</summary>
+    public bool Enabled { get; set; } = true;
 }
 
 public class BackupsConfig

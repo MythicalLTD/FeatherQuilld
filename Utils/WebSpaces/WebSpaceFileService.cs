@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.IO;
 
 namespace FeatherQuilld.Utils.WebSpaces;
@@ -15,11 +16,13 @@ public sealed class WebSpaceFileService
 
     private readonly IWebSpaceFsAccess _spaces;
     private readonly HttpClient _http;
+    private readonly IEventBus _events;
 
-    public WebSpaceFileService(IWebSpaceFsAccess spaces, HttpClient? http = null)
+    public WebSpaceFileService(IWebSpaceFsAccess spaces, HttpClient? http = null, IEventBus? events = null)
     {
         _spaces = spaces;
         _http = http ?? CreateDefaultHttpClient();
+        _events = events.OrNoOp();
     }
 
     private static HttpClient CreateDefaultHttpClient()
@@ -29,7 +32,19 @@ public sealed class WebSpaceFileService
         return client;
     }
 
-    public IReadOnlyList<object> List(Guid uuid, string? directory)
+    public IReadOnlyList<object> List(Guid uuid, string? directory) =>
+        _events.WithHooks(
+            new FileListBeforeEvent { WebSpaceUuid = uuid, Directory = directory },
+            (entries, err) => new FileListAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Directory = directory,
+                Entries = entries,
+                Error = err,
+            },
+            () => ListCore(uuid, directory));
+
+    private IReadOnlyList<object> ListCore(Guid uuid, string? directory)
     {
         var root = RequireRoot(uuid);
         var dir = ResolveExisting(root, directory ?? "/", mustBeDirectory: true);
@@ -57,7 +72,19 @@ public sealed class WebSpaceFileService
         return entries.OrderByDescending(e => ((dynamic)e).directory).ThenBy(e => ((dynamic)e).name).ToList();
     }
 
-    public string ReadText(Guid uuid, string file, long maxBytes = 5_000_000)
+    public string ReadText(Guid uuid, string file, long maxBytes = 5_000_000) =>
+        _events.WithHooks(
+            new FileReadBeforeEvent { WebSpaceUuid = uuid, Path = file },
+            (contents, err) => new FileReadAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Path = file,
+                Contents = contents,
+                Error = err,
+            },
+            () => ReadTextCore(uuid, file, maxBytes));
+
+    private string ReadTextCore(Guid uuid, string file, long maxBytes)
     {
         var root = RequireRoot(uuid);
         var path = ResolveExisting(root, file, mustBeDirectory: false);
@@ -65,24 +92,45 @@ public sealed class WebSpaceFileService
         if (len > maxBytes)
             throw new InvalidOperationException($"File too large to edit ({len} bytes).");
         return File.ReadAllText(path, Encoding.UTF8);
+    
     }
 
-    public void WriteText(Guid uuid, string file, string contents)
+    public void WriteText(Guid uuid, string file, string contents) =>
+        _events.WithHooks(
+            new FileWriteBeforeEvent { WebSpaceUuid = uuid, Path = file },
+            err => new FileWriteAfterEvent { WebSpaceUuid = uuid, Path = file, Error = err },
+            () => WriteTextCore(uuid, file, contents));
+
+        private void WriteTextCore(Guid uuid, string file, string contents)
     {
         var root = RequireRoot(uuid);
         var path = ResolveWritable(root, file);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, contents ?? "", Encoding.UTF8);
+    
     }
 
-    public void CreateDirectory(Guid uuid, string directory)
+    public void CreateDirectory(Guid uuid, string directory) =>
+        _events.WithHooks(
+            new FileCreateDirectoryBeforeEvent { WebSpaceUuid = uuid, Path = directory },
+            err => new FileCreateDirectoryAfterEvent { WebSpaceUuid = uuid, Path = directory, Error = err },
+            () => CreateDirectoryCore(uuid, directory));
+
+        private void CreateDirectoryCore(Guid uuid, string directory)
     {
         var root = RequireRoot(uuid);
         var path = ResolveWritable(root, directory);
         Directory.CreateDirectory(path);
+    
     }
 
-    public void Rename(Guid uuid, string from, string to)
+    public void Rename(Guid uuid, string from, string to) =>
+        _events.WithHooks(
+            new FileRenameBeforeEvent { WebSpaceUuid = uuid, From = from, To = to },
+            err => new FileRenameAfterEvent { WebSpaceUuid = uuid, From = from, To = to, Error = err },
+            () => RenameCore(uuid, from, to));
+
+        private void RenameCore(Guid uuid, string from, string to)
     {
         var root = RequireRoot(uuid);
         var src = ResolveExisting(root, from, mustBeDirectory: null);
@@ -92,6 +140,7 @@ public sealed class WebSpaceFileService
             Directory.Move(src, dst);
         else
             File.Move(src, dst, overwrite: true);
+    
     }
 
     /// <summary>
@@ -99,7 +148,20 @@ public sealed class WebSpaceFileService
     /// creates a sibling named like <c>name copy</c> / <c>name copy.ext</c>.
     /// Returns the destination virtual path.
     /// </summary>
-    public string Copy(Guid uuid, string from, string? to = null)
+    public string Copy(Guid uuid, string from, string? to = null) =>
+        _events.WithHooks(
+            new FileCopyBeforeEvent { WebSpaceUuid = uuid, From = from, To = to },
+            (resultPath, err) => new FileCopyAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                From = from,
+                To = to,
+                ResultPath = resultPath,
+                Error = err,
+            },
+            () => CopyCore(uuid, from, to));
+
+    private string CopyCore(Guid uuid, string from, string? to)
     {
         var root = RequireRoot(uuid);
         var src = ResolveExisting(root, from, mustBeDirectory: null);
@@ -116,6 +178,7 @@ public sealed class WebSpaceFileService
         else
             File.Copy(src, dst, overwrite: true);
         return NormalizeVirtual(destVirtual);
+    
     }
 
     /// <summary>
@@ -238,7 +301,13 @@ public sealed class WebSpaceFileService
         return Convert.ToHexString(digest).ToLowerInvariant();
     }
 
-    public void Delete(Guid uuid, IEnumerable<string> files)
+    public void Delete(Guid uuid, IEnumerable<string> files) =>
+        _events.WithHooks(
+            new FileDeleteBeforeEvent { WebSpaceUuid = uuid, Paths = files.ToList() },
+            err => new FileDeleteAfterEvent { WebSpaceUuid = uuid, Paths = files is IReadOnlyList<string> l ? l : files.ToList(), Error = err },
+            () => DeleteCore(uuid, files));
+
+        private void DeleteCore(Guid uuid, IEnumerable<string> files)
     {
         var root = RequireRoot(uuid);
         foreach (var rel in files)
@@ -258,6 +327,7 @@ public sealed class WebSpaceFileService
             else if (File.Exists(path))
                 File.Delete(path);
         }
+    
     }
 
     public Stream OpenRead(Guid uuid, string file)
@@ -267,7 +337,20 @@ public sealed class WebSpaceFileService
         return File.OpenRead(path);
     }
 
-    public async Task UploadAsync(Guid uuid, string directory, string fileName, Stream content, CancellationToken ct = default)
+    public Task UploadAsync(Guid uuid, string directory, string fileName, Stream content, CancellationToken ct = default) =>
+        _events.WithHooksAsync(
+            new FileUploadBeforeEvent { WebSpaceUuid = uuid, Directory = directory, FileName = fileName },
+            err => new FileUploadAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Directory = directory,
+                FileName = fileName,
+                Error = err,
+            },
+            token => UploadCoreAsync(uuid, directory, fileName, content, token),
+            ct);
+
+    private async Task UploadCoreAsync(Guid uuid, string directory, string fileName, Stream content, CancellationToken ct)
     {
         var root = RequireRoot(uuid);
         var safeName = Path.GetFileName(fileName);
@@ -280,6 +363,7 @@ public sealed class WebSpaceFileService
         var dest = ResolveWritable(root, CombineVirtual(directory, safeName));
         await using var fs = File.Create(dest);
         await content.CopyToAsync(fs, ct);
+    
     }
 
     /// <summary>
@@ -291,7 +375,24 @@ public sealed class WebSpaceFileService
         string? rootDirectory,
         IReadOnlyList<string> files,
         string? archiveName = null,
-        string extension = "tar.gz")
+        string extension = "tar.gz") =>
+        _events.WithHooks(
+            new FileCompressBeforeEvent { WebSpaceUuid = uuid, Paths = files },
+            (archivePath, err) => new FileCompressAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Paths = files,
+                ArchivePath = archivePath,
+                Error = err,
+            },
+            () => CompressCore(uuid, rootDirectory, files, archiveName, extension));
+
+    private string CompressCore(
+        Guid uuid,
+        string? rootDirectory,
+        IReadOnlyList<string> files,
+        string? archiveName,
+        string extension)
     {
         if (files is null || files.Count == 0)
             throw new ArgumentException("files must be a non-empty list.");
@@ -343,10 +444,17 @@ public sealed class WebSpaceFileService
             CreateTarGz(archivePath, sources);
 
         return RootedPath.ToVirtual(root, archivePath);
+    
     }
 
     /// <summary>Extract a zip or tar.gz archive into its parent directory (zip-slip safe).</summary>
-    public void Decompress(Guid uuid, string file)
+    public void Decompress(Guid uuid, string file) =>
+        _events.WithHooks(
+            new FileDecompressBeforeEvent { WebSpaceUuid = uuid, Path = file },
+            err => new FileDecompressAfterEvent { WebSpaceUuid = uuid, Path = file, Error = err },
+            () => DecompressCore(uuid, file));
+
+        private void DecompressCore(Guid uuid, string file)
     {
         var root = RequireRoot(uuid);
         var archivePath = ResolveExisting(root, file, mustBeDirectory: false);
@@ -361,10 +469,17 @@ public sealed class WebSpaceFileService
             ExtractTarGzSafe(archivePath, destDir, root);
         else
             throw new InvalidOperationException("Unsupported archive type (use .zip or .tar.gz).");
+    
     }
 
     /// <summary>Apply Unix file modes (octal strings like 0644 / 755) to paths.</summary>
-    public void Chmod(Guid uuid, IReadOnlyList<(string File, string Mode)> entries)
+    public void Chmod(Guid uuid, IReadOnlyList<(string File, string Mode)> entries) =>
+        _events.WithHooks(
+            new FileChmodBeforeEvent { WebSpaceUuid = uuid, Entries = entries },
+            err => new FileChmodAfterEvent { WebSpaceUuid = uuid, Error = err },
+            () => ChmodCore(uuid, entries));
+
+        private void ChmodCore(Guid uuid, IReadOnlyList<(string File, string Mode)> entries)
     {
         if (entries is null || entries.Count == 0)
             throw new ArgumentException("files must be a non-empty list.");
@@ -383,6 +498,7 @@ public sealed class WebSpaceFileService
             if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
                 File.SetUnixFileMode(path, mode);
         }
+    
     }
 
     /// <summary>
@@ -429,13 +545,32 @@ public sealed class WebSpaceFileService
     /// Download a remote HTTP(S) URL into <paramref name="directory"/> under the WebSpace jail.
     /// Returns the virtual path of the saved file.
     /// </summary>
-    public async Task<string> PullAsync(
+    public Task<string> PullAsync(
         Guid uuid,
         string? directory,
         string url,
         string? fileName = null,
         long maxBytes = DefaultPullMaxBytes,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        _events.WithHooksAsync(
+            new FilePullBeforeEvent { WebSpaceUuid = uuid, Url = url, Directory = directory },
+            (resultPath, err) => new FilePullAfterEvent
+            {
+                WebSpaceUuid = uuid,
+                Url = url,
+                ResultPath = resultPath,
+                Error = err,
+            },
+            token => PullCoreAsync(uuid, directory, url, fileName, maxBytes, token),
+            cancellationToken);
+
+    private async Task<string> PullCoreAsync(
+        Guid uuid,
+        string? directory,
+        string url,
+        string? fileName,
+        long maxBytes,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(url))
             throw new ArgumentException("url is required.");
@@ -486,6 +621,7 @@ public sealed class WebSpaceFileService
         }
 
         return RootedPath.ToVirtual(root, dest);
+    
     }
 
     /// <summary>Validate pull URL (http/https only; block obvious private/link-local targets).</summary>

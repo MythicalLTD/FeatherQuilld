@@ -10,4 +10,5 @@ public enum LoggerTypes
     Disk,
     Proxy,
     SelfTest,
+    DiskIO, 
 }

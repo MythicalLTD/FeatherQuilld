@@ -261,6 +261,66 @@ public sealed class WebSpaceRuntime : IDisposable
         await session.Stream.WriteAsync(bytes, 0, bytes.Length, cancellationToken);
     }
 
+    /// <summary>
+    /// Run a one-shot command inside the runtime container (<c>docker exec</c>).
+    /// Used by scheduled tasks (WordPress / WHMCS cron, etc.).
+    /// </summary>
+    /// <returns>Combined stdout/stderr and the process exit code.</returns>
+    public async Task<(long ExitCode, string Output)> ExecCommandAsync(
+        Guid uuid,
+        string runtime,
+        string command,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(command);
+
+        var name = RuntimeName(uuid);
+        var workDir = MountTarget(runtime);
+        using var client = DockerClientFactory.Create(_docker);
+
+        try
+        {
+            var info = await client.Containers.InspectContainerAsync(name, cancellationToken);
+            if (info.State?.Running != true)
+                throw new InvalidOperationException("Runtime container is not running.");
+        }
+        catch (DockerContainerNotFoundException)
+        {
+            throw new InvalidOperationException("Runtime container not found.");
+        }
+        catch (DockerApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            throw new InvalidOperationException("Runtime container not found.");
+        }
+
+        var created = await client.Exec.ExecCreateContainerAsync(
+            name,
+            new ContainerExecCreateParameters
+            {
+                AttachStdout = true,
+                AttachStderr = true,
+                Tty = false,
+                WorkingDir = workDir,
+                Cmd = ["/bin/sh", "-c", command],
+            },
+            cancellationToken);
+
+        using var stream = await client.Exec.StartAndAttachContainerExecAsync(
+            created.ID, tty: false, cancellationToken);
+
+        using var stdout = new MemoryStream();
+        using var stderr = new MemoryStream();
+        await stream.CopyOutputToAsync(null, stdout, stderr, cancellationToken);
+
+        var output = Encoding.UTF8.GetString(stdout.ToArray());
+        var err = Encoding.UTF8.GetString(stderr.ToArray());
+        if (err.Length > 0)
+            output = string.IsNullOrEmpty(output) ? err : output + "\n" + err;
+
+        var inspect = await client.Exec.InspectContainerExecAsync(created.ID, cancellationToken);
+        return (inspect.ExitCode, output.TrimEnd());
+    }
+
     public async Task<string?> InspectStateAsync(Guid uuid, CancellationToken cancellationToken = default)
     {
         try

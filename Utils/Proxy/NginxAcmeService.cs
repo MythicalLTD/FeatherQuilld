@@ -1,4 +1,5 @@
 using System.Security.Cryptography.X509Certificates;
+using FeatherQuilld.Plugins.Events;
 using Certes;
 using Certes.Acme;
 using AuthStatus = Certes.Acme.Resource.AuthorizationStatus;
@@ -20,12 +21,14 @@ public sealed class NginxAcmeService
 
     private readonly AppConfig _config;
     private readonly AppLogger? _logger;
+    private readonly IEventBus _events;
     private readonly object _gate = new();
 
-    public NginxAcmeService(AppConfig config, AppLogger? logger = null)
+    public NginxAcmeService(AppConfig config, AppLogger? logger = null, IEventBus? events = null)
     {
         _config = config;
         _logger = logger;
+        _events = events.OrNoOp();
     }
 
     public string AcmeWwwRoot => Path.Combine(_config.System.RootDirectory, "acme", "www");
@@ -60,10 +63,27 @@ public sealed class NginxAcmeService
     }
 
     /// <summary>Issue or skip certs for SSL domains. Best-effort; logs failures.</summary>
-    public async Task EnsureCertsAsync(
+    public Task EnsureCertsAsync(
         IEnumerable<string> domains,
         CancellationToken cancellationToken = default,
-        bool force = false)
+        bool force = false) =>
+        _events.WithHooksAsync(
+            new AcmeEnsureCertsBeforeEvent
+            {
+                Domains = domains as IReadOnlyList<string> ?? domains.ToList(),
+            },
+            err => new AcmeEnsureCertsAfterEvent
+            {
+                Domains = domains as IReadOnlyList<string> ?? domains.ToList(),
+                Error = err,
+            },
+            token => EnsureCertsCoreAsync(domains, token, force),
+            cancellationToken);
+
+    private async Task EnsureCertsCoreAsync(
+        IEnumerable<string> domains,
+        CancellationToken cancellationToken,
+        bool force)
     {
         var email = _config.System.Proxy.AcmeEmail?.Trim();
         if (string.IsNullOrWhiteSpace(email))
@@ -112,6 +132,7 @@ public sealed class NginxAcmeService
         {
             _logger?.Warning(LoggerTypes.Proxy, $"nginx ACME failed: {ex.Message}");
         }
+    
     }
 
     /// <summary>Read NotAfter for an issued nginx cert, if present.</summary>
@@ -171,7 +192,14 @@ public sealed class NginxAcmeService
         }
     }
 
-    private async Task IssueOneAsync(AcmeContext acme, string domain, CancellationToken ct)
+    private Task IssueOneAsync(AcmeContext acme, string domain, CancellationToken ct) =>
+        _events.WithHooksAsync(
+            new AcmeIssueBeforeEvent { Domain = domain },
+            err => new AcmeIssueAfterEvent { Domain = domain, Error = err },
+            token => IssueOneCoreAsync(acme, domain, token),
+            ct);
+
+    private async Task IssueOneCoreAsync(AcmeContext acme, string domain, CancellationToken ct)
     {
         var order = await acme.NewOrder([domain]);
         var authz = (await order.Authorizations()).First();
@@ -209,5 +237,6 @@ public sealed class NginxAcmeService
         {
             try { File.Delete(challengeFile); } catch { /* ignore */ }
         }
+    
     }
 }

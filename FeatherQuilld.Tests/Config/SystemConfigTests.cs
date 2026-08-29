@@ -5,7 +5,15 @@ namespace FeatherQuilld.Tests.Config;
 public class SystemConfigTests
 {
     [Fact]
-    public void EffectiveDiskLimiter_NoneByDefault()
+    public void EffectiveDiskLimiter_FuseByDefault()
+    {
+        var sys = new SystemConfig();
+        Assert.Equal(DiskLimiterModeKind.FuseQuota, sys.EffectiveDiskLimiterMode);
+        Assert.True(sys.Quotas.Enabled);
+    }
+
+    [Fact]
+    public void EffectiveDiskLimiter_NoneWhenExplicitlyDisabled()
     {
         var sys = new SystemConfig { DiskLimiterMode = "none", Quotas = { Enabled = false } };
         Assert.Equal(DiskLimiterModeKind.None, sys.EffectiveDiskLimiterMode);
