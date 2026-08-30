@@ -227,6 +227,32 @@ public sealed class PanelClient : IPanelClient
         }
     }
 
+    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/acme-dns — set/clear ACME DNS-01 TXT via panel.</summary>
+    public async Task AcmeDnsAsync(
+        Guid uuid,
+        string action,
+        string name,
+        string content,
+        CancellationToken cancellationToken = default)
+    {
+        var panelBase = _config.Remote.Panel.TrimEnd('/');
+        var url = $"{panelBase}/api/quilld-remote/webspaces/{uuid}/acme-dns";
+        var payload = JsonSerializer.Serialize(new
+        {
+            action = (action ?? "set").Trim().ToLowerInvariant(),
+            name,
+            content,
+        }, JsonOptions);
+
+        using var request = BuildRequest(HttpMethod.Post, url, acceptYaml: false);
+        request.Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+
+        using var response = await _http.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw BuildHttpError(response.StatusCode, $"/api/quilld-remote/webspaces/{uuid}/acme-dns", body);
+    }
+
     private static string NormalizeSftpAuthType(string type, string? publicKey)
     {
         if (!string.IsNullOrEmpty(publicKey))

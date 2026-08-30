@@ -41,4 +41,12 @@ public interface IPanelClient
         string password,
         string? publicKey = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/acme-dns — set or clear ACME DNS-01 TXT via panel PowerDNS.</summary>
+    Task AcmeDnsAsync(
+        Guid uuid,
+        string action,
+        string name,
+        string content,
+        CancellationToken cancellationToken = default);
 }

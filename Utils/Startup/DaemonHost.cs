@@ -1,10 +1,12 @@
 using FeatherQuilld.Controllers;
 using FeatherQuilld.Middleware;
+using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Plugins;
 using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.Remote;
 using FeatherQuilld.Utils.Services;
 using FeatherQuilld.Utils.WebSpaces;
+using FeatherQuilld.Utils.WebSpaces.Disk;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
@@ -42,23 +44,34 @@ public sealed class DaemonHost
                 reporter.Detail(Path.GetFileName(config.FilePath));
                 return new BootStepResult();
             })
-            .Step("Preparing host", _ =>
+            .Step("Creating ASP.NET host", _ =>
             {
                 builder = WebApplication.CreateBuilder(args);
+                builder.Logging.ClearProviders();
+                return new BootStepResult();
+            })
+            .Step("Registering services", _ =>
+            {
+                ArgumentNullException.ThrowIfNull(builder);
                 RegisterCoreServices(builder, config);
-                logger = ConfigureLogging(builder, config);
                 ConfigureAuthentication(builder);
                 ConfigureKestrel(builder, config);
-
-                pluginManager = new PluginManager(config, logger);
-                builder.Services.AddSingleton(pluginManager);
+                return new BootStepResult();
+            })
+            .Step("Initializing logging", reporter =>
+            {
+                ArgumentNullException.ThrowIfNull(builder);
+                logger = ConfigureLogging(builder, config);
+                reporter.Detail(logger.LogsDirectory);
                 return new BootStepResult();
             })
             .Step("Loading plugins", reporter =>
             {
                 ArgumentNullException.ThrowIfNull(builder);
-                ArgumentNullException.ThrowIfNull(pluginManager);
+                ArgumentNullException.ThrowIfNull(logger);
 
+                pluginManager = new PluginManager(config, logger);
+                builder.Services.AddSingleton(pluginManager);
                 var loadResult = pluginManager.DiscoverAndLoad(reporter);
                 var mvc = builder.Services.AddControllers(options =>
                     options.Filters.Add<PluginHookCancelledExceptionFilter>());
@@ -72,9 +85,14 @@ public sealed class DaemonHost
                 if (config.Api.Docs.Enabled)
                     ConfigureOpenApi(builder, config);
 
+                reporter.Detail("building application");
                 app = builder.Build();
 
+                if (config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota)
+                    FuseQuotaBinaryProvisioner.Ensure(config.System, logger);
+
                 // Eager-load WebSpaces so FuseQuota remounts / proxy rebuild happen at boot.
+                reporter.Detail("loading webspaces");
                 var spaces = app.Services.GetRequiredService<WebSpaceStore>();
                 var scheduleManager = app.Services.GetRequiredService<WebSpaceScheduleManager>();
                 spaces.BindScheduleManager(scheduleManager);
@@ -169,11 +187,30 @@ public sealed class DaemonHost
         builder.Services.AddHostedService(sp => sp.GetRequiredService<StaticFileServerManager>());
         builder.Services.AddSingleton(sp =>
             new Utils.Docker.PortAllocator(config.System.Proxy));
+        builder.Services.AddSingleton<WebSpaceWsHub>();
         builder.Services.AddSingleton(sp =>
-            new Utils.Docker.WebSpaceInstaller(config.Docker, sp.GetService<AppLogger>()));
+            new Utils.Docker.WebSpaceInstaller(
+                config.Docker,
+                sp.GetService<AppLogger>(),
+                sp.GetService<WebSpaceWsHub>()));
         builder.Services.AddSingleton(sp =>
-            new Utils.Docker.WebSpaceRuntime(config.Docker, sp.GetService<AppLogger>()));
-        builder.Services.AddSingleton<WebSpaceStore>();
+            new Utils.Docker.WebSpaceRuntime(
+                config.Docker,
+                Utils.Proxy.BackendHostResolver.ResolveBindHost(config.System.Proxy),
+                sp.GetService<AppLogger>()));
+        builder.Services.AddSingleton<WebSpaceStore>(sp =>
+            new WebSpaceStore(
+                sp.GetRequiredService<AppConfig>(),
+                sp.GetRequiredService<IPanelClient>(),
+                sp.GetRequiredService<ReverseProxyManager>(),
+                sp.GetRequiredService<Utils.Docker.PortAllocator>(),
+                sp.GetRequiredService<Utils.Docker.WebSpaceInstaller>(),
+                sp.GetRequiredService<Utils.Docker.WebSpaceRuntime>(),
+                sp.GetService<AppLogger>(),
+                sp.GetService<Utils.Proxy.NginxAcmeService>(),
+                sp.GetService<StaticFileServerManager>(),
+                sp.GetService<FeatherQuilld.Plugins.Events.IEventBus>(),
+                sp.GetService<WebSpaceWsHub>()));
         builder.Services.AddSingleton<Utils.WebSpaces.IWebSpaceFsAccess>(sp =>
             sp.GetRequiredService<WebSpaceStore>());
         builder.Services.AddSingleton<Utils.WebSpaces.Backups.IBackupObjectStore>(sp =>
@@ -191,6 +228,15 @@ public sealed class DaemonHost
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceBackupService>();
         builder.Services.AddSingleton(sp =>
             new Utils.WebSpaces.BackupJobProgressService(sp.GetRequiredService<AppConfig>()));
+        builder.Services.AddSingleton(sp =>
+            new Utils.WebSpaces.Malware.MalwareScanJobProgressService(sp.GetRequiredService<AppConfig>()));
+        builder.Services.AddSingleton<Utils.WebSpaces.Malware.WebSpaceMalwareScanService>(sp =>
+            new Utils.WebSpaces.Malware.WebSpaceMalwareScanService(
+                sp.GetRequiredService<AppConfig>(),
+                sp.GetRequiredService<WebSpaceStore>(),
+                sp.GetService<AppLogger>(),
+                sp.GetService<Utils.WebSpaces.Malware.MalwareScanJobProgressService>(),
+                sp.GetService<WebSpaceActivityReporter>()));
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceUtilizationService>(sp =>
             new Utils.WebSpaces.WebSpaceUtilizationService(
                 sp.GetRequiredService<AppConfig>().Docker,
@@ -203,10 +249,16 @@ public sealed class DaemonHost
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceScheduleManager>();
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceActivityReporter>();
         builder.Services.AddHostedService<Utils.WebSpaces.WebSpaceScheduleHostedService>();
+        builder.Services.AddHostedService<Utils.Proxy.ProxyLogRetentionHostedService>();
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceUserAccessService>();
         builder.Services.AddSingleton<Utils.Auth.ConsoleJwtValidator>();
         builder.Services.AddSingleton<Utils.SystemInfo.HostMetricsSampler>();
         builder.Services.AddSingleton<Utils.SystemInfo.DiagnosticsRegistry>();
+        builder.Services.AddSingleton<Utils.SystemInfo.SystemPackageWsHub>();
+        builder.Services.AddSingleton(sp =>
+            new Utils.SystemInfo.HostPackageManager(
+                sp.GetService<Utils.SystemInfo.SystemPackageWsHub>(),
+                sp.GetRequiredService<global::FeatherQuilld.Utils.Config.Config>()));
         builder.Services.AddHostedService<Utils.Sftp.SftpHostedService>();
         builder.Services.AddSingleton<Utils.Proxy.NginxAcmeService>();
 
@@ -365,6 +417,15 @@ public sealed class DaemonHost
         app.Lifetime.ApplicationStopping.Register(() =>
         {
             logger.Info(LoggerTypes.Application, "Shutting down…");
+            try
+            {
+                app.Services.GetService<Utils.SystemInfo.SystemPackageWsHub>()?.CloseAllAsync().GetAwaiter().GetResult();
+            }
+            catch
+            {
+                // best-effort — sockets may already be closing
+            }
+
             try
             {
                 pluginManager.OnApplicationStoppingAsync(app.Lifetime.ApplicationStopping)

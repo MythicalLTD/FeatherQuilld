@@ -66,7 +66,7 @@ public sealed class FuseQuotaLimiter
             return true;
         }
 
-        var nextToApp = Path.Combine(AppContext.BaseDirectory, "fusequota");
+        var nextToApp = FuseQuotaBinaryProvisioner.CachePath;
         if (File.Exists(nextToApp))
         {
             path = nextToApp;
@@ -115,9 +115,11 @@ public sealed class FuseQuotaLimiter
 
     public async Task StartupAsync(CancellationToken cancellationToken = default)
     {
-        if (!TryResolveBinaryPath(_config.System, out var bin))
+        var bin = await FuseQuotaBinaryProvisioner.EnsureAsync(_config.System, _logger, cancellationToken)
+            .ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(bin) || !File.Exists(bin))
             throw new InvalidOperationException(
-                "fusequota binary is not available. Install a release binary or build with make && sudo make install; set system.fusequota_path / FUSEQUOTA_BIN.");
+                "fusequota binary is not available. FeatherQuilld downloads it automatically on Linux when disk_limiter_mode is fuse_quota; set system.fusequota_path or FUSEQUOTA_BIN to use a custom binary.");
 
         _logger?.Debug(LoggerTypes.Disk, $"fusequota startup uuid={_webSpaceUuid} bin={bin} limit={_diskLimitBytes}");
 

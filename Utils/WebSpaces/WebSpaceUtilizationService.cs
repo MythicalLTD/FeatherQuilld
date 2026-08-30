@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Docker.DotNet;
 using Docker.DotNet.Models;
@@ -22,6 +23,8 @@ public sealed record WebSpaceUtilizationResponse(
 /// <summary>Per-WebSpace resource utilization (disk + optional Docker stats).</summary>
 public sealed class WebSpaceUtilizationService
 {
+    private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(8);
+
     private static readonly JsonSerializerOptions StatsJson = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -30,6 +33,7 @@ public sealed class WebSpaceUtilizationService
     private readonly DockerConfig _docker;
     private readonly WebSpaceStore _spaces;
     private readonly AppLogger? _logger;
+    private readonly ConcurrentDictionary<Guid, (DateTimeOffset At, WebSpaceUtilizationResponse Value)> _cache = new();
 
     public WebSpaceUtilizationService(DockerConfig docker, WebSpaceStore spaces, AppLogger? logger = null)
     {
@@ -39,6 +43,16 @@ public sealed class WebSpaceUtilizationService
     }
 
     public WebSpaceUtilizationResponse Get(Guid uuid)
+    {
+        if (_cache.TryGetValue(uuid, out var cached) && DateTimeOffset.UtcNow - cached.At < CacheTtl)
+            return cached.Value;
+
+        var result = Build(uuid);
+        _cache[uuid] = (DateTimeOffset.UtcNow, result);
+        return result;
+    }
+
+    private WebSpaceUtilizationResponse Build(Guid uuid)
     {
         var space = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         var response = _spaces.ToResponse(space);
@@ -69,6 +83,10 @@ public sealed class WebSpaceUtilizationService
                     netRx = stats.Networks?.Values.Sum(n => (long)n.RxBytes);
                     netTx = stats.Networks?.Values.Sum(n => (long)n.TxBytes);
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // Docker stats can be slow; disk stats still returned.
             }
             catch (Exception ex)
             {

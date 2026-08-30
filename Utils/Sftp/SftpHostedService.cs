@@ -436,7 +436,12 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         if (!Guid.TryParse(result.Server, out var uuid) || _spaces.Get(uuid) is null)
             return null;
 
-        result.RootPath = _spaces.EffectiveFsPath(uuid);
+        var basePath = _spaces.EffectiveFsPath(uuid);
+        var relative = WebSpaceStore.NormalizeDocumentRoot(result.RelativeRoot);
+        result.RootPath = string.IsNullOrEmpty(relative)
+            ? basePath
+            : Path.Combine(basePath, relative.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(result.RootPath);
         if (string.IsNullOrWhiteSpace(result.User))
             result.User = username;
         return result;
@@ -553,6 +558,10 @@ public sealed class SftpAuthResult
 
     [JsonIgnore]
     public string RootPath { get; set; } = "";
+
+    /// <summary>Optional subdirectory jail relative to the WebSpace data root (from panel).</summary>
+    [JsonPropertyName("root")]
+    public string? RelativeRoot { get; set; }
 
     [JsonIgnore]
     public bool IsReadOnly =>

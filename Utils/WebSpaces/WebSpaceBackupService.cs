@@ -76,15 +76,16 @@ public sealed class WebSpaceBackupService
         return job;
     }
 
-    public BackupJobState StartRestoreAsync(Guid uuid, Guid backupUuid)
+    public BackupJobState StartRestoreAsync(Guid uuid, Guid backupUuid, IReadOnlyList<string>? paths = null)
     {
         var jobs = _jobs ?? throw new InvalidOperationException("Backup job service not configured.");
-        var job = jobs.Start(uuid, "restore");
+        var selected = NormalizeRestorePaths(paths);
+        var job = jobs.Start(uuid, selected.Count > 0 ? "restore_selected" : "restore");
         _ = Task.Run(() =>
         {
             try
             {
-                Restore(uuid, backupUuid);
+                Restore(uuid, backupUuid, selected);
                 jobs.MarkCompleted(job.JobId, backupUuid);
             }
             catch (Exception ex)
@@ -210,7 +211,7 @@ public sealed class WebSpaceBackupService
         return null;
     }
 
-    public void Restore(Guid uuid, Guid backupUuid) =>
+    public void Restore(Guid uuid, Guid backupUuid, IReadOnlyList<string>? paths = null) =>
         _events.WithHooks(
             new BackupRestoreBeforeEvent { WebSpaceUuid = uuid, BackupUuid = backupUuid },
             err => new BackupRestoreAfterEvent
@@ -219,14 +220,88 @@ public sealed class WebSpaceBackupService
                 BackupUuid = backupUuid,
                 Error = err,
             },
-            () => RestoreCore(uuid, backupUuid));
+            () => RestoreCore(uuid, backupUuid, paths));
 
-    private void RestoreCore(Guid uuid, Guid backupUuid)
+    /// <summary>Immediate children of <paramref name="directory"/> inside a backup archive.</summary>
+    public object ListBackupFiles(Guid uuid, Guid backupUuid, string directory = "/")
+    {
+        _ = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        if (!_store.Exists(uuid, backupUuid))
+            throw new InvalidOperationException("Backup not found.");
+
+        var prefix = NormalizeEntryName(directory);
+        if (prefix.Length > 0 && !prefix.EndsWith('/'))
+            prefix += "/";
+
+        var tmp = Path.Combine(_config.System.TmpDirectory, $"browse-{backupUuid}.tar.gz");
+        try
+        {
+            _store.DownloadToFileAsync(uuid, backupUuid, tmp).GetAwaiter().GetResult();
+            var children = new Dictionary<string, (bool Dir, long Size)>(StringComparer.Ordinal);
+            using (var file = File.OpenRead(tmp))
+            using (var gzip = new GZipStream(file, CompressionMode.Decompress))
+            using (var reader = new TarReader(gzip))
+            {
+                while (reader.GetNextEntry() is { } entry)
+                {
+                    var name = NormalizeEntryName(entry.Name);
+                    if (name.Length == 0)
+                        continue;
+                    string rest;
+                    if (prefix.Length == 0)
+                        rest = name;
+                    else if (name.StartsWith(prefix, StringComparison.Ordinal))
+                        rest = name[prefix.Length..];
+                    else
+                        continue;
+                    if (rest.Length == 0)
+                        continue;
+                    var slash = rest.IndexOf('/');
+                    var child = slash < 0 ? rest : rest[..slash];
+                    var isDir = slash >= 0 || entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList;
+                    var size = slash < 0 && !isDir ? entry.Length : 0;
+                    if (children.TryGetValue(child, out var existing))
+                    {
+                        children[child] = (existing.Dir || isDir, existing.Size + size);
+                    }
+                    else
+                    {
+                        children[child] = (isDir, size);
+                    }
+                }
+            }
+
+            var listing = children
+                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => (object)new
+                {
+                    name = kv.Key,
+                    directory = kv.Value.Dir,
+                    file = !kv.Value.Dir,
+                    size = kv.Value.Size,
+                })
+                .ToList();
+
+            return new
+            {
+                directory = "/" + prefix.TrimEnd('/'),
+                files = listing,
+            };
+        }
+        finally
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
+        }
+    }
+
+    private void RestoreCore(Guid uuid, Guid backupUuid, IReadOnlyList<string>? paths)
     {
         var space = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         if (!_store.Exists(uuid, backupUuid))
             throw new InvalidOperationException("Backup not found.");
 
+        var selected = NormalizeRestorePaths(paths);
+        var selective = selected.Count > 0;
         var entry = _store.List(uuid).FirstOrDefault(x => x.Uuid == backupUuid);
         var tmp = Path.Combine(_config.System.TmpDirectory, $"restore-{backupUuid}.tar.gz");
         var wasRunning = space.State == WebSpaceState.Running && WebSpaceRuntimeNeeds(space);
@@ -242,21 +317,31 @@ public sealed class WebSpaceBackupService
                     throw new InvalidOperationException("Backup checksum mismatch; restore aborted.");
             }
 
-            if (wasRunning)
+            if (wasRunning && !selective)
                 _spaces.Power(uuid, "stop");
 
             var fsPath = _spaces.EffectiveFsPath(uuid);
-            WipeContents(fsPath);
-            ExtractTarGz(tmp, fsPath);
+            if (!selective)
+            {
+                WipeContents(fsPath);
+                ExtractTarGz(tmp, fsPath);
+            }
+            else
+            {
+                ExtractTarGzSelected(tmp, fsPath, selected);
+            }
 
-            if (wasRunning)
+            if (wasRunning && !selective)
                 _spaces.Power(uuid, "start");
 
-            _logger?.Info(LoggerTypes.WebSpaces, $"Restored backup {backupUuid} into {uuid}");
+            _logger?.Info(LoggerTypes.WebSpaces,
+                selective
+                    ? $"Restored {selected.Count} path(s) from backup {backupUuid} into {uuid}"
+                    : $"Restored backup {backupUuid} into {uuid}");
         }
         catch
         {
-            if (wasRunning)
+            if (wasRunning && !selective)
             {
                 try { _spaces.Power(uuid, "start"); }
                 catch (Exception ex) { _logger?.Warning(LoggerTypes.WebSpaces, $"restore restart: {ex.Message}"); }
@@ -268,7 +353,6 @@ public sealed class WebSpaceBackupService
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* ignore */ }
         }
-    
     }
 
     public object Import(Guid uuid, Stream archiveStream) =>
@@ -332,6 +416,88 @@ public sealed class WebSpaceBackupService
         using var file = File.OpenRead(archivePath);
         using var gzip = new GZipStream(file, CompressionMode.Decompress);
         TarFile.ExtractToDirectory(gzip, destDir, overwriteFiles: true);
+    }
+
+    internal static void ExtractTarGzSelected(string archivePath, string destDir, IReadOnlyList<string> paths)
+    {
+        Directory.CreateDirectory(destDir);
+        var destFull = Path.GetFullPath(destDir) + Path.DirectorySeparatorChar;
+        using var file = File.OpenRead(archivePath);
+        using var gzip = new GZipStream(file, CompressionMode.Decompress);
+        using var reader = new TarReader(gzip);
+        while (reader.GetNextEntry() is { } entry)
+        {
+            var name = NormalizeEntryName(entry.Name);
+            if (name.Length == 0 || !PathMatches(name, paths))
+                continue;
+            if (name is "webspace.json" or "site.json")
+                continue;
+
+            var target = Path.GetFullPath(Path.Combine(destDir, name.Replace('/', Path.DirectorySeparatorChar)));
+            if (!target.StartsWith(destFull, StringComparison.Ordinal) &&
+                !string.Equals(target.TrimEnd(Path.DirectorySeparatorChar), destFull.TrimEnd(Path.DirectorySeparatorChar), StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
+            }
+
+            if (entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList)
+            {
+                Directory.CreateDirectory(target);
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            entry.ExtractToFile(target, overwrite: true);
+        }
+    }
+
+    internal static bool PathMatches(string entryName, IReadOnlyList<string> selected)
+    {
+        var name = NormalizeEntryName(entryName);
+        foreach (var raw in selected)
+        {
+            var sel = NormalizeEntryName(raw);
+            if (sel.Length == 0)
+                continue;
+            if (string.Equals(name, sel, StringComparison.Ordinal))
+                return true;
+            if (name.StartsWith(sel + "/", StringComparison.Ordinal))
+                return true;
+            if (sel.EndsWith('/') && name.StartsWith(sel, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
+    }
+
+    internal static List<string> NormalizeRestorePaths(IReadOnlyList<string>? paths)
+    {
+        if (paths is null || paths.Count == 0)
+            return [];
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var list = new List<string>();
+        foreach (var raw in paths)
+        {
+            var name = NormalizeEntryName(raw);
+            if (name.Length == 0 || !seen.Add(name))
+                continue;
+            list.Add(name);
+        }
+
+        return list;
+    }
+
+    internal static string NormalizeEntryName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "";
+        var n = name.Replace('\\', '/').Trim();
+        while (n.StartsWith("./", StringComparison.Ordinal))
+            n = n[2..];
+        var parts = n.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Any(p => p is ".." or "."))
+            return "";
+        return string.Join('/', parts);
     }
 
     private static void WipeContents(string path)

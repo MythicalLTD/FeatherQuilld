@@ -122,7 +122,7 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
                     var started = StartServer(uuid, port, root);
                     _servers[uuid] = started;
                     _logger?.Info(LoggerTypes.Proxy,
-                        $"Static file server {uuid} → http://127.0.0.1:{port} root={root}");
+                        $"Static file server {uuid} → http://{BackendHostResolver.ResolveBindHost(_config.System.Proxy)}:{port} root={root}");
                 }
                 catch (Exception ex)
                 {
@@ -141,7 +141,7 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
         builder.Logging.ClearProviders();
         builder.WebHost.ConfigureKestrel(options =>
         {
-            options.Listen(IPAddress.Loopback, port);
+            options.Listen(BackendHostResolver.ResolveBindAddress(_config.System.Proxy), port);
         });
 
         var app = builder.Build();

@@ -109,14 +109,25 @@ public sealed class Logger : IDisposable
         } while (File.Exists(archive));
 
         CompressAndDelete(latestPath, archive);
-        PruneOldArchives(dir, maxArchives);
+        var dirCopy = dir;
+        var maxCopy = maxArchives;
+        _ = Task.Run(() => PruneOldArchives(dirCopy, maxCopy));
     }
+
+    private const long FastRotateMaxBytes = 10 * 1024 * 1024;
 
     private static void CompressAndDelete(string sourcePath, string archivePath)
     {
+        var size = new FileInfo(sourcePath).Length;
+        if (size > FastRotateMaxBytes)
+        {
+            File.Move(sourcePath, archivePath.Replace(".gz", "", StringComparison.Ordinal), overwrite: true);
+            return;
+        }
+
         using (var input = File.OpenRead(sourcePath))
         using (var output = File.Create(archivePath))
-        using (var gzip = new GZipStream(output, CompressionLevel.Optimal))
+        using (var gzip = new GZipStream(output, CompressionLevel.Fastest))
         {
             input.CopyTo(gzip);
         }

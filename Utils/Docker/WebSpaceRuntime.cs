@@ -13,12 +13,14 @@ namespace FeatherQuilld.Utils.Docker;
 public sealed class WebSpaceRuntime : IDisposable
 {
     private readonly DockerConfig _docker;
+    private readonly string _backendBindHost;
     private readonly AppLogger? _logger;
     private readonly ConcurrentDictionary<Guid, StdinSession> _stdin = new();
 
-    public WebSpaceRuntime(DockerConfig docker, AppLogger? logger = null)
+    public WebSpaceRuntime(DockerConfig docker, string backendBindHost = "127.0.0.1", AppLogger? logger = null)
     {
         _docker = docker;
+        _backendBindHost = string.IsNullOrWhiteSpace(backendBindHost) ? "127.0.0.1" : backendBindHost.Trim();
         _logger = logger;
     }
 
@@ -45,6 +47,57 @@ public sealed class WebSpaceRuntime : IDisposable
 
     public static string RuntimeName(Guid uuid) => uuid.ToString();
 
+    public static string ResolveRuntimeImage(WebSpace space, string image)
+    {
+        image = image.Trim();
+        if (!string.Equals(space.Runtime, "php", StringComparison.OrdinalIgnoreCase))
+            return image;
+
+        if (image.Contains("apache", StringComparison.OrdinalIgnoreCase))
+            return image;
+
+        if (!image.Contains("-cli", StringComparison.OrdinalIgnoreCase))
+            return image;
+
+        var hasStartup = !string.IsNullOrWhiteSpace(space.Startup);
+        var port = space.ContainerPort > 0 ? space.ContainerPort : DefaultContainerPort(space.Runtime);
+        if (hasStartup || port != 80)
+            return image;
+
+        var version = "8.3";
+        var tagStart = image.IndexOf(':', StringComparison.Ordinal) + 1;
+        if (tagStart > 0)
+        {
+            var tag = image[tagStart..];
+            var dash = tag.IndexOf('-');
+            version = dash > 0 ? tag[..dash] : tag;
+        }
+
+        return $"php:{version}-apache";
+    }
+
+    private static bool IsPhpApacheImage(string image) =>
+        image.Contains("php:", StringComparison.OrdinalIgnoreCase) &&
+        image.Contains("apache", StringComparison.OrdinalIgnoreCase);
+
+    private static string[]? BuildContainerCmd(WebSpace space, string image, string? startup, string dataPath)
+    {
+        var effectiveStartup = !string.IsNullOrWhiteSpace(startup)
+            ? startup.Trim()
+            : space.Startup?.Trim();
+
+        if (!string.IsNullOrWhiteSpace(effectiveStartup))
+            return ["/bin/bash", "-c", effectiveStartup];
+
+        if (IsPhpApacheImage(image))
+        {
+            WebSpacePhpExtensions.EnsureFile(dataPath);
+            return ["/bin/bash", "-c", WebSpacePhpExtensions.BuildBootstrap(dataPath)];
+        }
+
+        return null;
+    }
+
     public async Task StartAsync(
         WebSpace space,
         string dataPath,
@@ -63,12 +116,17 @@ public sealed class WebSpaceRuntime : IDisposable
         var image = string.IsNullOrWhiteSpace(space.ContainerImage)
             ? throw new InvalidOperationException("No container image configured for this WebSpace.")
             : space.ContainerImage.Trim();
+        image = ResolveRuntimeImage(space, image);
+        if (!string.Equals(space.ContainerImage, image, StringComparison.OrdinalIgnoreCase))
+            space.ContainerImage = image;
 
         var containerPort = space.ContainerPort > 0
             ? space.ContainerPort
             : DefaultContainerPort(space.Runtime);
         var name = RuntimeName(space.Uuid);
         var mount = MountTarget(space.Runtime);
+        if (string.Equals(space.Runtime, "php", StringComparison.OrdinalIgnoreCase))
+            WebSpaceSiteFiles.EnsurePhpIni(dataPath);
 
         using var client = DockerClientFactory.Create(_docker);
         await EnsureImageAsync(client, image, cancellationToken);
@@ -101,6 +159,38 @@ public sealed class WebSpaceRuntime : IDisposable
 
         if (existing is not null)
         {
+            var existingImage = existing.Config?.Image?.Trim();
+            if (!string.IsNullOrWhiteSpace(existingImage) &&
+                !string.Equals(existingImage, image, StringComparison.OrdinalIgnoreCase) &&
+                !existingImage.StartsWith(image + "@", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger?.Info(LoggerTypes.WebSpaces,
+                    $"Runtime {name} image drift ({existingImage} → {image}) — recreating container");
+                ReleaseStdin(space.Uuid);
+                try
+                {
+                    await client.Containers.RemoveContainerAsync(name, new ContainerRemoveParameters
+                    {
+                        Force = true,
+                        RemoveVolumes = true,
+                    }, cancellationToken);
+                }
+                catch (DockerContainerNotFoundException)
+                {
+                }
+                catch (DockerApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                }
+
+                existing = null;
+            }
+        }
+
+        if (existing is not null)
+        {
+            await WebSpaceRedisAddon.EnsureRunningAsync(client, _docker, space.Uuid, dataPath, _logger, cancellationToken)
+                .ConfigureAwait(false);
+
             if (existing.State?.Running == true)
             {
                 space.State = WebSpaceState.Running;
@@ -126,6 +216,7 @@ public sealed class WebSpaceRuntime : IDisposable
             env.Add($"STARTUP={startup.Trim()}");
         if (!string.IsNullOrWhiteSpace(space.Startup))
             env.Add($"STARTUP={space.Startup.Trim()}");
+        env.AddRange(WebSpaceRedisAddon.BuildEnv(dataPath));
 
         var portBindings = new Dictionary<string, IList<PortBinding>>
         {
@@ -133,11 +224,19 @@ public sealed class WebSpaceRuntime : IDisposable
             [
                 new PortBinding
                 {
-                    HostIP = "127.0.0.1",
+                    HostIP = _backendBindHost,
                     HostPort = space.BackendPort.ToString(),
                 },
             ],
         };
+
+        await WebSpaceRedisAddon.EnsureRunningAsync(client, _docker, space.Uuid, dataPath, _logger, cancellationToken)
+            .ConfigureAwait(false);
+
+        var hostConfig = BuildHostConfig(dataPath, mount, portBindings, space);
+        var links = WebSpaceRedisAddon.BuildLinks(space.Uuid, dataPath);
+        if (links is { Count: > 0 })
+            hostConfig.Links = links;
 
         var create = await client.Containers.CreateContainerAsync(new CreateContainerParameters
         {
@@ -145,6 +244,7 @@ public sealed class WebSpaceRuntime : IDisposable
             Image = image,
             Hostname = space.Uuid.ToString("N")[..12],
             Env = env,
+            Cmd = BuildContainerCmd(space, image, startup, dataPath),
             OpenStdin = true,
             AttachStdin = true,
             AttachStdout = true,
@@ -155,17 +255,7 @@ public sealed class WebSpaceRuntime : IDisposable
             {
                 [$"{containerPort}/tcp"] = default,
             },
-            HostConfig = new HostConfig
-            {
-                Binds = [$"{dataPath}:{mount}"],
-                PortBindings = portBindings,
-                RestartPolicy = new RestartPolicy { Name = RestartPolicyKind.UnlessStopped },
-                NetworkMode = string.IsNullOrWhiteSpace(_docker.Network.NetworkMode)
-                    ? "bridge"
-                    : _docker.Network.NetworkMode,
-                PidsLimit = _docker.ContainerPidLimit > 0 ? _docker.ContainerPidLimit : null,
-                LogConfig = BuildLogConfig(),
-            },
+            HostConfig = hostConfig,
             WorkingDir = mount,
         }, cancellationToken);
 
@@ -173,7 +263,7 @@ public sealed class WebSpaceRuntime : IDisposable
         space.ContainerId = create.ID;
         space.State = WebSpaceState.Running;
         _logger?.Info(LoggerTypes.WebSpaces,
-            $"Runtime started {name} image={image} 127.0.0.1:{space.BackendPort}->{containerPort}");
+            $"Runtime started {name} image={image} {_backendBindHost}:{space.BackendPort}->{containerPort}");
     }
 
     public async Task StopAsync(WebSpace space, bool kill = false, CancellationToken cancellationToken = default)
@@ -212,6 +302,16 @@ public sealed class WebSpaceRuntime : IDisposable
 
         space.State = WebSpaceState.Stopped;
         _logger?.Info(LoggerTypes.WebSpaces, $"Runtime {(kill ? "killed" : "stopped")} {name}");
+
+        try
+        {
+            await WebSpaceRedisAddon.StopAsync(client, space.Uuid, _logger, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(LoggerTypes.WebSpaces, $"Redis sidecar stop {space.Uuid}: {ex.Message}");
+        }
     }
 
     public async Task RestartAsync(
@@ -236,6 +336,15 @@ public sealed class WebSpaceRuntime : IDisposable
                 Force = true,
                 RemoveVolumes = true,
             }, cancellationToken);
+            try
+            {
+                await WebSpaceRedisAddon.RemoveAsync(client, uuid, _logger, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(LoggerTypes.WebSpaces, $"Redis sidecar remove {uuid}: {ex.Message}");
+            }
         }
         catch (DockerContainerNotFoundException)
         {
@@ -500,6 +609,41 @@ public sealed class WebSpaceRuntime : IDisposable
     {
         if (_stdin.TryRemove(uuid, out var session))
             session.Dispose();
+    }
+
+    private HostConfig BuildHostConfig(
+        string dataPath,
+        string mount,
+        Dictionary<string, IList<PortBinding>> portBindings,
+        WebSpace space)
+    {
+        var memoryBytes = space.MemoryLimitMiB > 0
+            ? space.MemoryLimitMiB * 1024L * 1024L
+            : 0L;
+        var nanoCpus = space.CpuLimit > 0
+            ? (long)(space.CpuLimit * 1_000_000_000L)
+            : 0L;
+
+        var binds = new List<string> { $"{dataPath}:{mount}" };
+        if (string.Equals(space.Runtime, "php", StringComparison.OrdinalIgnoreCase))
+        {
+            WebSpaceSiteFiles.EnsurePhpIni(dataPath);
+            binds.Add($"{WebSpaceSiteFiles.PhpIniHostPath(dataPath)}:/usr/local/etc/php/conf.d/zz-featherquilld.ini:ro");
+        }
+
+        return new HostConfig
+        {
+            Binds = binds,
+            PortBindings = portBindings,
+            RestartPolicy = new RestartPolicy { Name = RestartPolicyKind.UnlessStopped },
+            NetworkMode = string.IsNullOrWhiteSpace(_docker.Network.NetworkMode)
+                ? "bridge"
+                : _docker.Network.NetworkMode,
+            PidsLimit = _docker.ContainerPidLimit > 0 ? _docker.ContainerPidLimit : null,
+            Memory = memoryBytes > 0 ? memoryBytes : 0,
+            NanoCPUs = nanoCpus > 0 ? nanoCpus : 0,
+            LogConfig = BuildLogConfig(),
+        };
     }
 
     private LogConfig BuildLogConfig()

@@ -37,6 +37,73 @@ public class WebSpaceRuntimeHelpersTests
         var id = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         Assert.Equal(id.ToString(), WebSpaceRuntime.RuntimeName(id));
     }
+
+    [Fact]
+    public void ResolveRuntimeImage_FixesLeakedInstallCliImage()
+    {
+        var space = new WebSpace
+        {
+            Runtime = "php",
+            ContainerPort = 80,
+            ContainerImage = "php:8.3-cli",
+        };
+        Assert.Equal("php:8.3-apache", WebSpaceRuntime.ResolveRuntimeImage(space, space.ContainerImage!));
+    }
+
+    [Fact]
+    public void ResolveRuntimeImage_KeepsCliWhenStartupSet()
+    {
+        var space = new WebSpace
+        {
+            Runtime = "php",
+            ContainerPort = 80,
+            Startup = "php -S 0.0.0.0:80 -t public",
+            ContainerImage = "php:8.4-cli",
+        };
+        Assert.Equal("php:8.4-cli", WebSpaceRuntime.ResolveRuntimeImage(space, space.ContainerImage!));
+    }
+
+    [Fact]
+    public void EnsurePhpIni_WritesDefaultOnce()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fq-phpini-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            WebSpaceSiteFiles.EnsurePhpIni(dir);
+            var path = WebSpaceSiteFiles.PhpIniHostPath(dir);
+            Assert.True(File.Exists(path));
+            var first = File.ReadAllText(path);
+            Assert.Contains("memory_limit", first);
+            File.WriteAllText(path, "memory_limit = 64M\n");
+            WebSpaceSiteFiles.EnsurePhpIni(dir);
+            Assert.Equal("memory_limit = 64M\n", File.ReadAllText(path));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
+    public void BuildApacheAddonConf_EmitsPerHostDocumentRoot()
+    {
+        var space = new WebSpace
+        {
+            Runtime = "php",
+            DocumentRoot = "public",
+            DomainRoutes =
+            [
+                new WebSpaceDomainRoute { Domain = "app.example.com", Type = "primary", DocumentRoot = "public" },
+                new WebSpaceDomainRoute { Domain = "blog.example.com", Type = "alias", DocumentRoot = "sites/blog" },
+            ],
+        };
+        var conf = WebSpaceSiteFiles.BuildApacheAddonConf(space);
+        Assert.Contains("ServerName app.example.com", conf);
+        Assert.Contains("DocumentRoot /var/www/html/public", conf);
+        Assert.Contains("ServerName blog.example.com", conf);
+        Assert.Contains("DocumentRoot /var/www/html/sites/blog", conf);
+    }
 }
 
 public class PortAllocatorTests

@@ -3,7 +3,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FeatherQuilld.Utils.Auth;
+using FeatherQuilld.Utils.Docker;
 using FeatherQuilld.Utils.WebSpaces;
+using FeatherQuilld.Utils.WebSpaces.Malware;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -27,11 +29,13 @@ public sealed class WebSpacesController : ControllerBase
 
     private readonly WebSpaceStore _spaces;
     private readonly ConsoleJwtValidator _consoleJwt;
+    private readonly WebSpaceWsHub _wsHub;
 
-    public WebSpacesController(WebSpaceStore spaces, ConsoleJwtValidator consoleJwt)
+    public WebSpacesController(WebSpaceStore spaces, ConsoleJwtValidator consoleJwt, WebSpaceWsHub wsHub)
     {
         _spaces = spaces;
         _consoleJwt = consoleJwt;
+        _wsHub = wsHub;
     }
 
     [HttpGet]
@@ -86,6 +90,51 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    [HttpGet("{uuid:guid}/proxy-logs")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult ProxyLogs(
+        Guid uuid,
+        [FromQuery] string? domain = null,
+        [FromQuery] int lines = 200,
+        [FromQuery] int days = 0)
+    {
+        try
+        {
+            return Ok(_spaces.GetProxyLogs(uuid, domain, lines, days));
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
+        }
+    }
+
+    [HttpPost("{uuid:guid}/exec")]
+    [EnableRateLimiting("expensive")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Exec(Guid uuid, [FromBody] ExecWebSpaceBody? body, CancellationToken cancellationToken)
+    {
+        var command = body?.Command?.Trim() ?? "";
+        if (command.Length == 0)
+            return BadRequest(new { error = "command is required." });
+
+        try
+        {
+            var (exitCode, output) = await _spaces.ExecCommandAsync(uuid, command, cancellationToken);
+            return Ok(new { exit_code = exitCode, output });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpGet("{uuid:guid}/logs/install")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -136,6 +185,68 @@ public sealed class WebSpacesController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("{uuid:guid}/ssl/custom")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult CustomSsl(Guid uuid)
+    {
+        try
+        {
+            return Ok(_spaces.GetCustomSslStatus(uuid));
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
+        }
+    }
+
+    [HttpPut("{uuid:guid}/ssl/custom")]
+    [EnableRateLimiting("expensive")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> PutCustomSsl(Guid uuid, CancellationToken cancellationToken)
+    {
+        if (!Request.HasFormContentType)
+            return BadRequest(new { error = "Expected multipart form with cert and key files." });
+
+        var form = await Request.ReadFormAsync(cancellationToken);
+        var cert = form.Files.GetFile("cert");
+        var key = form.Files.GetFile("key");
+        if (cert is null || key is null)
+            return BadRequest(new { error = "Both cert and key files are required." });
+
+        try
+        {
+            await using var certStream = cert.OpenReadStream();
+            await using var keyStream = key.OpenReadStream();
+            return Ok(_spaces.PutCustomSsl(uuid, certStream, keyStream));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpDelete("{uuid:guid}/ssl/custom")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult DeleteCustomSsl(Guid uuid)
+    {
+        try
+        {
+            return Ok(_spaces.DeleteCustomSsl(uuid));
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
         }
     }
 
@@ -201,14 +312,43 @@ public sealed class WebSpacesController : ControllerBase
 
         await SendWsEventAsync(socket, "auth success", Array.Empty<string>(), cancellationToken);
 
+        var space = _spaces.Get(uuid);
+        if (space is not null)
+        {
+            var statusPayload = space.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling
+                ? space.Status
+                : space.State;
+            await SendWsEventAsync(socket, "status", [statusPayload], cancellationToken);
+            if (space.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling)
+            {
+                await SendWsEventAsync(socket, "install started", Array.Empty<string>(), cancellationToken);
+                var installLog = _spaces.GetInstallLogs(uuid);
+                if (!string.IsNullOrWhiteSpace(installLog) && installLog != "(no install log captured)\n")
+                    await SendWsEventAsync(socket, "install output", [installLog], cancellationToken);
+            }
+            else if (WebSpaceRuntime.NeedsContainer(space.Runtime))
+            {
+                await SendRuntimeLogHistoryAsync(socket, uuid, cancellationToken);
+            }
+        }
+
+        var socketId = _wsHub.Register(uuid, socket);
+
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var followTask = FollowAndSendAsync(socket, uuid, linked.Token);
         var canSend = ConsolePermissions.Allows(permissions, ConsolePermissions.Send);
         var recvTask = ReceiveLoopAsync(socket, uuid, canSend, linked.Token);
 
-        await Task.WhenAny(followTask, recvTask);
-        linked.Cancel();
-        try { await Task.WhenAll(followTask, recvTask); } catch { /* cancelled */ }
+        try
+        {
+            await Task.WhenAny(followTask, recvTask);
+        }
+        finally
+        {
+            linked.Cancel();
+            _wsHub.Unregister(uuid, socketId);
+            try { await Task.WhenAll(followTask, recvTask); } catch { /* cancelled */ }
+        }
 
         if (socket.State == WebSocketState.Open)
             await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
@@ -297,6 +437,7 @@ public sealed class WebSpacesController : ControllerBase
     /// <summary>Panel create — body: <c>{ "uuid": "...", "start_on_completion": false, "skip_scripts": false }</c>.</summary>
     [HttpPost]
     [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
     public ActionResult<WebSpaceResponse> Create([FromBody] CreateWebSpaceBody body)
@@ -310,7 +451,11 @@ public sealed class WebSpacesController : ControllerBase
                 SkipScripts = body.SkipScripts,
             });
 
-            return CreatedAtAction(nameof(Get), new { uuid = space.Uuid }, _spaces.ToResponse(space));
+            var response = _spaces.ToResponse(space);
+            if (string.Equals(space.Status, WebSpaceStatus.Installing, StringComparison.OrdinalIgnoreCase))
+                return Accepted(response);
+
+            return CreatedAtAction(nameof(Get), new { uuid = space.Uuid }, response);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
         {
@@ -353,6 +498,7 @@ public sealed class WebSpacesController : ControllerBase
 
     [HttpPost("{uuid:guid}/reinstall")]
     [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public ActionResult<WebSpaceResponse> Reinstall(Guid uuid, [FromBody] ReinstallWebSpaceBody? body)
@@ -363,6 +509,8 @@ public sealed class WebSpacesController : ControllerBase
                 uuid,
                 wipeFiles: body?.WipeFiles ?? true,
                 startOnCompletion: body?.StartOnCompletion ?? false);
+            if (space.Status is WebSpaceStatus.Reinstalling)
+                return Accepted(_spaces.ToResponse(space));
             return Ok(_spaces.ToResponse(space));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
@@ -393,6 +541,28 @@ public sealed class WebSpacesController : ControllerBase
         catch (ArgumentException ex)
         {
             return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("{uuid:guid}/recreate-runtime")]
+    [EnableRateLimiting("expensive")]
+    [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<WebSpaceResponse> RecreateRuntime(Guid uuid)
+    {
+        try
+        {
+            var space = _spaces.RecreateRuntime(uuid);
+            return Ok(_spaces.ToResponse(space));
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
         }
         catch (InvalidOperationException ex)
         {
@@ -528,6 +698,25 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    /// <summary>List files inside a backup archive (immediate children of directory).</summary>
+    [HttpGet("{uuid:guid}/backups/{backupUuid:guid}/files")]
+    [Tags("Backups")]
+    public IActionResult ListBackupFiles(
+        Guid uuid,
+        Guid backupUuid,
+        [FromServices] WebSpaceBackupService backups,
+        [FromQuery] string? directory = "/")
+    {
+        try
+        {
+            return Ok(backups.ListBackupFiles(uuid, backupUuid, directory ?? "/"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
     /// <summary>Restore a backup into the WebSpace filesystem.</summary>
     [HttpPost("{uuid:guid}/backups/{backupUuid:guid}/restore")]
     [Tags("Backups")]
@@ -541,9 +730,10 @@ public sealed class WebSpacesController : ControllerBase
         try
         {
             var async = body?.Async ?? true;
+            var paths = body?.Paths;
             if (async)
             {
-                var job = backups.StartRestoreAsync(uuid, backupUuid);
+                var job = backups.StartRestoreAsync(uuid, backupUuid, paths);
                 return Accepted(new
                 {
                     job_id = job.JobId,
@@ -552,7 +742,7 @@ public sealed class WebSpacesController : ControllerBase
                 });
             }
 
-            backups.Restore(uuid, backupUuid);
+            backups.Restore(uuid, backupUuid, paths);
             return Ok(new { ok = true });
         }
         catch (InvalidOperationException ex)
@@ -623,6 +813,87 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    /// <summary>ClamAV availability on this node.</summary>
+    [HttpGet("malware-scan/probe")]
+    [Tags("Malware")]
+    public IActionResult MalwareScanProbe([FromServices] WebSpaceMalwareScanService malware) =>
+        Ok(malware.ProbeStatus());
+
+    /// <summary>Last malware scan result for a WebSpace.</summary>
+    [HttpGet("{uuid:guid}/malware-scan/last")]
+    [Tags("Malware")]
+    public IActionResult MalwareScanLast(Guid uuid, [FromServices] WebSpaceMalwareScanService malware)
+    {
+        try
+        {
+            var last = malware.GetLastResult(uuid);
+            return Ok(new { last });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Run a filesystem malware scan (async job).</summary>
+    [HttpPost("{uuid:guid}/malware-scan")]
+    [Tags("Malware")]
+    [EnableRateLimiting("expensive")]
+    public IActionResult MalwareScan(Guid uuid, [FromBody] MalwareScanBody? body, [FromServices] WebSpaceMalwareScanService malware)
+    {
+        try
+        {
+            if (body?.Async == false)
+            {
+                var result = malware.Scan(uuid);
+                return Ok(new
+                {
+                    files_scanned = result.FilesScanned,
+                    infected_count = result.InfectedCount,
+                    infections = result.Infections,
+                    scanned_at = result.ScannedAt,
+                });
+            }
+
+            var job = malware.StartScanAsync(uuid);
+            return Accepted(new
+            {
+                job_id = job.JobId,
+                phase = job.Phase.ToString().ToLowerInvariant(),
+            });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Get status of an async malware scan job.</summary>
+    [HttpGet("{uuid:guid}/malware-scan/jobs/{jobId:guid}")]
+    [Tags("Malware")]
+    public IActionResult MalwareScanJob(Guid uuid, Guid jobId, [FromServices] WebSpaceMalwareScanService malware)
+    {
+        var job = malware.GetJob(jobId);
+        if (job is null || job.WebSpaceUuid != uuid)
+            return NotFound(new { error = "Malware scan job not found." });
+
+        return Ok(new
+        {
+            job_id = job.JobId,
+            webspace_uuid = job.WebSpaceUuid,
+            phase = job.Phase.ToString().ToLowerInvariant(),
+            files_scanned = job.FilesScanned,
+            infected_count = job.InfectedCount,
+            infections = job.Infections,
+            message = job.Message,
+            updated_at = job.UpdatedAt,
+        });
+    }
+
     /// <summary>Outgoing transfer to another Quilld node.</summary>
     [HttpPost("{uuid:guid}/transfer")]
     [EnableRateLimiting("expensive")]
@@ -662,11 +933,52 @@ public sealed class WebSpacesController : ControllerBase
     public IActionResult Delete(Guid uuid) =>
         _spaces.Delete(uuid) ? NoContent() : NotFound(new { error = "WebSpace not found." });
 
+    private async Task SendRuntimeLogHistoryAsync(WebSocket socket, Guid uuid, CancellationToken cancellationToken)
+    {
+        var installLog = _spaces.GetInstallLogs(uuid);
+        if (!string.IsNullOrWhiteSpace(installLog)
+            && installLog != "(no install log captured)\n"
+            && installLog != "(install log temporarily unavailable)\n")
+        {
+            await SendWsEventAsync(socket, "console output", ["--- install log ---"], cancellationToken);
+            await SendMultilineConsoleAsync(socket, installLog, cancellationToken);
+        }
+
+        try
+        {
+            var runtimeLogs = _spaces.GetRuntimeLogs(uuid, lines: 300);
+            if (!string.IsNullOrWhiteSpace(runtimeLogs))
+                await SendMultilineConsoleAsync(socket, runtimeLogs, cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            await SendWsEventAsync(socket, "console output", [$"[runtime logs unavailable: {ex.Message}]"], cancellationToken);
+        }
+    }
+
+    private static async Task SendMultilineConsoleAsync(WebSocket socket, string text, CancellationToken cancellationToken)
+    {
+        foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+            await SendWsEventAsync(socket, "console output", [line], cancellationToken);
+    }
+
     private async Task FollowAndSendAsync(WebSocket socket, Guid uuid, CancellationToken ct)
     {
         try
         {
-            await foreach (var line in _spaces.FollowRuntimeLogsAsync(uuid, sinceLines: 100, ct))
+            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
+            {
+                var space = _spaces.Get(uuid);
+                if (space?.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling)
+                {
+                    await Task.Delay(500, ct);
+                    continue;
+                }
+
+                break;
+            }
+
+            await foreach (var line in _spaces.FollowRuntimeLogsAsync(uuid, sinceLines: 0, ct))
             {
                 if (socket.State != WebSocketState.Open)
                     break;
@@ -725,7 +1037,17 @@ public sealed class WebSpacesController : ControllerBase
 
                 try
                 {
-                    await _spaces.SendConsoleCommandAsync(uuid, command, ct);
+                    var (exitCode, output) = await _spaces.ExecCommandAsync(uuid, command, ct);
+                    if (!string.IsNullOrWhiteSpace(output))
+                        await SendMultilineConsoleAsync(socket, output, CancellationToken.None);
+                    if (exitCode != 0 && socket.State == WebSocketState.Open)
+                    {
+                        await SendWsEventAsync(
+                            socket,
+                            "console output",
+                            [$"[exit {exitCode}]"],
+                            CancellationToken.None);
+                    }
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -804,6 +1126,11 @@ public sealed class WebSpacesController : ControllerBase
     }
 }
 
+public sealed class ExecWebSpaceBody
+{
+    public string? Command { get; set; }
+}
+
 public sealed class CreateWebSpaceBody
 {
     public Guid Uuid { get; set; }
@@ -838,10 +1165,20 @@ public sealed class CreateBackupBody
     public bool Async { get; set; } = true;
 }
 
+public sealed class MalwareScanBody
+{
+    [JsonPropertyName("async")]
+    public bool Async { get; set; } = true;
+}
+
 public sealed class RestoreBackupBody
 {
     [JsonPropertyName("async")]
     public bool Async { get; set; } = true;
+
+    /// <summary>When set, restore only these archive paths (no full wipe).</summary>
+    [JsonPropertyName("paths")]
+    public List<string>? Paths { get; set; }
 }
 
 public sealed class TransferWebSpaceBody

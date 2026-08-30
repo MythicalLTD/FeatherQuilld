@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.WebSpaces;
@@ -67,24 +68,55 @@ public sealed class ReverseProxyManager
             var list = spaces.ToList();
             var provider = NormalizedProvider;
 
-            if (provider == "nginx" && _acme is not null)
+            if (_acme is not null)
             {
                 _acme.EnsureChallengeLayout();
-                var sslDomains = list
-                    .Where(s => s.Ssl)
-                    .SelectMany(s => s.Domains)
-                    .Where(d => !string.IsNullOrWhiteSpace(d))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                if (sslDomains.Count > 0 && !string.IsNullOrWhiteSpace(_config.System.Proxy.AcmeEmail))
+                var sslSpaces = list.Where(s => s.Ssl && !UsesCustomSsl(s)).ToList();
+
+                foreach (var space in sslSpaces.Where(UsesDns01Ssl))
                 {
+                    var email = space.ResolveAcmeEmail(_config.System.Proxy.AcmeEmail);
+                    if (string.IsNullOrWhiteSpace(email))
+                        continue;
+                    var apex = ResolveApexDomain(space);
+                    if (string.IsNullOrWhiteSpace(apex))
+                        continue;
                     try
                     {
-                        _acme.EnsureCertsAsync(sslDomains).GetAwaiter().GetResult();
+                        _acme.EnsureWildcardCertAsync(space.Uuid, apex, email).GetAwaiter().GetResult();
                     }
                     catch (Exception ex)
                     {
-                        _logger?.Warning(LoggerTypes.Proxy, $"ACME ensure: {ex.Message}");
+                        _logger?.Warning(LoggerTypes.Proxy, $"ACME DNS-01 ensure: {ex.Message}");
+                    }
+                }
+
+                if (provider == "nginx")
+                {
+                    foreach (var group in sslSpaces.Where(s => !UsesDns01Ssl(s)).GroupBy(
+                                 s => s.ResolveAcmeEmail(_config.System.Proxy.AcmeEmail),
+                                 StringComparer.OrdinalIgnoreCase))
+                    {
+                        var email = group.Key;
+                        if (string.IsNullOrWhiteSpace(email))
+                            continue;
+
+                        var sslDomains = group
+                            .SelectMany(s => EffectiveRoutes(s).Where(r => r.Type != "redirect").Select(r => r.Domain))
+                            .Where(d => !string.IsNullOrWhiteSpace(d))
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        if (sslDomains.Count == 0)
+                            continue;
+
+                        try
+                        {
+                            _acme.EnsureCertsAsync(sslDomains, email: email).GetAwaiter().GetResult();
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.Warning(LoggerTypes.Proxy, $"ACME ensure: {ex.Message}");
+                        }
                     }
                 }
             }
@@ -102,6 +134,13 @@ public sealed class ReverseProxyManager
             File.WriteAllText(path, body);
             _logger?.Info(LoggerTypes.Proxy, $"Wrote proxy config → {path}");
             _logger?.Debug(LoggerTypes.Proxy, body.Length > 500 ? body[..500] + "…" : body);
+
+            foreach (var space in list)
+            {
+                ProxyAccessLogs.EnsureDir(_config.System.RootDirectory, space.Uuid);
+                if (string.Equals(space.Runtime, "php", StringComparison.OrdinalIgnoreCase))
+                    WebSpaceSiteFiles.WriteApacheAddons(WebSpaceDataPath(space), space);
+            }
 
             TryReload();
         }
@@ -131,12 +170,13 @@ public sealed class ReverseProxyManager
         return Path.Combine(_config.System.RootDirectory, "proxy", fileName);
     }
 
-    private string ContentRoot(WebSpace space)
+    private string ContentRoot(WebSpace space, WebSpaceDomainRoute? route = null)
     {
-        var basePath = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota
-            ? FeatherQuilld.Utils.WebSpaces.Disk.FuseQuotaLimiter.GetMountPath(_config.System, space.Uuid)
-            : Path.Combine(_config.System.Data, space.Uuid.ToString());
-        return WebSpaceStore.ResolveContentRootPath(basePath, space.DocumentRoot);
+        var basePath = WebSpaceDataPath(space);
+        var rel = route is not null && !string.IsNullOrWhiteSpace(route.DocumentRoot)
+            ? route.DocumentRoot
+            : space.DocumentRoot;
+        return WebSpaceStore.ResolveContentRootPath(basePath, rel);
     }
 
     private string BuildCaddy(IEnumerable<WebSpace> spaces)
@@ -144,7 +184,12 @@ public sealed class ReverseProxyManager
         var sb = new StringBuilder();
         var email = _config.System.Proxy.AcmeEmail?.Trim();
         if (!string.IsNullOrWhiteSpace(email))
-            sb.AppendLine($"{{ email {email} }}");
+        {
+            sb.AppendLine("{");
+            sb.AppendLine($"\temail {email}");
+            sb.AppendLine("}");
+            sb.AppendLine();
+        }
 
         sb.AppendLine("# Generated by FeatherQuilld — do not edit by hand");
         sb.AppendLine();
@@ -152,34 +197,74 @@ public sealed class ReverseProxyManager
         var any = false;
         foreach (var space in spaces.OrderBy(s => s.CreatedAt))
         {
-            if (space.Domains.Count == 0)
+            var routes = EffectiveRoutes(space);
+            if (routes.Count == 0)
             {
                 _logger?.Debug(LoggerTypes.Proxy, $"WebSpace {space.Uuid} has no domains — skip");
                 continue;
             }
 
-            any = true;
-            var hosts = string.Join(", ", space.Domains);
-            sb.AppendLine(hosts);
-            sb.AppendLine("{");
+            var appRoutes = routes.Where(r => !string.Equals(r.Type, "redirect", StringComparison.OrdinalIgnoreCase)).ToList();
+            var redirectRoutes = routes.Where(r => string.Equals(r.Type, "redirect", StringComparison.OrdinalIgnoreCase)).ToList();
 
-            if (!space.Ssl)
-                sb.AppendLine("\ttls internal");
-
-            if (space.BackendPort > 0)
+            foreach (var route in appRoutes)
             {
-                sb.AppendLine($"\treverse_proxy 127.0.0.1:{space.BackendPort}");
-            }
-            else
-            {
-                var root = ContentRoot(space);
-                sb.AppendLine($"\troot * {root}");
-                sb.AppendLine("\tfile_server");
-                sb.AppendLine($"\t# WebSpace {space.Uuid} webplate={space.WebPlateId} — backend_port unset");
+                any = true;
+                sb.AppendLine(route.Domain);
+                sb.AppendLine("{");
+
+                if (!space.Ssl)
+                {
+                    sb.AppendLine("\ttls internal");
+                }
+                else if (UsesCustomSsl(space) || UsesDns01Ssl(space))
+                {
+                    var files = ResolveSslFiles(space, route.Domain);
+                    if (files is not null)
+                        sb.AppendLine($"\ttls {files.Value.cert} {files.Value.key}");
+                }
+                else if (!string.IsNullOrWhiteSpace(space.AcmeEmail))
+                {
+                    sb.AppendLine($"\ttls {space.AcmeEmail.Trim()}");
+                }
+
+                AppendCaddyWaf(sb, space);
+
+                var accessLog = ProxyAccessLogs.AccessLogPath(_config.System.RootDirectory, space.Uuid, route.Domain);
+                sb.AppendLine("\tlog {");
+                sb.AppendLine($"\t\toutput file {accessLog}");
+                sb.AppendLine("\t\tformat json");
+                sb.AppendLine("\t}");
+
+                if (space.BackendPort > 0)
+                {
+                    var upstream = BackendHostResolver.ResolveUpstream(_config.System.Proxy, space);
+                    sb.AppendLine($"\treverse_proxy {upstream}:{space.BackendPort}");
+                }
+                else
+                {
+                    var root = ContentRoot(space, route);
+                    sb.AppendLine($"\troot * {root}");
+                    sb.AppendLine("\tfile_server");
+                    sb.AppendLine($"\t# WebSpace {space.Uuid} webplate={space.WebPlateId} — backend_port unset");
+                }
+
+                sb.AppendLine("}");
+                sb.AppendLine();
             }
 
-            sb.AppendLine("}");
-            sb.AppendLine();
+            foreach (var redirect in redirectRoutes)
+            {
+                any = true;
+                var target = string.IsNullOrWhiteSpace(redirect.RedirectTarget)
+                    ? "/"
+                    : redirect.RedirectTarget.Trim();
+                sb.AppendLine(redirect.Domain);
+                sb.AppendLine("{");
+                sb.AppendLine($"\tredir {target}{{uri}} permanent");
+                sb.AppendLine("}");
+                sb.AppendLine();
+            }
         }
 
         if (!any)
@@ -199,22 +284,61 @@ public sealed class ReverseProxyManager
 
         foreach (var space in spaces.OrderBy(s => s.CreatedAt))
         {
-            if (space.Domains.Count == 0)
+            var routes = EffectiveRoutes(space);
+            if (routes.Count == 0)
                 continue;
 
-            foreach (var domain in space.Domains)
+            foreach (var route in routes)
             {
+                var domain = route.Domain;
+                if (string.Equals(route.Type, "redirect", StringComparison.OrdinalIgnoreCase))
+                {
+                    var target = string.IsNullOrWhiteSpace(route.RedirectTarget) ? "/" : route.RedirectTarget.Trim();
+                    sb.AppendLine("server {");
+                    sb.AppendLine("    listen 80;");
+                    sb.AppendLine($"    server_name {domain};");
+                    sb.AppendLine($"    return 301 {target}$request_uri;");
+                    sb.AppendLine("}");
+                    sb.AppendLine();
+
+                    // HTTPS on redirect hosts so www↔apex works when clients hit https://www.…
+                    if (space.Ssl)
+                    {
+                        var redirectSsl = ResolveSslFiles(space, domain);
+                        sb.AppendLine("server {");
+                        sb.AppendLine("    listen 443 ssl;");
+                        sb.AppendLine($"    server_name {domain};");
+                        if (redirectSsl is not null && File.Exists(redirectSsl.Value.cert) && File.Exists(redirectSsl.Value.key))
+                        {
+                            sb.AppendLine($"    ssl_certificate     {redirectSsl.Value.cert};");
+                            sb.AppendLine($"    ssl_certificate_key {redirectSsl.Value.key};");
+                        }
+                        sb.AppendLine($"    return 301 {target}$request_uri;");
+                        sb.AppendLine("}");
+                        sb.AppendLine();
+                    }
+
+                    continue;
+                }
+
+                var accessLog = ProxyAccessLogs.AccessLogPath(_config.System.RootDirectory, space.Uuid, domain);
+                var errorLog = ProxyAccessLogs.ErrorLogPath(_config.System.RootDirectory, space.Uuid, domain);
+
                 // Always expose HTTP for ACME challenges (and non-SSL sites).
                 sb.AppendLine("server {");
                 sb.AppendLine("    listen 80;");
                 sb.AppendLine($"    server_name {domain};");
+                sb.AppendLine($"    access_log {accessLog};");
+                sb.AppendLine($"    error_log {errorLog};");
+                if (space.WafEnabled)
+                    AppendNginxWafDirectives(sb, space);
                 sb.AppendLine("    location ^~ /.well-known/acme-challenge/ {");
                 sb.AppendLine($"        root {challengeRoot};");
                 sb.AppendLine("        default_type text/plain;");
                 sb.AppendLine("    }");
 
                 if (!space.Ssl)
-                    AppendNginxAppLocation(sb, space);
+                    AppendNginxAppLocation(sb, space, route);
                 else
                     sb.AppendLine("    location / { return 301 https://$host$request_uri; }");
 
@@ -224,11 +348,14 @@ public sealed class ReverseProxyManager
                 if (!space.Ssl)
                     continue;
 
-                var crt = NginxAcmeService.CertPath(domain);
-                var key = NginxAcmeService.KeyPath(domain);
+                var sslFiles = ResolveSslFiles(space, domain);
+                var crt = sslFiles?.cert ?? NginxAcmeService.CertPath(domain);
+                var key = sslFiles?.key ?? NginxAcmeService.KeyPath(domain);
                 sb.AppendLine("server {");
                 sb.AppendLine("    listen 443 ssl;");
                 sb.AppendLine($"    server_name {domain};");
+                sb.AppendLine($"    access_log {accessLog};");
+                sb.AppendLine($"    error_log {errorLog};");
 
                 if (File.Exists(crt) && File.Exists(key))
                 {
@@ -244,7 +371,10 @@ public sealed class ReverseProxyManager
                     sb.AppendLine($"    # ssl_certificate_key {key};");
                 }
 
-                AppendNginxAppLocation(sb, space);
+                if (space.WafEnabled)
+                    AppendNginxWafDirectives(sb, space);
+
+                AppendNginxAppLocation(sb, space, route);
                 sb.AppendLine("}");
                 sb.AppendLine();
             }
@@ -268,45 +398,215 @@ public sealed class ReverseProxyManager
         sb.AppendLine("  routers:");
 
         var anyRouter = false;
+        var middlewares = new StringBuilder();
+        var wroteMiddlewareHeader = false;
         var services = new StringBuilder();
         services.AppendLine("  services:");
 
         foreach (var space in spaces.OrderBy(s => s.CreatedAt))
         {
-            if (space.Domains.Count == 0)
+            var allRoutes = EffectiveRoutes(space);
+            if (allRoutes.Count == 0)
                 continue;
 
-            if (space.BackendPort <= 0)
+            var appRoutes = allRoutes
+                .Where(r => !string.Equals(r.Type, "redirect", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            var redirectRoutes = allRoutes
+                .Where(r => string.Equals(r.Type, "redirect", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (appRoutes.Count > 0)
             {
-                _logger?.Warning(LoggerTypes.Proxy,
-                    $"Traefik skip WebSpace {space.Uuid}: backend_port required (allocate for static via Traefik)");
-                continue;
+                if (space.BackendPort <= 0)
+                {
+                    _logger?.Warning(LoggerTypes.Proxy,
+                        $"Traefik skip WebSpace {space.Uuid}: backend_port required (allocate for static via Traefik)");
+                }
+                else
+                {
+                    anyRouter = true;
+                    var id = "ws-" + space.Uuid.ToString("N")[..12];
+                    var hostRule = string.Join(" || ",
+                        appRoutes.Select(d => $"Host(`{EscapeYamlScalar(d.Domain)}`)"));
+
+                    if (space.Ssl)
+                    {
+                        var httpsRedirectId = $"{id}-https-redirect";
+                        if (!wroteMiddlewareHeader)
+                        {
+                            middlewares.AppendLine("  middlewares:");
+                            wroteMiddlewareHeader = true;
+                        }
+
+                        middlewares.AppendLine($"    {httpsRedirectId}:");
+                        middlewares.AppendLine("      redirectScheme:");
+                        middlewares.AppendLine("        scheme: https");
+                        middlewares.AppendLine("        permanent: true");
+
+                        sb.AppendLine($"    {id}-http:");
+                        sb.AppendLine($"      rule: \"{hostRule}\"");
+                        sb.AppendLine("      entryPoints:");
+                        sb.AppendLine("        - web");
+                        sb.AppendLine("      middlewares:");
+                        sb.AppendLine($"        - {httpsRedirectId}");
+                        sb.AppendLine($"      service: {id}");
+                    }
+
+                    sb.AppendLine($"    {id}:");
+                    sb.AppendLine($"      rule: \"{hostRule}\"");
+                    sb.AppendLine($"      service: {id}");
+                    if (space.Ssl)
+                    {
+                        sb.AppendLine("      entryPoints:");
+                        sb.AppendLine("        - websecure");
+                        if (UsesDns01Ssl(space) || UsesCustomSsl(space))
+                            sb.AppendLine("      tls: {}");
+                        else
+                        {
+                            sb.AppendLine("      tls:");
+                            sb.AppendLine("        certResolver: featherquilld");
+                        }
+                    }
+                    else
+                    {
+                        sb.AppendLine("      entryPoints:");
+                        sb.AppendLine("        - web");
+                    }
+
+                    if (space.WafEnabled)
+                    {
+                        var wafMwId = $"{id}-waf";
+                        if (!wroteMiddlewareHeader)
+                        {
+                            middlewares.AppendLine("  middlewares:");
+                            wroteMiddlewareHeader = true;
+                        }
+
+                        middlewares.AppendLine($"    {wafMwId}:");
+                        middlewares.AppendLine("      headers:");
+                        middlewares.AppendLine("        stsSeconds: 31536000");
+                        middlewares.AppendLine("        forceSTSHeader: true");
+                        middlewares.AppendLine("        contentTypeNosniff: true");
+                        middlewares.AppendLine("        customFrameOptionsValue: SAMEORIGIN");
+                        middlewares.AppendLine("        referrerPolicy: strict-origin-when-cross-origin");
+                        middlewares.AppendLine("      buffering:");
+                        middlewares.AppendLine("        maxRequestBodyBytes: 10485760");
+                        sb.AppendLine("      middlewares:");
+                        sb.AppendLine($"        - {wafMwId}");
+                    }
+
+                    if (space.WafEnabled && space.WafDenyIps.Count > 0)
+                    {
+                        var denyId = $"{id}-ipdeny";
+                        if (!wroteMiddlewareHeader)
+                        {
+                            middlewares.AppendLine("  middlewares:");
+                            wroteMiddlewareHeader = true;
+                        }
+
+                        var clientIp = string.Join(" || ",
+                            space.WafDenyIps.Select(ip => $"ClientIP(`{EscapeYamlScalar(ip)}`)"));
+                        sb.AppendLine($"    {denyId}:");
+                        sb.AppendLine($"      rule: \"({hostRule}) && ({clientIp})\"");
+                        sb.AppendLine("      priority: 100");
+                        sb.AppendLine($"      service: {id}");
+                        if (space.Ssl)
+                        {
+                            sb.AppendLine("      entryPoints:");
+                            sb.AppendLine("        - websecure");
+                        }
+                        else
+                        {
+                            sb.AppendLine("      entryPoints:");
+                            sb.AppendLine("        - web");
+                        }
+
+                        middlewares.AppendLine($"    {denyId}:");
+                        middlewares.AppendLine("      ipAllowList:");
+                        middlewares.AppendLine("        sourceRange:");
+                        middlewares.AppendLine("          - 255.255.255.255/32");
+                        sb.AppendLine("      middlewares:");
+                        sb.AppendLine($"        - {denyId}");
+                    }
+
+                    if (space.WafEnabled && space.WafDenyPaths.Count > 0)
+                    {
+                        var pathDenyId = $"{id}-pathdeny";
+                        if (!wroteMiddlewareHeader)
+                        {
+                            middlewares.AppendLine("  middlewares:");
+                            wroteMiddlewareHeader = true;
+                        }
+
+                        var pathRule = string.Join(" || ",
+                            space.WafDenyPaths.Select(p => $"PathPrefix(`{EscapeYamlScalar(p)}`)"));
+                        sb.AppendLine($"    {pathDenyId}:");
+                        sb.AppendLine($"      rule: \"({hostRule}) && ({pathRule})\"");
+                        sb.AppendLine("      priority: 90");
+                        sb.AppendLine($"      service: {id}");
+                        if (space.Ssl)
+                        {
+                            sb.AppendLine("      entryPoints:");
+                            sb.AppendLine("        - websecure");
+                        }
+                        else
+                        {
+                            sb.AppendLine("      entryPoints:");
+                            sb.AppendLine("        - web");
+                        }
+
+                        middlewares.AppendLine($"    {pathDenyId}:");
+                        middlewares.AppendLine("      ipAllowList:");
+                        middlewares.AppendLine("        sourceRange:");
+                        middlewares.AppendLine("          - 255.255.255.255/32");
+                        sb.AppendLine("      middlewares:");
+                        sb.AppendLine($"        - {pathDenyId}");
+                    }
+
+                    services.AppendLine($"    {id}:");
+                    services.AppendLine("      loadBalancer:");
+                    services.AppendLine("        servers:");
+                    var upstream = BackendHostResolver.ResolveUpstream(_config.System.Proxy, space);
+                    services.AppendLine($"          - url: \"http://{upstream}:{space.BackendPort}\"");
+                }
             }
 
-            anyRouter = true;
-            var id = "ws-" + space.Uuid.ToString("N")[..12];
-            var hostRule = string.Join(" || ", space.Domains.Select(d => $"Host(`{EscapeYamlScalar(d)}`)"));
+            for (var i = 0; i < redirectRoutes.Count; i++)
+            {
+                var redirect = redirectRoutes[i];
+                var target = string.IsNullOrWhiteSpace(redirect.RedirectTarget)
+                    ? "/"
+                    : redirect.RedirectTarget.Trim();
+                var routerId = $"ws-rd-{space.Uuid.ToString("N")[..8]}-{i}";
+                var mwId = routerId;
 
-            sb.AppendLine($"    {id}:");
-            sb.AppendLine($"      rule: \"{hostRule}\"");
-            sb.AppendLine($"      service: {id}");
-            if (space.Ssl)
-            {
-                sb.AppendLine("      entryPoints:");
-                sb.AppendLine("        - websecure");
-                sb.AppendLine("      tls:");
-                sb.AppendLine("        certResolver: featherquilld");
-            }
-            else
-            {
+                anyRouter = true;
+
+                if (!wroteMiddlewareHeader)
+                {
+                    middlewares.AppendLine("  middlewares:");
+                    wroteMiddlewareHeader = true;
+                }
+
+                sb.AppendLine($"    {routerId}:");
+                sb.AppendLine($"      rule: \"Host(`{EscapeYamlScalar(redirect.Domain)}`)\"");
                 sb.AppendLine("      entryPoints:");
                 sb.AppendLine("        - web");
-            }
+                sb.AppendLine("      middlewares:");
+                sb.AppendLine($"        - {mwId}");
+                sb.AppendLine("      service: featherquilld-redirect-sink");
 
-            services.AppendLine($"    {id}:");
-            services.AppendLine("      loadBalancer:");
-            services.AppendLine("        servers:");
-            services.AppendLine($"          - url: \"http://127.0.0.1:{space.BackendPort}\"");
+                var escapedDomain = Regex.Escape(redirect.Domain);
+                var regex = $"^https?://{escapedDomain}(.*)";
+                var replacement = BuildTraefikRedirectReplacement(target);
+
+                middlewares.AppendLine($"    {mwId}:");
+                middlewares.AppendLine("      redirectRegex:");
+                middlewares.AppendLine($"        regex: \"{regex}\"");
+                middlewares.AppendLine($"        replacement: \"{EscapeYamlScalar(replacement)}\"");
+                middlewares.AppendLine("        permanent: true");
+            }
         }
 
         if (!anyRouter)
@@ -326,19 +626,205 @@ public sealed class ReverseProxyManager
             return sb.ToString();
         }
 
+        if (wroteMiddlewareHeader)
+            sb.Append(middlewares);
+
+        if (RedirectRoutesNeedSink(spaces))
+        {
+            services.AppendLine("    featherquilld-redirect-sink:");
+            services.AppendLine("      loadBalancer:");
+            services.AppendLine("        servers:");
+            services.AppendLine("          - url: \"http://127.0.0.1:9\"");
+        }
+
         sb.Append(services);
+
+        var tlsCerts = new StringBuilder();
+        foreach (var space in spaces.Where(s => s.Ssl && (UsesDns01Ssl(s) || UsesCustomSsl(s))).OrderBy(s => s.CreatedAt))
+        {
+            var files = ResolveSslFiles(space, ResolveApexDomain(space));
+            if (files is null || !File.Exists(files.Value.cert) || !File.Exists(files.Value.key))
+                continue;
+            if (tlsCerts.Length == 0)
+            {
+                tlsCerts.AppendLine("tls:");
+                tlsCerts.AppendLine("  certificates:");
+            }
+            tlsCerts.AppendLine("    - certFile: " + files.Value.cert);
+            tlsCerts.AppendLine("      keyFile: " + files.Value.key);
+        }
+        if (tlsCerts.Length > 0)
+        {
+            sb.AppendLine();
+            sb.Append(tlsCerts);
+        }
+
         return sb.ToString();
     }
+
+    private static bool RedirectRoutesNeedSink(IEnumerable<WebSpace> spaces) =>
+        spaces.Any(s => EffectiveRoutes(s).Any(r =>
+            string.Equals(r.Type, "redirect", StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>Traefik <c>redirectRegex</c> replacement — mirrors Caddy <c>redir target{uri}</c>.</summary>
+    private static string BuildTraefikRedirectReplacement(string target) =>
+        target.TrimEnd('/') + "${1}";
 
     private static string EscapeYamlScalar(string value) =>
         value.Replace("\"", "", StringComparison.Ordinal).Replace("\n", "", StringComparison.Ordinal);
 
-    private void AppendNginxAppLocation(StringBuilder sb, WebSpace space)
+    private static IReadOnlyList<WebSpaceDomainRoute> EffectiveRoutes(WebSpace space)
+    {
+        if (space.DomainRoutes.Count > 0)
+            return space.DomainRoutes;
+
+        return space.Domains
+            .Select((domain, index) => new WebSpaceDomainRoute
+            {
+                Domain = domain,
+                Type = index == 0 ? "primary" : "alias",
+            })
+            .ToList();
+    }
+
+    private static bool UsesCustomSsl(WebSpace space) =>
+        string.Equals(space.SslMode, "custom", StringComparison.OrdinalIgnoreCase);
+
+    private static bool UsesDns01Ssl(WebSpace space) =>
+        string.Equals(space.SslMode, "dns01", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Apex host for www↔apex redirects and wildcard certs (strips leading www.).</summary>
+    internal static string ResolveApexDomain(WebSpace space)
+    {
+        var routes = EffectiveRoutes(space);
+        var primary = routes.FirstOrDefault(r =>
+            string.Equals(r.Type, "primary", StringComparison.OrdinalIgnoreCase))?.Domain
+            ?? routes.FirstOrDefault()?.Domain
+            ?? space.Domains.FirstOrDefault()
+            ?? "";
+        primary = primary.Trim().TrimEnd('.').ToLowerInvariant();
+        if (primary.StartsWith("www.", StringComparison.Ordinal))
+            return primary[4..];
+        return primary;
+    }
+
+    private (string cert, string key)? ResolveSslFiles(WebSpace space, string domain)
+    {
+        if (UsesCustomSsl(space))
+            return CustomSslFiles(space);
+
+        if (UsesDns01Ssl(space))
+        {
+            var apex = ResolveApexDomain(space);
+            if (string.IsNullOrWhiteSpace(apex))
+                apex = domain;
+            return (NginxAcmeService.CertPath(apex), NginxAcmeService.KeyPath(apex));
+        }
+
+        if (string.IsNullOrWhiteSpace(domain))
+            return null;
+        return (NginxAcmeService.CertPath(domain), NginxAcmeService.KeyPath(domain));
+    }
+
+    private (string cert, string key)? CustomSslFiles(WebSpace space)
+    {
+        if (!UsesCustomSsl(space))
+            return null;
+
+        var basePath = WebSpaceDataPath(space);
+        var cert = Path.Combine(basePath, "ssl", "custom", "cert.pem");
+        var key = Path.Combine(basePath, "ssl", "custom", "key.pem");
+        if (File.Exists(cert) && File.Exists(key))
+            return (cert, key);
+
+        return null;
+    }
+
+    private string WebSpaceDataPath(WebSpace space) =>
+        _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota
+            ? FeatherQuilld.Utils.WebSpaces.Disk.FuseQuotaLimiter.GetMountPath(_config.System, space.Uuid)
+            : Path.Combine(_config.System.Data, space.Uuid.ToString());
+
+    private static void AppendCaddyWaf(StringBuilder sb, WebSpace space)
+    {
+        if (!space.WafEnabled)
+            return;
+
+        sb.AppendLine("\theader {");
+        sb.AppendLine("\t\tStrict-Transport-Security \"max-age=31536000;\"");
+        sb.AppendLine("\t\tX-Content-Type-Options nosniff");
+        sb.AppendLine("\t\tX-Frame-Options SAMEORIGIN");
+        sb.AppendLine("\t\tReferrer-Policy strict-origin-when-cross-origin");
+        sb.AppendLine("\t}");
+        sb.AppendLine("\trequest_body {");
+        sb.AppendLine("\t\tmax_size 10MB");
+        sb.AppendLine("\t}");
+        if (space.WafDenyIps.Count > 0)
+        {
+            var list = string.Join(" ", space.WafDenyIps);
+            sb.AppendLine($"\t@denied remote_ip {list}");
+            sb.AppendLine("\trespond @denied 403");
+        }
+
+        if (space.WafDenyPaths.Count > 0)
+        {
+            var paths = string.Join(" ", space.WafDenyPaths.Select(EscapeCaddyPathMatcher));
+            sb.AppendLine($"\t@deniedpath path {paths}");
+            sb.AppendLine("\trespond @deniedpath 403");
+        }
+    }
+
+    private static string EscapeCaddyPathMatcher(string path)
+    {
+        // Caddy path matchers are space-separated; quote if needed.
+        if (path.Contains(' ', StringComparison.Ordinal) || path.Contains('"', StringComparison.Ordinal))
+            return "\"" + path.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+        return path;
+    }
+
+    private static void AppendNginxWafDirectives(StringBuilder sb, WebSpace space)
+    {
+        sb.AppendLine("    add_header Strict-Transport-Security \"max-age=31536000\" always;");
+        sb.AppendLine("    add_header X-Content-Type-Options nosniff always;");
+        sb.AppendLine("    add_header X-Frame-Options SAMEORIGIN always;");
+        sb.AppendLine("    add_header Referrer-Policy \"strict-origin-when-cross-origin\" always;");
+        sb.AppendLine("    client_max_body_size 10m;");
+        foreach (var ip in space.WafDenyIps)
+            sb.AppendLine($"    deny {ip};");
+        foreach (var path in space.WafDenyPaths)
+        {
+            var escaped = EscapeNginxLocation(path);
+            sb.AppendLine($"    location ^~ {escaped} {{");
+            sb.AppendLine("        deny all;");
+            sb.AppendLine("        return 403;");
+            sb.AppendLine("    }");
+        }
+
+        if (ModSecurityProbe.IsAvailable())
+        {
+            var rules = ModSecurityProbe.ResolveRulesFile();
+            if (!string.IsNullOrWhiteSpace(rules))
+            {
+                sb.AppendLine("    modsecurity on;");
+                sb.AppendLine($"    modsecurity_rules_file {rules};");
+            }
+        }
+    }
+
+    private static string EscapeNginxLocation(string path)
+    {
+        // Prefix match; quote the URI so special chars are literal.
+        return "\"" + path.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+    }
+
+    private void AppendNginxAppLocation(StringBuilder sb, WebSpace space, WebSpaceDomainRoute? route = null)
     {
         if (space.BackendPort > 0)
         {
+            var upstream = BackendHostResolver.ResolveUpstream(_config.System.Proxy, space);
             sb.AppendLine("    location / {");
-            sb.AppendLine($"        proxy_pass http://127.0.0.1:{space.BackendPort};");
+            sb.AppendLine($"        proxy_pass http://{upstream}:{space.BackendPort};");
             sb.AppendLine("        proxy_set_header Host $host;");
             sb.AppendLine("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;");
             sb.AppendLine("        proxy_set_header X-Forwarded-Proto $scheme;");
@@ -346,7 +832,7 @@ public sealed class ReverseProxyManager
         }
         else
         {
-            var root = ContentRoot(space);
+            var root = ContentRoot(space, route);
             sb.AppendLine($"    root {root};");
             sb.AppendLine("    index index.html;");
             sb.AppendLine("    location / { try_files $uri $uri/ =404; }");
@@ -354,6 +840,21 @@ public sealed class ReverseProxyManager
     }
 
     private void TryReload()
+    {
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                TryReloadCore();
+            }
+            catch (Exception ex)
+            {
+                _logger?.Debug(LoggerTypes.Proxy, $"Proxy reload skipped: {ex.Message}");
+            }
+        });
+    }
+
+    private void TryReloadCore()
     {
         try
         {
@@ -365,47 +866,105 @@ public sealed class ReverseProxyManager
                 return;
             }
 
-            var psi = provider == "nginx"
-                ? new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "nginx",
-                    ArgumentList = { "-s", "reload" },
-                    RedirectStandardError = true,
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                }
-                : new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "caddy",
-                    ArgumentList = { "reload", "--config", ResolveConfigPath() },
-                    RedirectStandardError = true,
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                };
-
-            using var proc = System.Diagnostics.Process.Start(psi);
-            if (proc is null)
+            if (provider == "caddy")
             {
-                _logger?.Debug(LoggerTypes.Proxy, $"Could not start {provider} reload");
+                TryReloadCaddy();
                 return;
             }
 
-            if (!proc.WaitForExit(5000))
+            var psi = new System.Diagnostics.ProcessStartInfo
             {
-                try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
-                _logger?.Warning(LoggerTypes.Proxy, $"{provider} reload timed out");
-                return;
-            }
+                FileName = "nginx",
+                ArgumentList = { "-s", "reload" },
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+            };
 
-            if (proc.ExitCode == 0)
-                _logger?.Info(LoggerTypes.Proxy, $"{provider} reloaded");
-            else
-                _logger?.Debug(LoggerTypes.Proxy,
-                    $"{provider} reload exit={proc.ExitCode}: {proc.StandardError.ReadToEnd().Trim()}");
+            RunReloadProcess(psi, "nginx", out _);
         }
         catch (Exception ex)
         {
             _logger?.Debug(LoggerTypes.Proxy, $"Proxy reload skipped: {ex.Message}");
+        }
+    }
+
+    private void TryReloadCaddy()
+    {
+        var configPath = ResolveConfigPath();
+        var reloadPsi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "caddy",
+            ArgumentList = { "reload", "--config", configPath },
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+
+        if (RunReloadProcess(reloadPsi, "caddy", out var reloadOutput))
+            return;
+
+        var combined = reloadOutput.ToLowerInvariant();
+        if (!combined.Contains("connection refused", StringComparison.Ordinal) &&
+            !combined.Contains("no such file", StringComparison.Ordinal) &&
+            !combined.Contains("not running", StringComparison.Ordinal))
+            return;
+
+        _logger?.Info(LoggerTypes.Proxy, "Caddy admin API unavailable — starting Caddy with FeatherQuilld config");
+        var startPsi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "caddy",
+            ArgumentList = { "start", "--config", configPath },
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+
+        RunReloadProcess(startPsi, "caddy start", out _);
+    }
+
+    private bool RunReloadProcess(System.Diagnostics.ProcessStartInfo psi, string label, out string output)
+    {
+        output = "";
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc is null)
+        {
+            _logger?.Debug(LoggerTypes.Proxy, $"Could not start {label}");
+            return false;
+        }
+
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+        var stderrTask = proc.StandardError.ReadToEndAsync();
+
+        if (!proc.WaitForExit(15_000))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
+            _logger?.Warning(LoggerTypes.Proxy, $"{label} timed out");
+            output = ReadProcessOutput(stderrTask, stdoutTask);
+            return false;
+        }
+
+        output = ReadProcessOutput(stderrTask, stdoutTask);
+        if (proc.ExitCode == 0)
+        {
+            _logger?.Info(LoggerTypes.Proxy, $"{label} ok");
+            return true;
+        }
+
+        _logger?.Debug(LoggerTypes.Proxy, $"{label} exit={proc.ExitCode}: {output}");
+        return false;
+    }
+
+    private static string ReadProcessOutput(Task<string> stderrTask, Task<string> stdoutTask)
+    {
+        try
+        {
+            Task.WaitAll([stderrTask, stdoutTask], TimeSpan.FromSeconds(2));
+            return (stderrTask.Result + stdoutTask.Result).Trim();
+        }
+        catch
+        {
+            return "";
         }
     }
 }

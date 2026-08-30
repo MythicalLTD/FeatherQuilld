@@ -1,3 +1,4 @@
+using System.Text;
 using Docker.DotNet;
 using Docker.DotNet.Models;
 using FeatherQuilld.Utils.Config.Docker;
@@ -12,12 +13,14 @@ namespace FeatherQuilld.Utils.Docker;
 public sealed class WebSpaceInstaller
 {
     private readonly DockerConfig _docker;
+    private readonly WebSpaceWsHub? _wsHub;
     private readonly AppLogger? _logger;
 
-    public WebSpaceInstaller(DockerConfig docker, AppLogger? logger = null)
+    public WebSpaceInstaller(DockerConfig docker, AppLogger? logger = null, WebSpaceWsHub? wsHub = null)
     {
         _docker = docker;
         _logger = logger;
+        _wsHub = wsHub;
     }
 
     public async Task RunAsync(
@@ -44,10 +47,10 @@ public sealed class WebSpaceInstaller
         var installDir = Path.Combine(dataPath, ".install");
         Directory.CreateDirectory(installDir);
         var scriptPath = Path.Combine(installDir, "install.sh");
+        var logPath = Path.Combine(installDir, "install.log");
         await File.WriteAllTextAsync(scriptPath, NormalizeScript(script), cancellationToken);
         try
         {
-            // Make executable for container users.
             if (!OperatingSystem.IsWindows())
                 File.SetUnixFileMode(scriptPath,
                     UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
@@ -99,10 +102,11 @@ public sealed class WebSpaceInstaller
         if (!started)
             throw new InvalidOperationException($"Failed to start installer container {name}.");
 
+        using var logCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var streamTask = StreamInstallerLogsAsync(client, create.ID, logPath, space.Uuid, logCts.Token);
         var wait = await client.Containers.WaitContainerAsync(create.ID, cancellationToken);
-        var exitCode = wait.StatusCode;
-
-        await CaptureInstallLogsAsync(client, create.ID, installDir, cancellationToken);
+        logCts.Cancel();
+        try { await streamTask.ConfigureAwait(false); } catch { /* cancelled when container exits */ }
 
         try
         {
@@ -117,8 +121,8 @@ public sealed class WebSpaceInstaller
             _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to remove installer {name}: {ex.Message}");
         }
 
-        if (exitCode != 0)
-            throw new InvalidOperationException($"Installer container exited with code {exitCode}.");
+        if (wait.StatusCode != 0)
+            throw new InvalidOperationException($"Installer container exited with code {wait.StatusCode}.");
 
         _logger?.Info(LoggerTypes.WebSpaces, $"Installer finished ok for {space.Uuid}");
     }
@@ -126,37 +130,66 @@ public sealed class WebSpaceInstaller
     public static string InstallLogPath(string dataPath) =>
         Path.Combine(dataPath, ".install", "install.log");
 
-    private async Task CaptureInstallLogsAsync(
-        DockerClient client, string containerId, string installDir, CancellationToken ct)
+    private async Task StreamInstallerLogsAsync(
+        DockerClient client,
+        string containerId,
+        string logPath,
+        Guid uuid,
+        CancellationToken ct)
     {
+        MultiplexedStream stream;
         try
         {
-            Directory.CreateDirectory(installDir);
-            var logPath = Path.Combine(installDir, "install.log");
-            var stream = await client.Containers.GetContainerLogsAsync(
+            stream = await client.Containers.GetContainerLogsAsync(
                 containerId,
                 tty: false,
                 new ContainerLogsParameters
                 {
                     ShowStdout = true,
                     ShowStderr = true,
-                    Tail = "all",
+                    Follow = true,
+                    Timestamps = false,
                 },
                 ct);
-
-            using var multiplexed = stream;
-            using var stdout = new MemoryStream();
-            using var stderr = new MemoryStream();
-            await multiplexed.CopyOutputToAsync(null, stdout, stderr, ct);
-            var text = System.Text.Encoding.UTF8.GetString(stdout.ToArray());
-            var err = System.Text.Encoding.UTF8.GetString(stderr.ToArray());
-            if (err.Length > 0)
-                text = string.IsNullOrEmpty(text) ? err : text + "\n" + err;
-            await File.WriteAllTextAsync(logPath, text, ct);
         }
         catch (Exception ex)
         {
-            _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to capture install logs: {ex.Message}");
+            _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to follow installer logs: {ex.Message}");
+            return;
+        }
+
+        await using var logWriter = new StreamWriter(logPath, append: false, Encoding.UTF8) { AutoFlush = true };
+        using (stream)
+        {
+            var buffer = new byte[8192];
+            var leftover = "";
+            while (!ct.IsCancellationRequested)
+            {
+                var result = await stream.ReadOutputAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
+                if (result.EOF)
+                    break;
+                if (result.Count <= 0)
+                    continue;
+
+                var chunk = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                leftover += chunk;
+                var parts = leftover.Split('\n');
+                leftover = parts[^1];
+                for (var i = 0; i < parts.Length - 1; i++)
+                {
+                    var line = parts[i] + "\n";
+                    await logWriter.WriteAsync(line.AsMemory(), ct).ConfigureAwait(false);
+                    if (_wsHub is not null)
+                        await _wsHub.SendInstallOutputAsync(uuid, line, ct).ConfigureAwait(false);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(leftover))
+            {
+                await logWriter.WriteAsync(leftover.AsMemory(), ct).ConfigureAwait(false);
+                if (_wsHub is not null)
+                    await _wsHub.SendInstallOutputAsync(uuid, leftover, ct).ConfigureAwait(false);
+            }
         }
     }
 

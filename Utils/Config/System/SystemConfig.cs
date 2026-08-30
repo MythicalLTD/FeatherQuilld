@@ -28,6 +28,8 @@ public class SystemConfig
     public string DiskLimiterMode { get; set; } = "fuse_quota";
 
     public ProxyConfig Proxy { get; set; } = new();
+    public DnsConfig Dns { get; set; } = new();
+    public MailConfig Mail { get; set; } = new();
     public string Username { get; set; } = "featherquilld";
     public string Timezone { get; set; } = "UTC";
     public SystemUserConfig User { get; set; } = new();
@@ -66,6 +68,7 @@ public class ProxyConfig
     /// <summary><c>caddy</c>, <c>nginx</c>, or <c>traefik</c>.</summary>
     public string Provider { get; set; } = "caddy";
     public string ConfigPath { get; set; } = "";
+    /// <summary>Operator ACME fallback. Per-WebSpace owner email is preferred when present.</summary>
     public string AcmeEmail { get; set; } = "";
 
     /// <summary>Use Let's Encrypt staging directory (safer for tests).</summary>
@@ -77,6 +80,52 @@ public class ProxyConfig
 
     /// <summary>Inclusive high end of loopback backend ports for Docker runtimes.</summary>
     public int BackendPortMax { get; set; } = 29999;
+
+    /// <summary>
+    /// Upstream address written into generated proxy configs (Caddy/nginx/Traefik).
+    /// Default <c>127.0.0.1</c> when proxy runs on the same host as FeatherQuilld.
+    /// </summary>
+    [YamlMember(Alias = "backend_host")]
+    public string BackendHost { get; set; } = "127.0.0.1";
+
+    /// <summary>
+    /// Host/interface where WebSpace container ports and static backends are published.
+    /// Default <c>127.0.0.1</c> (not reachable off-box). Use <c>0.0.0.0</c> or the node IP
+    /// when an external reverse proxy must reach backends on this machine.
+    /// </summary>
+    [YamlMember(Alias = "backend_bind_host")]
+    public string BackendBindHost { get; set; } = "127.0.0.1";
+}
+
+public class DnsConfig
+{
+    /// <summary>PowerDNS Authoritative HTTP API base URL (localhost only).</summary>
+    [YamlMember(Alias = "powerdns_api_url")]
+    public string PowerDnsApiUrl { get; set; } = "http://127.0.0.1:8081";
+
+    /// <summary>API key for PowerDNS webserver/API. Generated on install if empty.</summary>
+    [YamlMember(Alias = "powerdns_api_key")]
+    public string PowerDnsApiKey { get; set; } = "";
+}
+
+public class MailConfig
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Public mail hostname for MX records (defaults to mail.{domain}).</summary>
+    public string Hostname { get; set; } = "";
+
+    [YamlMember(Alias = "data_path")]
+    public string DataPath { get; set; } = "";
+
+    [YamlMember(Alias = "smtp_port")]
+    public int SmtpPort { get; set; } = 587;
+
+    [YamlMember(Alias = "imap_port")]
+    public int ImapPort { get; set; } = 993;
+
+    [YamlMember(Alias = "dkim_selector")]
+    public string DkimSelector { get; set; } = "mail";
 }
 
 public class SystemUserConfig

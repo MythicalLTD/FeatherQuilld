@@ -1,6 +1,7 @@
 using Cronos;
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Remote;
+using FeatherQuilld.Utils.WebSpaces.Malware;
 using FeatherQuilld.Utils.WebSpaces.Schedules;
 
 namespace FeatherQuilld.Utils.WebSpaces;
@@ -8,6 +9,7 @@ namespace FeatherQuilld.Utils.WebSpaces;
 public sealed class WebSpaceScheduleManager(
     WebSpaceStore spaces,
     WebSpaceBackupService backupService,
+    WebSpaceMalwareScanService malwareScanService,
     IPanelClient panel,
     WebSpaceActivityReporter? activityReporter,
     ILogger<WebSpaceScheduleManager> logger,
@@ -16,6 +18,7 @@ public sealed class WebSpaceScheduleManager(
     private readonly IEventBus _events = events.OrNoOp();
     private readonly Dictionary<string, List<ScheduledEntry>> _entries = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _running = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, CancellationTokenSource> _abortTokens = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
 
     public void SyncSchedules(string webSpaceUuid, IReadOnlyList<WebSpaceScheduleDefinition> schedules)
@@ -152,7 +155,26 @@ public sealed class WebSpaceScheduleManager(
     {
         lock (_lock)
         {
-            return _running.Remove(webSpaceUuid);
+            if (!_running.Contains(webSpaceUuid))
+            {
+                return false;
+            }
+
+            if (_abortTokens.TryGetValue(webSpaceUuid, out var cts))
+            {
+                try
+                {
+                    cts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Race with schedule completion — still treat as aborted.
+                }
+            }
+
+            _abortTokens.Remove(webSpaceUuid);
+            _running.Remove(webSpaceUuid);
+            return true;
         }
     }
 
@@ -178,6 +200,7 @@ public sealed class WebSpaceScheduleManager(
 
     private async Task ExecuteScheduleCoreAsync(string webSpaceUuid, WebSpaceScheduleDefinition schedule, CancellationToken cancellationToken)
     {
+        CancellationTokenSource linkedCts;
         lock (_lock)
         {
             if (!_running.Add(webSpaceUuid))
@@ -188,8 +211,12 @@ public sealed class WebSpaceScheduleManager(
                     webSpaceUuid);
                 return;
             }
+
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _abortTokens[webSpaceUuid] = linkedCts;
         }
 
+        var token = linkedCts.Token;
         try
         {
             logger.LogInformation(
@@ -205,15 +232,19 @@ public sealed class WebSpaceScheduleManager(
 
             foreach (var task in schedule.Tasks.OrderBy(t => t.SequenceId))
             {
-                cancellationToken.ThrowIfCancellationRequested();
+                token.ThrowIfCancellationRequested();
                 if (task.TimeOffset > 0)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(task.TimeOffset), cancellationToken).ConfigureAwait(false);
+                    await Task.Delay(TimeSpan.FromSeconds(task.TimeOffset), token).ConfigureAwait(false);
                 }
 
                 try
                 {
-                    await ExecuteTaskAsync(webSpaceUuid, task, cancellationToken).ConfigureAwait(false);
+                    await ExecuteTaskAsync(webSpaceUuid, task, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -225,14 +256,23 @@ public sealed class WebSpaceScheduleManager(
                 }
             }
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            logger.LogInformation(
+                "Schedule {ScheduleId} aborted for webspace {Uuid}",
+                schedule.Id,
+                webSpaceUuid);
+        }
         finally
         {
             lock (_lock)
             {
                 _running.Remove(webSpaceUuid);
+                _abortTokens.Remove(webSpaceUuid);
             }
+
+            linkedCts.Dispose();
         }
-    
     }
 
     private Task ExecuteTaskAsync(string webSpaceUuid, WebSpaceScheduleTaskDefinition task, CancellationToken cancellationToken) =>
@@ -274,6 +314,10 @@ public sealed class WebSpaceScheduleManager(
                 break;
             case "backup":
                 backupService.Create(uuid, stopDuringBackup: true);
+                break;
+            case "malware_scan":
+            case "scan":
+                malwareScanService.Scan(uuid);
                 break;
             case "command":
             case "exec":

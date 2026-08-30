@@ -1,5 +1,6 @@
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Config;
+using FeatherQuilld.Utils.Logger;
 using FeatherQuilld.Utils.Services;
 using FeatherQuilld.Utils.Startup;
 using FeatherQuilld.Utils.SystemInfo;
@@ -7,6 +8,9 @@ using FeatherQuilld.Utils.WebSpaces;
 using FeatherQuilld.Utils.WebSpaces.Disk;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using System.Net.WebSockets;
+using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace FeatherQuilld.Controllers;
@@ -15,6 +19,11 @@ namespace FeatherQuilld.Controllers;
 [Tags("System")]
 public sealed class SystemController : ApiControllerBase
 {
+    private static readonly JsonSerializerOptions WsJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+    };
+
     private readonly Config _config;
     private readonly DaemonState _state;
     private readonly IEventBus _events;
@@ -195,6 +204,232 @@ public sealed class SystemController : ApiControllerBase
             p.Instance.Metadata.Name,
             p.Instance.Metadata.Version,
             p.Instance.Metadata.Description)).ToList());
+
+    /// <summary>Live package install/remove output (bearer via Authorization header or <c>?token=</c>).</summary>
+    [Authorize]
+    [HttpGet("packages/ws")]
+    public async Task PackageWs(
+        [FromServices] SystemPackageWsHub wsHub,
+        CancellationToken cancellationToken)
+    {
+        if (!HttpContext.WebSockets.IsWebSocketRequest)
+        {
+            HttpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await HttpContext.Response.WriteAsJsonAsync(
+                new { error = "Expected WebSocket upgrade." },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        using var socket = await HttpContext.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+        var socketId = wsHub.Register(socket);
+
+        try
+        {
+            await SendWsEventAsync(socket, "auth success", [], cancellationToken).ConfigureAwait(false);
+            await wsHub.ReplayActiveOperationsAsync(socketId, socket, cancellationToken).ConfigureAwait(false);
+
+            var buffer = new byte[4096];
+            while (!cancellationToken.IsCancellationRequested && socket.State == WebSocketState.Open)
+            {
+                var result = await socket.ReceiveAsync(buffer, cancellationToken).ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
+                    break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // expected during host shutdown (includes connection abort on stop)
+        }
+        catch (WebSocketException)
+        {
+            // client disconnected
+        }
+        finally
+        {
+            wsHub.Unregister(socketId);
+        }
+
+        if (socket.State == WebSocketState.Open)
+        {
+            try
+            {
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None).ConfigureAwait(false);
+            }
+            catch
+            {
+                // ignore close races during shutdown
+            }
+        }
+    }
+
+    /// <summary>List installable host packages (reverse proxy, Docker).</summary>
+    [HttpGet("packages")]
+    [Authorize]
+    [ProducesResponseType(typeof(HostPackagesResponse), StatusCodes.Status200OK)]
+    public ActionResult<HostPackagesResponse> Packages(
+        [FromServices] HostPackageManager packages)
+    {
+        var manager = OperatingSystem.IsLinux() && global::System.IO.File.Exists("/usr/bin/apt-get") ? "apt"
+            : OperatingSystem.IsLinux() && (global::System.IO.File.Exists("/usr/bin/dnf") || global::System.IO.File.Exists("/usr/bin/yum")) ? "dnf"
+            : null;
+        var listed = packages.List();
+        var activeProxy = listed.FirstOrDefault(p => p.Category == "reverse_proxy" && p.Installed)?.Id;
+
+        return Ok(new HostPackagesResponse(manager, listed, activeProxy));
+    }
+
+    /// <summary>Install a supported host package.</summary>
+    [HttpPost("packages/{packageId}/install")]
+    [Authorize]
+    [ProducesResponseType(typeof(HostPackageOperationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(HostPackageOperationResponse), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<HostPackageOperationResponse>> InstallPackage(
+        string packageId,
+        [FromServices] HostPackageManager packages,
+        [FromServices] Utils.Logger.Logger logger,
+        CancellationToken cancellationToken)
+    {
+        var result = await packages.InstallAsync(packageId, logger, cancellationToken).ConfigureAwait(false);
+        var body = new HostPackageOperationResponse(result.Success, result.Message, result.Output, packages.List());
+        return result.Success ? Ok(body) : BadRequest(body);
+    }
+
+    /// <summary>Remove a supported host package.</summary>
+    [HttpPost("packages/{packageId}/remove")]
+    [Authorize]
+    [ProducesResponseType(typeof(HostPackageOperationResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(HostPackageOperationResponse), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<HostPackageOperationResponse>> RemovePackage(
+        string packageId,
+        [FromQuery] bool purge_config = false,
+        [FromServices] HostPackageManager packages = null!,
+        [FromServices] Utils.Logger.Logger logger = null!,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await packages.RemoveAsync(packageId, purge_config, logger, cancellationToken).ConfigureAwait(false);
+        var body = new HostPackageOperationResponse(result.Success, result.Message, result.Output, packages.List());
+        return result.Success ? Ok(body) : BadRequest(body);
+    }
+
+    /// <summary>Compare installed version with upstream (GitHub latest).</summary>
+    [HttpGet("version-status")]
+    [Authorize]
+    [ProducesResponseType(typeof(DaemonVersionStatusResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<DaemonVersionStatusResponse>> VersionStatus(CancellationToken cancellationToken)
+    {
+        var current = StartupBanner.Version.Trim().TrimStart('v');
+        string? latest = null;
+        string? githubError = null;
+        const string owner = "mythicalltd";
+        const string repo = "featherquilld";
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            http.DefaultRequestHeaders.UserAgent.Add(new System.Net.Http.Headers.ProductInfoHeaderValue("FeatherQuilld", StartupBanner.Version));
+            using var response = await http.GetAsync(
+                $"https://api.github.com/repos/{owner}/{repo}/releases/latest",
+                cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            await using var json = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var doc = await JsonDocument.ParseAsync(json, cancellationToken: cancellationToken).ConfigureAwait(false);
+            latest = doc.RootElement.GetProperty("tag_name").GetString()?.Trim().TrimStart('v');
+        }
+        catch (Exception ex)
+        {
+            githubError = ex.Message;
+        }
+
+        var updateAvailable = latest is not null && string.CompareOrdinal(current, latest) < 0;
+        return Ok(new DaemonVersionStatusResponse(
+            CurrentVersion: StartupBanner.Version,
+            LatestVersion: latest,
+            IsUpToDate: latest is null || !updateAvailable,
+            UpdateAvailable: updateAvailable,
+            GithubOwner: owner,
+            GithubRepo: repo,
+            GithubError: githubError));
+    }
+
+    /// <summary>Download and replace the running FeatherQuilld binary.</summary>
+    [HttpPost("self-update")]
+    [Authorize]
+    [ProducesResponseType(typeof(SelfUpdateResponse), StatusCodes.Status202Accepted)]
+    [ProducesResponseType(typeof(SelfUpdateResponse), StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<SelfUpdateResponse>> SelfUpdate(
+        [FromBody] SelfUpdateRequestBody? body,
+        [FromServices] Utils.Logger.Logger logger,
+        CancellationToken cancellationToken)
+    {
+        var request = new DaemonSelfUpdater.SelfUpdateRequest(
+            Source: body?.Source ?? "github",
+            RepoOwner: body?.RepoOwner,
+            RepoName: body?.RepoName,
+            Version: body?.Version,
+            Url: body?.Url,
+            Sha256: body?.Sha256,
+            Force: body?.Force ?? false,
+            DisableChecksum: body?.DisableChecksum ?? false);
+
+        var result = await DaemonSelfUpdater.ApplyAsync(request, logger, cancellationToken).ConfigureAwait(false);
+        var response = new SelfUpdateResponse(result.Success, result.Message, result.RestartScheduled);
+        return result.Success ? Accepted(response) : BadRequest(response);
+    }
+
+    private static async Task SendWsEventAsync(
+        WebSocket socket,
+        string eventName,
+        string[] args,
+        CancellationToken ct)
+    {
+        var payload = JsonSerializer.Serialize(new { Event = eventName, Args = args }, WsJson);
+        var bytes = Encoding.UTF8.GetBytes(payload);
+        await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>List daemon log files (<c>latest.log</c> and archived <c>*.log.gz</c>).</summary>
+    [HttpGet("logs")]
+    [Authorize]
+    [ProducesResponseType(typeof(SystemLogsListResponse), StatusCodes.Status200OK)]
+    public ActionResult<SystemLogsListResponse> ListLogs(
+        [FromServices] Utils.Logger.Logger logger)
+    {
+        var files = SystemLogReader.ListFiles(logger.LogsDirectory)
+            .Select(f => new SystemLogFileResponse(
+                f.Name,
+                f.SizeBytes,
+                f.ModifiedAt,
+                f.Compressed))
+            .ToList();
+
+        return Ok(new SystemLogsListResponse(logger.LogsDirectory, files));
+    }
+
+    /// <summary>Tail lines from a daemon log file.</summary>
+    [HttpGet("logs/{fileName}")]
+    [Authorize]
+    [ProducesResponseType(typeof(SystemLogContentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<SystemLogContentResponse> ReadLog(
+        string fileName,
+        [FromQuery] int lines = 200,
+        [FromServices] Utils.Logger.Logger logger = null!)
+    {
+        try
+        {
+            var content = SystemLogReader.ReadTail(logger.LogsDirectory, fileName, lines);
+            return Ok(new SystemLogContentResponse(fileName, Math.Clamp(lines, 1, 5000), content));
+        }
+        catch (FileNotFoundException)
+        {
+            return NotFound(new { error = "Log file not found." });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
 }
 
 public sealed record SystemIdentityResponse(
@@ -302,3 +537,48 @@ public sealed record PluginInfoResponse(
     string Name,
     string Version,
     string? Description);
+
+public sealed record SystemLogsListResponse(
+    [property: JsonPropertyName("directory")] string Directory,
+    [property: JsonPropertyName("files")] IReadOnlyList<SystemLogFileResponse> Files);
+
+public sealed record SystemLogFileResponse(
+    string Name,
+    [property: JsonPropertyName("size_bytes")] long SizeBytes,
+    [property: JsonPropertyName("modified_at")] DateTimeOffset ModifiedAt,
+    bool Compressed);
+
+public sealed record SystemLogContentResponse(
+    string File,
+    int Lines,
+    string Content);
+
+public sealed record HostPackageOperationResponse(
+    bool Success,
+    string Message,
+    string? Output,
+    IReadOnlyList<HostPackageStatus> Packages);
+
+public sealed record DaemonVersionStatusResponse(
+    [property: JsonPropertyName("current_version")] string CurrentVersion,
+    [property: JsonPropertyName("latest_version")] string? LatestVersion,
+    [property: JsonPropertyName("is_up_to_date")] bool IsUpToDate,
+    [property: JsonPropertyName("update_available")] bool UpdateAvailable,
+    [property: JsonPropertyName("github_owner")] string GithubOwner,
+    [property: JsonPropertyName("github_repo")] string GithubRepo,
+    [property: JsonPropertyName("github_error")] string? GithubError);
+
+public sealed record SelfUpdateRequestBody(
+    string? Source = null,
+    [property: JsonPropertyName("repo_owner")] string? RepoOwner = null,
+    [property: JsonPropertyName("repo_name")] string? RepoName = null,
+    string? Version = null,
+    string? Url = null,
+    string? Sha256 = null,
+    bool Force = false,
+    [property: JsonPropertyName("disable_checksum")] bool DisableChecksum = false);
+
+public sealed record SelfUpdateResponse(
+    bool Success,
+    string Message,
+    [property: JsonPropertyName("restart_scheduled")] bool RestartScheduled);

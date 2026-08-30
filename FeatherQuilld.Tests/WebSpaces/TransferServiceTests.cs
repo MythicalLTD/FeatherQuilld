@@ -232,6 +232,14 @@ public sealed class TransferServiceTests : IDisposable
             string type, string username, string password, string? publicKey = null,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<SftpAuthResult?>(null);
+
+        public Task AcmeDnsAsync(
+            Guid uuid,
+            string action,
+            string name,
+            string content,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private sealed class SuccessUploadHandler : HttpMessageHandler

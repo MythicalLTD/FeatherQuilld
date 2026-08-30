@@ -35,8 +35,10 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     private readonly StaticFileServerManager? _staticFiles;
     private readonly AppLogger? _logger;
     private readonly IEventBus _events;
+    private readonly WebSpaceWsHub? _wsHub;
     private WebSpaceScheduleManager? _schedules;
     private readonly ConcurrentDictionary<Guid, WebSpace> _spaces = new();
+    private readonly ConcurrentDictionary<Guid, byte> _installInFlight = new();
     private readonly object _mutateGate = new();
 
     public WebSpaceStore(
@@ -49,7 +51,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         AppLogger? logger = null,
         NginxAcmeService? acme = null,
         StaticFileServerManager? staticFiles = null,
-        IEventBus? events = null)
+        IEventBus? events = null,
+        WebSpaceWsHub? wsHub = null)
     {
         _config = config;
         _panel = panel;
@@ -61,6 +64,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         _logger = logger;
         _acme = acme;
         _events = events.OrNoOp();
+        _wsHub = wsHub;
 
         Directory.CreateDirectory(_config.System.Data);
         Directory.CreateDirectory(_config.System.VmountDirectory);
@@ -131,8 +135,13 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
 
         lock (_mutateGate)
         {
-            if (_spaces.ContainsKey(request.Uuid))
+            if (_spaces.TryGetValue(request.Uuid, out var existing))
+            {
+                if (existing.Status == WebSpaceStatus.Installing)
+                    return existing;
+
                 throw new InvalidOperationException($"WebSpace {request.Uuid} already exists on this node.");
+            }
 
             _logger?.Info(LoggerTypes.WebSpaces, $"Fetching WebSpace {request.Uuid} from panel…");
             var remote = _panel.FetchWebSpaceAsync(request.Uuid).GetAwaiter().GetResult();
@@ -140,6 +149,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 remote.Uuid = request.Uuid;
 
             var domains = NormalizeDomains(remote.Domains);
+            var domainRoutes = NormalizeDomainRoutes(remote.DomainRoutes, domains);
+            domains = domainRoutes.Select(r => r.Domain).ToList();
             foreach (var domain in domains)
             {
                 if (!WebSpaceValidation.IsValidDomain(domain))
@@ -151,6 +162,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             var diskBytes = remote.Build?.DiskSpace > 0
                 ? remote.Build.DiskSpace * 1024L * 1024L
                 : 0L;
+            var cpuLimit = remote.Build?.CpuLimit > 0 ? remote.Build.CpuLimit : 0;
+            var memoryLimitMiB = remote.Build?.MemoryLimit > 0 ? remote.Build.MemoryLimit : 0;
 
             var useFuse = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota;
             if ((useFuse || _config.System.Quotas.Enabled) && diskBytes <= 0)
@@ -173,9 +186,18 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 WebPlateId = remote.Webplate?.Id?.Trim() ?? "",
                 Runtime = runtime,
                 DiskLimitBytes = diskBytes,
+                CpuLimit = cpuLimit,
+                MemoryLimitMiB = memoryLimitMiB,
                 Domains = domains,
+                DomainRoutes = domainRoutes,
                 Ssl = remote.Ssl,
+                SslMode = NormalizeSslMode(remote.SslMode),
+                AcmeEmail = NormalizeAcmeEmail(remote.AcmeEmail),
+                WafEnabled = remote.WafEnabled,
+                WafDenyIps = SanitizeDenyIps(remote.WafDenyIps),
+                WafDenyPaths = SanitizeDenyPaths(remote.WafDenyPaths),
                 BackendPort = remote.BackendPort,
+                BackendHost = NormalizeBackendHost(remote.BackendHost),
                 ContainerPort = containerPort,
                 DocumentRoot = NormalizeDocumentRoot(remote.Meta?.DocumentRoot),
                 ContainerImage = string.IsNullOrWhiteSpace(remote.Webplate?.DockerImage)
@@ -209,48 +231,22 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
 
                 if (!request.SkipScripts)
                 {
-                    try
-                    {
-                        var install = _panel.FetchWebSpaceInstallAsync(space.Uuid).GetAwaiter().GetResult();
-                        if (!string.IsNullOrWhiteSpace(install.ContainerImage))
-                            space.ContainerImage = install.ContainerImage.Trim();
-
-                        SeedDocumentRoot(space, fsPath);
-                        _installer.RunAsync(space, fsPath, install).GetAwaiter().GetResult();
-
-                        space.Status = WebSpaceStatus.Installed;
-                        space.UpdatedAt = DateTimeOffset.UtcNow;
-                        Persist(space);
-                        _panel.ReportWebSpaceInstallAsync(space.Uuid, successful: true).GetAwaiter().GetResult();
-                        _logger?.Info(LoggerTypes.WebSpaces,
-                            $"Install completed for {space.Uuid} image={space.ContainerImage}");
-                    }
-                    catch (Exception ex)
-                    {
-                        space.Status = WebSpaceStatus.Failed;
-                        space.State = WebSpaceState.Stopped;
-                        Persist(space);
-                        try
-                        {
-                            _panel.ReportWebSpaceInstallAsync(space.Uuid, successful: false)
-                                .GetAwaiter().GetResult();
-                        }
-                        catch (Exception reportEx)
-                        {
-                            _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to report install: {reportEx.Message}");
-                        }
-
-                        throw new InvalidOperationException($"Install failed: {ex.Message}", ex);
-                    }
-                }
-                else
-                {
                     SeedDocumentRoot(space, fsPath);
-                    space.Status = WebSpaceStatus.Installed;
-                    space.UpdatedAt = DateTimeOffset.UtcNow;
+                    _spaces[space.Uuid] = space;
                     Persist(space);
-                    _panel.ReportWebSpaceInstallAsync(space.Uuid, successful: true).GetAwaiter().GetResult();
+                    SyncPanelState(space);
+                    RebuildProxy();
+                    QueueDeferredInstall(space.Uuid, request, remote, fsPath);
+                    _logger?.Info(LoggerTypes.WebSpaces,
+                        $"Queued install for {space.Uuid} webplate={space.WebPlateId} runtime={space.Runtime}");
+                    return space;
                 }
+
+                SeedDocumentRoot(space, fsPath);
+                space.Status = WebSpaceStatus.Installed;
+                space.UpdatedAt = DateTimeOffset.UtcNow;
+                Persist(space);
+                _panel.ReportWebSpaceInstallAsync(space.Uuid, successful: true).GetAwaiter().GetResult();
 
                 if (request.StartOnCompletion)
                 {
@@ -282,12 +278,156 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         }
     }
 
+    private void QueueDeferredInstall(
+        Guid uuid,
+        CreateWebSpaceRequest request,
+        PanelWebSpaceConfig remote,
+        string fsPath)
+    {
+        if (!_installInFlight.TryAdd(uuid, 0))
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RunDeferredInstallAsync(uuid, request, remote, fsPath).ConfigureAwait(false);
+            }
+            finally
+            {
+                _installInFlight.TryRemove(uuid, out _);
+            }
+        });
+    }
+
+    private async Task RunDeferredInstallAsync(
+        Guid uuid,
+        CreateWebSpaceRequest request,
+        PanelWebSpaceConfig remote,
+        string fsPath)
+    {
+        if (_wsHub is not null)
+            await _wsHub.SendInstallStartedAsync(uuid).ConfigureAwait(false);
+
+        try
+        {
+            var install = await _panel.FetchWebSpaceInstallAsync(uuid).ConfigureAwait(false);
+
+            WebSpace space;
+            lock (_mutateGate)
+            {
+                space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+                space.UpdatedAt = DateTimeOffset.UtcNow;
+                Persist(space);
+            }
+
+            await _installer.RunAsync(space, fsPath, install).ConfigureAwait(false);
+
+            lock (_mutateGate)
+            {
+                space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+                space.Status = WebSpaceStatus.Installed;
+                space.UpdatedAt = DateTimeOffset.UtcNow;
+                Persist(space);
+                _spaces[uuid] = space;
+            }
+
+            await _panel.ReportWebSpaceInstallAsync(uuid, successful: true).ConfigureAwait(false);
+            _logger?.Info(LoggerTypes.WebSpaces,
+                $"Install completed for {uuid} image={space.ContainerImage}");
+
+            if (_wsHub is not null)
+            {
+                await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Installed).ConfigureAwait(false);
+                await _wsHub.SendInstallCompletedAsync(uuid).ConfigureAwait(false);
+            }
+
+            lock (_mutateGate)
+            {
+                space = Get(uuid);
+                if (space is null)
+                    return;
+
+                if (request.StartOnCompletion)
+                {
+                    try
+                    {
+                        PowerInternal(space, "start");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.Warning(LoggerTypes.WebSpaces,
+                            $"start_on_completion failed for {uuid}: {ex.Message}");
+                    }
+                }
+
+                SyncPanelState(space);
+                RebuildProxy();
+                TrySyncSchedules(uuid, remote);
+            }
+        }
+        catch (Exception ex)
+        {
+            lock (_mutateGate)
+            {
+                var space = Get(uuid);
+                if (space is not null)
+                {
+                    space.Status = WebSpaceStatus.Failed;
+                    space.State = WebSpaceState.Stopped;
+                    space.UpdatedAt = DateTimeOffset.UtcNow;
+                    Persist(space);
+                }
+            }
+
+            try
+            {
+                await _panel.ReportWebSpaceInstallAsync(uuid, successful: false).ConfigureAwait(false);
+            }
+            catch (Exception reportEx)
+            {
+                _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to report install: {reportEx.Message}");
+            }
+
+            if (_wsHub is not null)
+            {
+                await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Failed).ConfigureAwait(false);
+                await _wsHub.SendInstallFailedAsync(uuid, ex.Message).ConfigureAwait(false);
+            }
+
+            _logger?.Error(LoggerTypes.WebSpaces, $"Install failed for {uuid}: {ex.Message}");
+        }
+    }
+
     /// <summary>Pull latest panel config and apply domains, ssl, disk, document_root, proxy.</summary>
     public WebSpace ApplyConfigFromPanel(Guid uuid) =>
         _events.WithHooks(
             new WebSpaceSyncBeforeEvent { WebSpaceUuid = uuid },
             (_, err) => new WebSpaceSyncAfterEvent { WebSpaceUuid = uuid, Error = err },
             () => ApplyConfigFromPanelCore(uuid));
+
+    public WebSpace RecreateRuntime(Guid uuid)
+    {
+        lock (_mutateGate)
+        {
+            var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+            if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
+                throw new InvalidOperationException("Static WebSpaces do not use a runtime container.");
+            if (string.IsNullOrWhiteSpace(space.ContainerImage))
+                throw new InvalidOperationException("No container image configured for this WebSpace.");
+
+            _logger?.Info(LoggerTypes.WebSpaces, $"Recreating runtime for {uuid} image={space.ContainerImage}");
+            var fsPath = EffectiveFsPath(uuid);
+            _runtime.StopAsync(space, kill: false).GetAwaiter().GetResult();
+            _runtime.RemoveAsync(uuid).GetAwaiter().GetResult();
+            _runtime.StartAsync(space, fsPath, space.Startup).GetAwaiter().GetResult();
+            space.UpdatedAt = DateTimeOffset.UtcNow;
+            Persist(space);
+            SyncPanelState(space);
+            RebuildProxy();
+            return space;
+        }
+    }
 
     private WebSpace ApplyConfigFromPanelCore(Guid uuid)
     {
@@ -301,6 +441,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 remote.Uuid = uuid;
 
             var domains = NormalizeDomains(remote.Domains);
+            var domainRoutes = NormalizeDomainRoutes(remote.DomainRoutes, domains);
+            domains = domainRoutes.Select(r => r.Domain).ToList();
             foreach (var domain in domains)
             {
                 if (!WebSpaceValidation.IsValidDomain(domain))
@@ -312,14 +454,64 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             var diskBytes = remote.Build?.DiskSpace > 0
                 ? remote.Build.DiskSpace * 1024L * 1024L
                 : space.DiskLimitBytes;
+            // Always apply panel limits (including 0 = unlimited) when Build is present.
+            var cpuLimit = remote.Build is not null ? remote.Build.CpuLimit : space.CpuLimit;
+            var memoryLimitMiB = remote.Build is not null ? remote.Build.MemoryLimit : space.MemoryLimitMiB;
+
+            var runtime = string.IsNullOrWhiteSpace(remote.Webplate?.Runtime)
+                ? space.Runtime
+                : remote.Webplate!.Runtime.Trim().ToLowerInvariant();
+            if (!string.Equals(runtime, space.Runtime, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Runtime family cannot be changed via sync; reinstall required.");
+
+            var platePort = remote.Webplate?.ContainerPort ?? 0;
+            var containerPort = platePort > 0
+                ? platePort
+                : (space.ContainerPort > 0 ? space.ContainerPort : WebSpaceRuntime.DefaultContainerPort(runtime));
+            var containerImage = string.IsNullOrWhiteSpace(remote.Webplate?.DockerImage)
+                ? space.ContainerImage
+                : remote.Webplate!.DockerImage.Trim();
+            var startup = string.IsNullOrWhiteSpace(remote.Webplate?.Startup)
+                ? space.Startup
+                : remote.Webplate!.Startup.Trim();
+            var webPlateId = string.IsNullOrWhiteSpace(remote.Webplate?.Id)
+                ? space.WebPlateId
+                : remote.Webplate!.Id.Trim();
 
             space.Name = string.IsNullOrWhiteSpace(remote.Name) ? space.Name : remote.Name.Trim();
+            space.WebPlateId = webPlateId;
+            space.Runtime = runtime;
+            space.ContainerImage = containerImage;
+            space.ContainerPort = containerPort;
+            space.Startup = startup;
             space.Domains = domains;
+            space.DomainRoutes = domainRoutes;
             space.Ssl = remote.Ssl;
+            space.SslMode = NormalizeSslMode(remote.SslMode);
+            space.AcmeEmail = NormalizeAcmeEmail(remote.AcmeEmail);
+            space.WafEnabled = remote.WafEnabled;
+            space.WafDenyIps = SanitizeDenyIps(remote.WafDenyIps);
+            space.WafDenyPaths = SanitizeDenyPaths(remote.WafDenyPaths);
             space.DiskLimitBytes = diskBytes;
+            space.CpuLimit = cpuLimit;
+            space.MemoryLimitMiB = memoryLimitMiB;
             space.DocumentRoot = remote.Meta is null
                 ? space.DocumentRoot
                 : NormalizeDocumentRoot(remote.Meta.DocumentRoot);
+
+            if (remote.BackendPort > 0 && remote.BackendPort != space.BackendPort)
+            {
+                var previousPort = space.BackendPort;
+                space.BackendPort = remote.BackendPort;
+                if (WebSpaceRuntime.NeedsContainer(space.Runtime) && space.State == WebSpaceState.Running)
+                {
+                    _logger?.Warning(LoggerTypes.WebSpaces,
+                        $"Panel backend_port {remote.BackendPort} applied for {uuid} but container may still listen on {previousPort}; recreate runtime if needed");
+                }
+            }
+
+            space.BackendHost = NormalizeBackendHost(remote.BackendHost);
+
             space.UpdatedAt = DateTimeOffset.UtcNow;
 
             var useFuse = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota;
@@ -351,6 +543,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                     PowerInternal(space, action);
                     Persist(space);
                     SyncPanelState(space);
+                    BroadcastWsStatus(space);
                     RebuildProxy();
                     return space;
                 }
@@ -464,10 +657,88 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         {
             uuid = space.Uuid,
             ssl = space.Ssl,
+            ssl_mode = space.SslMode,
+            custom_cert_present = CustomSslPaths(space.Uuid).Present,
+            custom_cert_not_after = CustomSslPaths(space.Uuid).NotAfter,
             provider = _config.System.Proxy.Provider,
-            acme_email = _config.System.Proxy.AcmeEmail,
+            acme_email = space.ResolveAcmeEmail(_config.System.Proxy.AcmeEmail),
             domains,
         };
+    }
+
+    public object GetCustomSslStatus(Guid uuid)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        var paths = CustomSslPaths(uuid);
+        return new
+        {
+            uuid,
+            ssl_mode = space.SslMode,
+            cert_present = paths.CertPresent,
+            key_present = paths.KeyPresent,
+            not_after = paths.NotAfter,
+            cert_path = paths.CertPath,
+            key_path = paths.KeyPath,
+        };
+    }
+
+    public object PutCustomSsl(Guid uuid, Stream certStream, Stream keyStream)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        var paths = CustomSslPaths(uuid);
+        Directory.CreateDirectory(paths.Directory);
+        using (var certOut = File.Create(paths.CertPath))
+            certStream.CopyTo(certOut);
+        using (var keyOut = File.Create(paths.KeyPath))
+            keyStream.CopyTo(keyOut);
+
+        space.SslMode = "custom";
+        space.Ssl = true;
+        space.UpdatedAt = DateTimeOffset.UtcNow;
+        Persist(space);
+        RebuildProxy();
+
+        return GetCustomSslStatus(uuid);
+    }
+
+    public object DeleteCustomSsl(Guid uuid)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        var paths = CustomSslPaths(uuid);
+        if (File.Exists(paths.CertPath))
+            File.Delete(paths.CertPath);
+        if (File.Exists(paths.KeyPath))
+            File.Delete(paths.KeyPath);
+
+        if (string.Equals(space.SslMode, "custom", StringComparison.OrdinalIgnoreCase))
+            space.SslMode = "acme";
+        space.UpdatedAt = DateTimeOffset.UtcNow;
+        Persist(space);
+        RebuildProxy();
+
+        return GetCustomSslStatus(uuid);
+    }
+
+    private readonly record struct CustomSslPathInfo(
+        string Directory,
+        string CertPath,
+        string KeyPath,
+        bool CertPresent,
+        bool KeyPresent,
+        DateTimeOffset? NotAfter)
+    {
+        public bool Present => CertPresent && KeyPresent;
+    }
+
+    private CustomSslPathInfo CustomSslPaths(Guid uuid)
+    {
+        var dir = Path.Combine(DataPath(uuid), "ssl", "custom");
+        var cert = Path.Combine(dir, "cert.pem");
+        var key = Path.Combine(dir, "key.pem");
+        var certPresent = File.Exists(cert);
+        var keyPresent = File.Exists(key);
+        DateTimeOffset? notAfter = certPresent ? NginxAcmeService.GetCertNotAfterFromFile(cert) : null;
+        return new CustomSslPathInfo(dir, cert, key, certPresent, keyPresent, notAfter);
     }
 
     /// <summary>Force ACME reissue for this WebSpace's domains, then rebuild the proxy.</summary>
@@ -492,14 +763,34 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             throw new InvalidOperationException("No domains configured for SSL renew.");
 
         var provider = (_config.System.Proxy.Provider ?? "caddy").Trim().ToLowerInvariant();
-        if (provider == "nginx")
-        {
-            if (_acme is null)
-                throw new InvalidOperationException("ACME service is not available on this node.");
-            if (string.IsNullOrWhiteSpace(_config.System.Proxy.AcmeEmail))
-                throw new InvalidOperationException("Web node acme_email is not configured.");
+        var usesDns01 = string.Equals(space.SslMode, "dns01", StringComparison.OrdinalIgnoreCase);
+        var usesCustom = string.Equals(space.SslMode, "custom", StringComparison.OrdinalIgnoreCase);
 
-            await _acme.EnsureCertsAsync(space.Domains, cancellationToken, force: true);
+        if (usesCustom)
+            throw new InvalidOperationException("Custom SSL certificates cannot be renewed via ACME.");
+
+        if (_acme is not null && (usesDns01 || provider == "nginx"))
+        {
+            var email = space.ResolveAcmeEmail(_config.System.Proxy.AcmeEmail);
+            if (string.IsNullOrWhiteSpace(email))
+                throw new InvalidOperationException(
+                    "Owner account email is not set and this node has no fallback ACME email.");
+
+            if (usesDns01)
+            {
+                var apex = ReverseProxyManager.ResolveApexDomain(space);
+                if (string.IsNullOrWhiteSpace(apex))
+                    throw new InvalidOperationException("No apex domain for wildcard SSL renew.");
+                await _acme.EnsureWildcardCertAsync(uuid, apex, email, force: true, cancellationToken);
+            }
+            else if (provider == "nginx")
+            {
+                await _acme.EnsureCertsAsync(space.Domains, cancellationToken, force: true, email: email);
+            }
+        }
+        else if (provider == "nginx" && _acme is null)
+        {
+            throw new InvalidOperationException("ACME service is not available on this node.");
         }
 
         lock (_mutateGate)
@@ -568,6 +859,12 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         return _runtime.GetLogsAsync(uuid, lines).GetAwaiter().GetResult();
     }
 
+    public object GetProxyLogs(Guid uuid, string? domain = null, int lines = 200, int days = 0)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        return ProxyAccessLogs.Read(_config.System.RootDirectory, space, domain, lines, days);
+    }
+
     public string GetInstallLogs(Guid uuid)
     {
         _ = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
@@ -576,7 +873,17 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             path = WebSpaceInstaller.InstallLogPath(DataPath(uuid));
         if (!File.Exists(path))
             return "(no install log captured)\n";
-        return File.ReadAllText(path);
+
+        try
+        {
+            return File.ReadAllText(path);
+        }
+        catch (IOException ex)
+        {
+            _logger?.Debug(LoggerTypes.WebSpaces,
+                $"Install log read failed for {uuid} ({path}): {ex.Message}");
+            return "(install log temporarily unavailable)\n";
+        }
     }
 
     public async IAsyncEnumerable<string> FollowRuntimeLogsAsync(
@@ -681,54 +988,128 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             if (wipeFiles)
                 WipeDirectoryContents(fsPath, preserveMeta: true, metaSourcePath: dataPath);
 
+            _spaces[uuid] = space;
+            QueueDeferredReinstall(uuid, fsPath, startOnCompletion);
+            _logger?.Info(LoggerTypes.WebSpaces, $"Queued reinstall for {uuid}");
+            return space;
+        }
+    }
+
+    private void QueueDeferredReinstall(Guid uuid, string fsPath, bool startOnCompletion)
+    {
+        if (!_installInFlight.TryAdd(uuid, 0))
+            return;
+
+        _ = Task.Run(async () =>
+        {
             try
             {
-                var install = _panel.FetchWebSpaceInstallAsync(space.Uuid).GetAwaiter().GetResult();
-                if (!string.IsNullOrWhiteSpace(install.ContainerImage))
-                    space.ContainerImage = install.ContainerImage.Trim();
+                await RunDeferredReinstallAsync(uuid, fsPath, startOnCompletion).ConfigureAwait(false);
+            }
+            finally
+            {
+                _installInFlight.TryRemove(uuid, out _);
+            }
+        });
+    }
 
-                SeedDocumentRoot(space, fsPath);
-                _installer.RunAsync(space, fsPath, install).GetAwaiter().GetResult();
+    private async Task RunDeferredReinstallAsync(Guid uuid, string fsPath, bool startOnCompletion)
+    {
+        if (_wsHub is not null)
+        {
+            await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Reinstalling).ConfigureAwait(false);
+            await _wsHub.SendInstallStartedAsync(uuid).ConfigureAwait(false);
+        }
 
+        try
+        {
+            var install = await _panel.FetchWebSpaceInstallAsync(uuid).ConfigureAwait(false);
+
+            WebSpace space;
+            lock (_mutateGate)
+            {
+                space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+                space.UpdatedAt = DateTimeOffset.UtcNow;
+                Persist(space);
+            }
+
+            SeedDocumentRoot(space, fsPath);
+            await _installer.RunAsync(space, fsPath, install).ConfigureAwait(false);
+
+            lock (_mutateGate)
+            {
+                space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
                 space.Status = WebSpaceStatus.Installed;
                 space.UpdatedAt = DateTimeOffset.UtcNow;
                 Persist(space);
-                _panel.ReportWebSpaceInstallAsync(space.Uuid, successful: true, reinstall: true)
-                    .GetAwaiter().GetResult();
+                _spaces[uuid] = space;
+            }
+
+            await _panel.ReportWebSpaceInstallAsync(uuid, successful: true, reinstall: true).ConfigureAwait(false);
+            _logger?.Info(LoggerTypes.WebSpaces, $"Reinstall completed for {uuid}");
+
+            if (_wsHub is not null)
+            {
+                await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Installed).ConfigureAwait(false);
+                await _wsHub.SendInstallCompletedAsync(uuid).ConfigureAwait(false);
+            }
+
+            lock (_mutateGate)
+            {
+                space = Get(uuid);
+                if (space is null)
+                    return;
 
                 if (startOnCompletion)
                 {
-                    try { PowerInternal(space, "start"); }
+                    try
+                    {
+                        PowerInternal(space, "start");
+                    }
                     catch (Exception ex)
                     {
                         _logger?.Warning(LoggerTypes.WebSpaces,
-                            $"reinstall start_on_completion failed for {space.Uuid}: {ex.Message}");
+                            $"reinstall start_on_completion failed for {uuid}: {ex.Message}");
                     }
                 }
 
                 Persist(space);
                 SyncPanelState(space);
                 RebuildProxy();
-                _logger?.Info(LoggerTypes.WebSpaces, $"Reinstall completed for {space.Uuid}");
-                return space;
             }
-            catch (Exception ex)
+        }
+        catch (Exception ex)
+        {
+            lock (_mutateGate)
             {
-                space.Status = WebSpaceStatus.Failed;
-                space.State = WebSpaceState.Stopped;
-                Persist(space);
-                try
+                var space = Get(uuid);
+                if (space is not null)
                 {
-                    _panel.ReportWebSpaceInstallAsync(space.Uuid, successful: false, reinstall: true)
-                        .GetAwaiter().GetResult();
+                    space.Status = WebSpaceStatus.Failed;
+                    space.State = WebSpaceState.Stopped;
+                    space.UpdatedAt = DateTimeOffset.UtcNow;
+                    Persist(space);
+                    SyncPanelState(space);
                 }
-                catch (Exception reportEx)
-                {
-                    _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to report reinstall: {reportEx.Message}");
-                }
-
-                throw new InvalidOperationException($"Reinstall failed: {ex.Message}", ex);
             }
+
+            try
+            {
+                await _panel.ReportWebSpaceInstallAsync(uuid, successful: false, reinstall: true)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception reportEx)
+            {
+                _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to report reinstall: {reportEx.Message}");
+            }
+
+            if (_wsHub is not null)
+            {
+                await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Failed).ConfigureAwait(false);
+                await _wsHub.SendInstallFailedAsync(uuid, ex.Message).ConfigureAwait(false);
+            }
+
+            _logger?.Error(LoggerTypes.WebSpaces, $"Reinstall failed for {uuid}: {ex.Message}");
         }
     }
 
@@ -810,10 +1191,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     private void RebuildProxy()
     {
         foreach (var space in _spaces.Values)
-        {
-            if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
-                EnsureBackendPort(space);
-        }
+            EnsureBackendPort(space);
 
         _proxy.Rebuild(_spaces.Values);
         _staticFiles?.Sync(_spaces.Values);
@@ -865,6 +1243,25 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         catch (Exception ex)
         {
             _logger?.Warning(LoggerTypes.WebSpaces, $"Panel state sync {space.Uuid}: {ex.Message}");
+        }
+    }
+
+    private void BroadcastWsStatus(WebSpace space)
+    {
+        if (_wsHub is null)
+            return;
+
+        var payload = space.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling
+            ? space.Status
+            : space.State;
+
+        try
+        {
+            _wsHub.SendStatusAsync(space.Uuid, payload).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(LoggerTypes.WebSpaces, $"WS status broadcast {space.Uuid}: {ex.Message}");
         }
     }
 
@@ -927,8 +1324,62 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     {
         if (string.IsNullOrWhiteSpace(documentRoot))
             return "";
-        var trimmed = documentRoot.Trim().Trim('/');
-        return trimmed is "" or "." ? "" : trimmed;
+        var trimmed = documentRoot.Trim().Replace('\\', '/').Trim('/');
+        if (trimmed is "" or ".")
+            return "";
+        var parts = trimmed.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Any(p => p == "." || p == ".."))
+            return "";
+        return string.Join('/', parts);
+    }
+
+    internal static List<string> SanitizeDenyIps(IEnumerable<string>? ips)
+    {
+        var result = new List<string>();
+        if (ips is null)
+            return result;
+        foreach (var raw in ips)
+        {
+            var value = (raw ?? "").Trim();
+            if (value.Length == 0 || value.Length > 64)
+                continue;
+            if (!System.Net.IPAddress.TryParse(value.Split('/')[0], out _))
+                continue;
+            if (!result.Contains(value, StringComparer.OrdinalIgnoreCase))
+                result.Add(value);
+        }
+        return result;
+    }
+
+    /// <summary>Normalize URI path denylist; rejects traversal and ACME challenge paths.</summary>
+    internal static List<string> SanitizeDenyPaths(IEnumerable<string>? paths)
+    {
+        var result = new List<string>();
+        if (paths is null)
+            return result;
+
+        foreach (var raw in paths)
+        {
+            var value = (raw ?? "").Trim().Replace('\\', '/');
+            if (value.Length == 0 || value.Length > 256)
+                continue;
+            if (!value.StartsWith('/'))
+                value = "/" + value;
+            if (value.Contains("..", StringComparison.Ordinal) || value.Contains('\0'))
+                continue;
+            // Never block ACME HTTP-01 challenges.
+            if (value.StartsWith("/.well-known", StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Collapse duplicate slashes.
+            while (value.Contains("//", StringComparison.Ordinal))
+                value = value.Replace("//", "/", StringComparison.Ordinal);
+            if (value is "/" or "")
+                continue;
+            if (!result.Contains(value, StringComparer.OrdinalIgnoreCase))
+                result.Add(value);
+        }
+
+        return result;
     }
 
     /// <summary>Resolve absolute content path; blank document root uses the WebSpace data root.</summary>
@@ -960,8 +1411,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             {
                 var limiter = new FuseQuotaLimiter(
                     _config, space.Uuid, DataPath(space.Uuid), space.DiskLimitBytes, _logger);
-                if (limiter.IsSocketFunctionalAsync().GetAwaiter().GetResult())
-                    return limiter.DiskUsageAsync().GetAwaiter().GetResult();
+                return limiter.DiskUsageAsync().GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
@@ -1078,6 +1528,74 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList()
         ?? [];
+
+    private static List<WebSpaceDomainRoute> NormalizeDomainRoutes(
+        IEnumerable<PanelDomainRoute>? routes,
+        IReadOnlyList<string> fallbackDomains)
+    {
+        var normalized = new List<WebSpaceDomainRoute>();
+        if (routes is not null)
+        {
+            foreach (var route in routes)
+            {
+                if (route is null || string.IsNullOrWhiteSpace(route.Domain))
+                    continue;
+                var domain = route.Domain.Trim().ToLowerInvariant().TrimEnd('.');
+                var type = (route.Type ?? "alias").Trim().ToLowerInvariant() switch
+                {
+                    "primary" => "primary",
+                    "redirect" => "redirect",
+                    _ => "alias",
+                };
+                normalized.Add(new WebSpaceDomainRoute
+                {
+                    Domain = domain,
+                    Type = type,
+                    RedirectTarget = string.IsNullOrWhiteSpace(route.RedirectTarget)
+                        ? null
+                        : route.RedirectTarget.Trim(),
+                    DocumentRoot = NormalizeDocumentRoot(route.DocumentRoot),
+                });
+            }
+        }
+
+        if (normalized.Count == 0)
+        {
+            foreach (var domain in fallbackDomains)
+            {
+                if (string.IsNullOrWhiteSpace(domain))
+                    continue;
+                normalized.Add(new WebSpaceDomainRoute
+                {
+                    Domain = domain.Trim().ToLowerInvariant().TrimEnd('.'),
+                    Type = normalized.Count == 0 ? "primary" : "alias",
+                });
+            }
+        }
+
+        if (normalized.Count > 0 && normalized.All(r => r.Type != "primary"))
+            normalized[0].Type = "primary";
+
+        return normalized
+            .GroupBy(r => r.Domain, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    private static string NormalizeSslMode(string? mode)
+    {
+        if (string.Equals(mode, "custom", StringComparison.OrdinalIgnoreCase))
+            return "custom";
+        if (string.Equals(mode, "dns01", StringComparison.OrdinalIgnoreCase))
+            return "dns01";
+        return "acme";
+    }
+
+    private static string NormalizeAcmeEmail(string? email) =>
+        string.IsNullOrWhiteSpace(email) ? "" : email.Trim();
+
+    private static string NormalizeBackendHost(string? host) =>
+        string.IsNullOrWhiteSpace(host) ? "" : host.Trim();
 
     private static ulong DirectorySize(string path)
     {

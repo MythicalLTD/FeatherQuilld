@@ -89,16 +89,26 @@ public sealed class CreateFromPanelTests : IDisposable
         };
 
         var store = CreateStore(panel);
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            store.CreateFromPanel(new CreateWebSpaceRequest
-            {
-                Uuid = uuid,
-                SkipScripts = false,
-            }));
+        var space = store.CreateFromPanel(new CreateWebSpaceRequest
+        {
+            Uuid = uuid,
+            SkipScripts = false,
+        });
 
-        Assert.Contains("Install failed", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(WebSpaceStatus.Installing, space.Status);
+
+        WebSpace? final = null;
+        for (var i = 0; i < 100; i++)
+        {
+            final = store.Get(uuid);
+            if (final?.Status is WebSpaceStatus.Failed or WebSpaceStatus.Installed)
+                break;
+            Thread.Sleep(50);
+        }
+
+        Assert.NotNull(final);
+        Assert.Equal(WebSpaceStatus.Failed, final.Status);
         Assert.Contains(panel.InstallReports, r => r.Uuid == uuid && !r.Successful && !r.Reinstall);
-        Assert.Null(store.Get(uuid));
     }
 
     private WebSpaceStore CreateStore(IPanelClient panel) =>
@@ -172,5 +182,13 @@ public sealed class CreateFromPanelTests : IDisposable
             string? publicKey = null,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<SftpAuthResult?>(null);
+
+        public Task AcmeDnsAsync(
+            Guid uuid,
+            string action,
+            string name,
+            string content,
+            CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 }

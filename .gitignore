@@ -19,3 +19,4 @@ config.cfg
 /featherpanel/
 id_rsa
 sync.bash
+console.bash

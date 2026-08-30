@@ -10,10 +10,33 @@ public sealed class PanelWebSpaceConfig
     public PanelWebPlateRef? Webplate { get; set; }
     public PanelWebSpaceBuild? Build { get; set; }
     public List<string> Domains { get; set; } = [];
+
+    [JsonPropertyName("domain_routes")]
+    public List<PanelDomainRoute> DomainRoutes { get; set; } = [];
+
     public bool Ssl { get; set; }
+
+    [JsonPropertyName("ssl_mode")]
+    public string SslMode { get; set; } = "acme";
+
+    /// <summary>Site owner's account email for ACME. Empty = node <c>system.proxy.acme_email</c> fallback.</summary>
+    [JsonPropertyName("acme_email")]
+    public string AcmeEmail { get; set; } = "";
+
+    [JsonPropertyName("waf_enabled")]
+    public bool WafEnabled { get; set; }
+
+    [JsonPropertyName("waf_deny_ips")]
+    public List<string> WafDenyIps { get; set; } = [];
+
+    [JsonPropertyName("waf_deny_paths")]
+    public List<string> WafDenyPaths { get; set; } = [];
 
     [JsonPropertyName("backend_port")]
     public int BackendPort { get; set; }
+
+    [JsonPropertyName("backend_host")]
+    public string BackendHost { get; set; } = "";
 
     public PanelWebSpaceMeta? Meta { get; set; }
     public List<PanelWebSpaceSchedule> Schedules { get; set; } = [];
@@ -80,11 +103,31 @@ public sealed class PanelWebPlateRef
     public string? DockerImage { get; set; }
 }
 
+public sealed class PanelDomainRoute
+{
+    public string Domain { get; set; } = "";
+    public string Type { get; set; } = "primary";
+
+    [JsonPropertyName("redirect_target")]
+    public string? RedirectTarget { get; set; }
+
+    [JsonPropertyName("document_root")]
+    public string DocumentRoot { get; set; } = "";
+}
+
 public sealed class PanelWebSpaceBuild
 {
     /// <summary>Disk limit in MiB (Wings-style).</summary>
     [JsonPropertyName("disk_space")]
     public long DiskSpace { get; set; }
+
+    /// <summary>CPU limit in cores (e.g. 0.5, 1.0). 0 = unlimited.</summary>
+    [JsonPropertyName("cpu_limit")]
+    public double CpuLimit { get; set; }
+
+    /// <summary>Memory limit in MiB. 0 = unlimited.</summary>
+    [JsonPropertyName("memory_limit")]
+    public long MemoryLimit { get; set; }
 }
 
 public sealed class PanelWebSpaceMeta
