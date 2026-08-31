@@ -33,7 +33,7 @@ public sealed class WebSpaceTransferService
         _config = config;
         _spaces = spaces;
         _panel = panel;
-        _progress = progress ?? new TransferProgressService();
+        _progress = progress ?? new TransferProgressService(config);
         _http = http ?? CreateHttpClient();
         _logger = logger;
         _events = events.OrNoOp();

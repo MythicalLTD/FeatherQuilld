@@ -122,7 +122,7 @@ public sealed class TransferServiceTests : IDisposable
         var store = CreateStore(panel);
         store.CreateFromPanel(new CreateWebSpaceRequest { Uuid = uuid, SkipScripts = true });
 
-        var progress = new TransferProgressService();
+        var progress = new TransferProgressService(_config);
         var handler = new SuccessUploadHandler();
         var http = new HttpClient(handler);
         var transfers = new WebSpaceTransferService(_config, store, panel, progress, http);
@@ -153,7 +153,7 @@ public sealed class TransferServiceTests : IDisposable
             },
         };
         var store = CreateStore(panel);
-        var progress = new TransferProgressService();
+        var progress = new TransferProgressService(_config);
         var transfers = new WebSpaceTransferService(_config, store, panel, progress);
 
         var fsPath = Path.Combine(_config.System.Data, uuid.ToString(), "public");

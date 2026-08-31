@@ -19,14 +19,17 @@ public sealed class WebSpaceScheduleManagerTests
     {
         var uuid = Guid.NewGuid().ToString("D");
         var panel = new StubPanel();
+        var testRoot = Path.Combine(Path.GetTempPath(), "fq-sched-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(testRoot);
         var config = new AppConfig
         {
             System =
             {
-                RootDirectory = Path.GetTempPath(),
-                Data = Path.GetTempPath(),
-                VmountDirectory = Path.GetTempPath(),
-                TmpDirectory = Path.GetTempPath(),
+                RootDirectory = testRoot,
+                Data = Path.Combine(testRoot, "volumes"),
+                VmountDirectory = Path.Combine(testRoot, "vmounts"),
+                TmpDirectory = Path.Combine(testRoot, "tmp"),
+                BackupDirectory = Path.Combine(testRoot, "backups"),
                 DiskLimiterMode = "none",
             },
         };
