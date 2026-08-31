@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using FeatherQuilld.Utils.Auth;
 using FeatherQuilld.Utils.Docker;
+using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.WebSpaces;
 using FeatherQuilld.Utils.WebSpaces.Malware;
 using Microsoft.AspNetCore.Authorization;
@@ -79,12 +80,18 @@ public sealed class WebSpacesController : ControllerBase
     [HttpGet("{uuid:guid}/logs")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public IActionResult Logs(Guid uuid, [FromQuery] int lines = 100)
+    public IActionResult Logs(
+        Guid uuid,
+        [FromQuery] int lines = 100,
+        [FromQuery] string? q = null,
+        [FromQuery] bool regex = false,
+        [FromQuery] int scan_lines = 10_000)
     {
         try
         {
-            var text = _spaces.GetRuntimeLogs(uuid, lines);
-            return Ok(new { data = text });
+            var text = _spaces.GetRuntimeLogs(uuid, lines, q, regex, scan_lines);
+            var truncated = !string.IsNullOrWhiteSpace(q) && text.Split('\n').Length >= lines;
+            return Ok(new { data = text, truncated, search = string.IsNullOrWhiteSpace(q) ? null : q.Trim() });
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
         {
@@ -103,11 +110,31 @@ public sealed class WebSpacesController : ControllerBase
         Guid uuid,
         [FromQuery] string? domain = null,
         [FromQuery] int lines = 200,
-        [FromQuery] int days = 0)
+        [FromQuery] int days = 0,
+        [FromQuery] string? q = null,
+        [FromQuery] bool regex = false,
+        [FromQuery] int scan_lines = ProxyAccessLogs.DefaultSearchScanLines)
     {
         try
         {
-            return Ok(_spaces.GetProxyLogs(uuid, domain, lines, days));
+            return Ok(_spaces.GetProxyLogs(uuid, domain, lines, days, q, regex, scan_lines));
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
+        }
+    }
+
+    [HttpPost("{uuid:guid}/proxy-logs/rotate")]
+    [EnableRateLimiting("expensive")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult RotateProxyLogs(Guid uuid, [FromQuery] string? domain = null)
+    {
+        try
+        {
+            _spaces.RotateProxyLogs(uuid, domain);
+            return Ok(new { ok = true, domain = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().ToLowerInvariant() });
         }
         catch (InvalidOperationException)
         {

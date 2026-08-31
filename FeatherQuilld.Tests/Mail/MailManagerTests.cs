@@ -166,6 +166,74 @@ public class MailVacationHelperTests
     }
 }
 
+public class MailSpamHelperTests
+{
+    [Fact]
+    public void SetSpamFilterDisabled_WritesBypassMap()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "fq-spam-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var config = new AppConfig
+            {
+                System = new SystemConfig
+                {
+                    RootDirectory = root,
+                    Mail = new MailConfig { DataPath = Path.Combine(root, "mail") },
+                },
+            };
+
+            Assert.True(MailSpamHelper.GetSpamFilterEnabled(config, "user@example.com"));
+            MailSpamHelper.SetSpamFilterEnabled(config, "user@example.com", enabled: false);
+            Assert.False(MailSpamHelper.GetSpamFilterEnabled(config, "user@example.com"));
+            var map = File.ReadAllText(MailSpamHelper.BypassMapPath(config));
+            Assert.Contains("user@example.com", map);
+
+            MailSpamHelper.SetSpamFilterEnabled(config, "user@example.com", enabled: true);
+            Assert.True(MailSpamHelper.GetSpamFilterEnabled(config, "user@example.com"));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
+}
+
+public class MailListHelperTests
+{
+    [Fact]
+    public void CreateList_PersistsMembers()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "fq-list-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var config = new AppConfig
+            {
+                System = new SystemConfig
+                {
+                    RootDirectory = root,
+                    Mail = new MailConfig { DataPath = Path.Combine(root, "mail") },
+                },
+            };
+
+            var added = new List<(string Source, string Dest)>();
+            MailListHelper.CreateList(
+                config,
+                "list@example.com",
+                ["a@example.com", "b@example.com"],
+                (source, dest) => added.Add((source, dest)));
+
+            Assert.Equal(2, added.Count);
+            var lists = MailListHelper.ListLists(config);
+            Assert.Single(lists);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+        }
+    }
+}
+
 public class HostPackageMailServerTests
 {
     [Fact]

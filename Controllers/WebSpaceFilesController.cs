@@ -31,10 +31,38 @@ public sealed class WebSpaceFilesController : ControllerBase
     }
 
     /// <summary>List files and directories under a path.</summary>
+    [HttpGet("capabilities")]
+    public IActionResult Capabilities() => Ok(new { data = WebSpaceFileCapabilities.ToResponse() });
+
+    /// <summary>List files and directories under a path.</summary>
     [HttpGet("list")]
-    public IActionResult List(Guid uuid, [FromQuery] string? directory = "/")
+    public IActionResult List(
+        Guid uuid,
+        [FromQuery] string? directory = "/",
+        [FromQuery] int page = 0,
+        [FromQuery(Name = "per_page")] int perPage = 0)
     {
-        try { return Ok(new { data = _files.List(uuid, directory) }); }
+        try
+        {
+            if (page > 0 || perPage > 0)
+            {
+                var p = page > 0 ? page : 1;
+                var pp = perPage > 0 ? perPage : 250;
+                var result = _files.ListPaged(uuid, directory, p, pp);
+                return Ok(new
+                {
+                    data = new
+                    {
+                        entries = result.Entries,
+                        total = result.Total,
+                        page = result.Page,
+                        per_page = result.PerPage,
+                    },
+                });
+            }
+
+            return Ok(new { data = _files.List(uuid, directory) });
+        }
         catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
         catch (UnauthorizedAccessException ex) { return StatusCode(403, new { error = ex.Message }); }
         catch (FileNotFoundException ex) { return NotFound(new { error = ex.Message }); }

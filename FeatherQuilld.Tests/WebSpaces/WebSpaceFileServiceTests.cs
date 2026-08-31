@@ -34,6 +34,25 @@ public class WebSpaceFileServiceTests : IDisposable
     }
 
     [Fact]
+    public void ListPaged_ReturnsSliceAndTotal()
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            File.WriteAllText(Path.Combine(_root, $"file{i}.txt"), "x");
+        }
+
+        var page1 = _files.ListPaged(_uuid, "/", page: 1, perPage: 2);
+        Assert.Equal(2, page1.Entries.Count);
+        Assert.True(page1.Total >= 6);
+        Assert.Equal(1, page1.Page);
+        Assert.Equal(2, page1.PerPage);
+
+        var page2 = _files.ListPaged(_uuid, "/", page: 2, perPage: 2);
+        Assert.Equal(2, page2.Entries.Count);
+        Assert.Equal(2, page2.Page);
+    }
+
+    [Fact]
     public void WriteRead_RoundTrip()
     {
         _files.WriteText(_uuid, "/public/note.txt", "via-test");

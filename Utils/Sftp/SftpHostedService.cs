@@ -493,8 +493,11 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                     if (!context.HasSignature)
                         return ValueTask.FromResult<(AuthResult, AuthenticatedUser?)>((AuthResult.Continue, null));
 
+                    if (context.PublicKeyBlob is not { Length: > 0 } keyBlob)
+                        return ValueTask.FromResult<(AuthResult, AuthenticatedUser?)>((AuthResult.Failure, null));
+
                     authMethod = "public_key";
-                    publicKey = Convert.ToBase64String(context.PublicKeyBlob);
+                    publicKey = Convert.ToBase64String(keyBlob);
                 }
                 else if (string.Equals(context.Method, "password", StringComparison.OrdinalIgnoreCase))
                 {

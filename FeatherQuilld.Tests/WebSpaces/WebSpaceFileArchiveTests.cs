@@ -79,8 +79,37 @@ public class WebSpaceFileArchiveTests : IDisposable
     }
 
     [Fact]
+    public void Compress_7z_RoundTrip_And_ListArchive()
+    {
+        var archive = _files.Compress(
+            _uuid,
+            "/public",
+            ["/public/a.txt", "/public/b.txt"],
+            archiveName: "bundle",
+            extension: "7z");
+
+        Assert.Equal("/public/bundle.7z", archive);
+        Assert.True(File.Exists(Path.Combine(_root, "public", "bundle.7z")));
+
+        var listing = _files.ListArchiveDirectory(_uuid, "/public", "bundle.7z", "");
+        var names = listing.Contents.Select(e => (string)((dynamic)e).name).ToList();
+        Assert.Contains("a.txt", names);
+        Assert.Contains("b.txt", names);
+
+        File.Delete(Path.Combine(_root, "public", "a.txt"));
+        File.Delete(Path.Combine(_root, "public", "b.txt"));
+
+        _files.Decompress(_uuid, archive);
+        Assert.Equal("alpha", File.ReadAllText(Path.Combine(_root, "public", "a.txt")));
+        Assert.Equal("beta", File.ReadAllText(Path.Combine(_root, "public", "b.txt")));
+    }
+
+    [Fact]
     public void Chmod_AppliesMode()
     {
+        if (OperatingSystem.IsWindows())
+            return;
+
         _files.Chmod(_uuid, [("/public/a.txt", "0755")]);
         var mode = File.GetUnixFileMode(Path.Combine(_root, "public", "a.txt"));
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute

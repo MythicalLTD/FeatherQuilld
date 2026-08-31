@@ -365,15 +365,15 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
 
             lock (_mutateGate)
             {
-                space = Get(uuid);
-                if (space is null)
+                var current = Get(uuid);
+                if (current is null)
                     return;
 
                 if (request.StartOnCompletion)
                 {
                     try
                     {
-                        PowerInternal(space, "start");
+                        PowerInternal(current, "start");
                     }
                     catch (Exception ex)
                     {
@@ -382,7 +382,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                     }
                 }
 
-                SyncPanelState(space);
+                SyncPanelState(current);
                 RebuildProxy();
                 TrySyncSchedules(uuid, remote);
             }
@@ -981,19 +981,58 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         return DataPath(uuid);
     }
 
-    public string GetRuntimeLogs(Guid uuid, int lines = 100)
+    public string GetRuntimeLogs(Guid uuid, int lines = 100, string? query = null, bool regex = false, int searchScanLines = 10_000)
     {
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
             return "(static WebSpace — no runtime container logs)\n";
 
-        return _runtime.GetLogsAsync(uuid, lines).GetAwaiter().GetResult();
+        var text = _runtime.GetLogsAsync(uuid, Math.Clamp(searchScanLines, lines, 10_000)).GetAwaiter().GetResult();
+        if (string.IsNullOrWhiteSpace(query))
+            return TailText(text, lines);
+
+        var filtered = ProxyAccessLogs.FilterLines(
+            text.Replace("\r\n", "\n").Split('\n'),
+            query.Trim(),
+            regex);
+        return string.Join('\n', filtered.Count <= lines ? filtered : filtered.Skip(filtered.Count - lines));
     }
 
-    public object GetProxyLogs(Guid uuid, string? domain = null, int lines = 200, int days = 0)
+    public object GetProxyLogs(
+        Guid uuid,
+        string? domain = null,
+        int lines = 200,
+        int days = 0,
+        string? query = null,
+        bool regex = false,
+        int searchScanLines = ProxyAccessLogs.DefaultSearchScanLines)
     {
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
-        return ProxyAccessLogs.Read(_config.System.RootDirectory, space, domain, lines, days);
+        return ProxyAccessLogs.Read(
+            _config.System.RootDirectory,
+            space,
+            domain,
+            lines,
+            days,
+            query,
+            regex,
+            searchScanLines);
+    }
+
+    public void RotateProxyLogs(Guid uuid, string? domain = null)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        ProxyAccessLogs.RotateSpace(_config.System.RootDirectory, space, domain);
+    }
+
+    private static string TailText(string text, int lines)
+    {
+        if (string.IsNullOrEmpty(text))
+            return text;
+        var parts = text.Replace("\r\n", "\n").Split('\n');
+        if (parts.Length <= lines)
+            return text;
+        return string.Join('\n', parts.AsSpan(parts.Length - lines).ToArray());
     }
 
     public string GetInstallLogs(Guid uuid)
@@ -1192,15 +1231,15 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
 
             lock (_mutateGate)
             {
-                space = Get(uuid);
-                if (space is null)
+                var current = Get(uuid);
+                if (current is null)
                     return;
 
                 if (startOnCompletion)
                 {
                     try
                     {
-                        PowerInternal(space, "start");
+                        PowerInternal(current, "start");
                     }
                     catch (Exception ex)
                     {
@@ -1209,8 +1248,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                     }
                 }
 
-                Persist(space);
-                SyncPanelState(space);
+                Persist(current);
+                SyncPanelState(current);
                 RebuildProxy();
             }
         }

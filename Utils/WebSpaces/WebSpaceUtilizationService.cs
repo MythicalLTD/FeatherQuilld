@@ -182,17 +182,15 @@ public sealed class WebSpaceUtilizationService
 
     private static ContainerStatsResponse? ReadContainerStatsOnce(DockerClient client, string containerRef)
     {
-        using var stream = client.Containers.GetContainerStatsAsync(
+        ContainerStatsResponse? captured = null;
+        var progress = new Progress<ContainerStatsResponse>(stats => captured = stats);
+        client.Containers.GetContainerStatsAsync(
             containerRef,
             new ContainerStatsParameters { Stream = false },
+            progress,
             CancellationToken.None).GetAwaiter().GetResult();
 
-        using var reader = new StreamReader(stream);
-        var json = reader.ReadToEnd();
-        if (string.IsNullOrWhiteSpace(json))
-            return null;
-
-        return DeserializeContainerStats(json);
+        return captured;
     }
 
     internal static ContainerStatsResponse? DeserializeContainerStats(string json) =>

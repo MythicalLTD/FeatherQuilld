@@ -20,10 +20,21 @@ public static class ProxyAccessLogs
     public static string SummaryPath(string rootDirectory, Guid uuid, string domain, DateOnly day) =>
         Path.Combine(DirectoryFor(rootDirectory, uuid), $"{domain.Trim().ToLowerInvariant()}.{day:yyyy-MM-dd}.json");
 
-    public static object Read(string rootDirectory, WebSpace space, string? domain, int lines, int days = 0)
+    public const int DefaultSearchScanLines = 10_000;
+
+    public static object Read(
+        string rootDirectory,
+        WebSpace space,
+        string? domain,
+        int lines,
+        int days = 0,
+        string? query = null,
+        bool regex = false,
+        int searchScanLines = DefaultSearchScanLines)
     {
         lines = Math.Clamp(lines, 1, 5000);
         days = Math.Clamp(days, 0, 90);
+        searchScanLines = Math.Clamp(searchScanLines, lines, DefaultSearchScanLines);
         var domains = string.IsNullOrWhiteSpace(domain)
             ? space.Domains.Where(d => !string.IsNullOrWhiteSpace(d)).ToList()
             : [domain.Trim().ToLowerInvariant()];
@@ -38,7 +49,9 @@ public static class ProxyAccessLogs
         {
             var accessPath = AccessLogPath(rootDirectory, space.Uuid, host);
             var errorPath = ErrorLogPath(rootDirectory, space.Uuid, host);
-            var accessTail = TailFile(accessPath, lines);
+            var accessSearch = SearchFile(accessPath, query, searchScanLines, lines, regex);
+            var errorSearch = SearchFile(errorPath, query, searchScanLines, Math.Min(lines, 200), regex);
+            var accessTail = accessSearch.Text;
             var parsed = ParseLines(accessTail);
             totalHits += parsed.Hits;
             bytesOut += parsed.Bytes;
@@ -58,7 +71,9 @@ public static class ProxyAccessLogs
                 access_present = File.Exists(accessPath),
                 error_present = File.Exists(errorPath),
                 access_tail = accessTail,
-                error_tail = TailFile(errorPath, Math.Min(lines, 200)),
+                error_tail = errorSearch.Text,
+                access_search_truncated = accessSearch.Truncated,
+                error_search_truncated = errorSearch.Truncated,
                 hits = parsed.Hits,
                 bytes = parsed.Bytes,
             });
@@ -98,6 +113,9 @@ public static class ProxyAccessLogs
                 })
                 .ToList(),
             files,
+            search = string.IsNullOrWhiteSpace(query) ? null : query.Trim(),
+            search_regex = regex,
+            search_scan_lines = string.IsNullOrWhiteSpace(query) ? 0 : searchScanLines,
         };
     }
 
@@ -116,14 +134,99 @@ public static class ProxyAccessLogs
         }
     }
 
-    public static void RotateSpace(string rootDirectory, WebSpace space)
+    public static void RotateSpace(string rootDirectory, WebSpace space, string? domain = null)
     {
         EnsureDir(rootDirectory, space.Uuid);
-        foreach (var host in space.Domains.Where(d => !string.IsNullOrWhiteSpace(d))
-                     .Select(d => d.Trim().ToLowerInvariant())
-                     .Distinct())
+        var hosts = string.IsNullOrWhiteSpace(domain)
+            ? space.Domains.Where(d => !string.IsNullOrWhiteSpace(d))
+                .Select(d => d.Trim().ToLowerInvariant())
+                .Distinct()
+            : [domain.Trim().ToLowerInvariant()];
+
+        foreach (var host in hosts)
         {
             PersistLiveLogSummaries(rootDirectory, space.Uuid, host);
+            TruncateLogFile(AccessLogPath(rootDirectory, space.Uuid, host));
+            TruncateLogFile(ErrorLogPath(rootDirectory, space.Uuid, host));
+        }
+    }
+
+    public sealed record SearchResult(string Text, bool Truncated);
+
+    internal static SearchResult SearchFile(
+        string path,
+        string? query,
+        int scanLines,
+        int resultLimit,
+        bool regex)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return new SearchResult(TailFile(path, resultLimit), false);
+
+        var lines = ReadLastLines(path, scanLines, out var truncated);
+        var matches = FilterLines(lines, query.Trim(), regex);
+        if (matches.Count <= resultLimit)
+            return new SearchResult(string.Join('\n', matches), truncated);
+
+        return new SearchResult(
+            string.Join('\n', matches.Skip(matches.Count - resultLimit)),
+            truncated);
+    }
+
+    internal static List<string> FilterLines(IReadOnlyList<string> lines, string query, bool regex)
+    {
+        if (regex)
+        {
+            try
+            {
+                var pattern = new System.Text.RegularExpressions.Regex(
+                    query,
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                        | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+                return lines.Where(line => pattern.IsMatch(line)).ToList();
+            }
+            catch
+            {
+                return lines.Where(line => line.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+            }
+        }
+
+        return lines.Where(line => line.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    private static List<string> ReadLastLines(string path, int maxLines, out bool truncated)
+    {
+        truncated = false;
+        if (!File.Exists(path))
+            return [];
+
+        try
+        {
+            var all = File.ReadAllLines(path);
+            if (all.Length <= maxLines)
+                return all.ToList();
+
+            truncated = true;
+            return all.AsSpan(all.Length - maxLines).ToArray().ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static void TruncateLogFile(string path)
+    {
+        if (!File.Exists(path))
+            return;
+
+        try
+        {
+            File.WriteAllText(path, string.Empty);
+        }
+        catch
+        {
+            // best-effort
         }
     }
 

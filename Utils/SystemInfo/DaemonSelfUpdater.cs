@@ -288,6 +288,9 @@ public sealed class DaemonSelfUpdater
 
     private static void TryMarkExecutable(string path)
     {
+        if (OperatingSystem.IsWindows())
+            return;
+
         try
         {
             var mode = File.GetUnixFileMode(path);

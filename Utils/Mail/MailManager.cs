@@ -72,6 +72,10 @@ public sealed class MailManager
             "set_forward" => SetForward(payload, delete: false),
             "delete_forward" => SetForward(payload, delete: true),
             "set_autorespond" => SetAutorespond(payload),
+            "set_spam_filter" => SetSpamFilter(payload),
+            "create_list" => CreateList(payload),
+            "delete_list" => DeleteList(payload),
+            "set_list_member" => SetListMember(payload),
             _ => throw new InvalidOperationException("Unsupported mail provision action: " + action),
         };
     }
@@ -167,6 +171,76 @@ public sealed class MailManager
         MailVacationHelper.WriteAutorespond(_config, email, subject, body);
 
         return new { ok = true, email, enabled = true, sieve = true };
+    }
+
+    public bool GetSpamFilterEnabled(string email) =>
+        MailSpamHelper.GetSpamFilterEnabled(_config, email);
+
+    public object SetSpamFilter(IReadOnlyDictionary<string, object?> payload)
+    {
+        var email = RequireEmail(payload);
+        var enabled = GetBool(payload, "enabled") ?? true;
+        MailSpamHelper.SetSpamFilterEnabled(_config, email, enabled);
+        return new { ok = true, email, enabled };
+    }
+
+    public IReadOnlyList<object> ListMailingLists(string? domain = null) =>
+        MailListHelper.ListLists(_config, domain);
+
+    private object CreateList(IReadOnlyDictionary<string, object?> payload)
+    {
+        var address = GetString(payload, "address") ?? RequireEmail(payload);
+        var members = GetStringList(payload, "members");
+        if (members.Count == 0)
+            throw new InvalidOperationException("members is required.");
+
+        return MailListHelper.CreateList(_config, address, members, (source, dest) => RunSetup("alias", "add", source, dest));
+    }
+
+    private object DeleteList(IReadOnlyDictionary<string, object?> payload)
+    {
+        var address = GetString(payload, "address") ?? RequireEmail(payload);
+        return MailListHelper.DeleteList(_config, address, (source, dest) => RunSetup("alias", "del", source, dest));
+    }
+
+    private object SetListMember(IReadOnlyDictionary<string, object?> payload)
+    {
+        var address = GetString(payload, "address") ?? throw new InvalidOperationException("address is required.");
+        var member = GetString(payload, "member") ?? throw new InvalidOperationException("member is required.");
+        var add = GetBool(payload, "add") ?? true;
+        return MailListHelper.SetListMember(
+            _config,
+            address,
+            member,
+            add,
+            (source, dest) => RunSetup("alias", "add", source, dest),
+            (source, dest) => RunSetup("alias", "del", source, dest));
+    }
+
+    private static List<string> GetStringList(IReadOnlyDictionary<string, object?> payload, string key)
+    {
+        if (!payload.TryGetValue(key, out var value) || value is null)
+            return [];
+
+        if (value is JsonElement el && el.ValueKind == JsonValueKind.Array)
+        {
+            return el.EnumerateArray()
+                .Select(item => item.ValueKind == JsonValueKind.String ? item.GetString() : item.ToString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s!.Trim())
+                .ToList();
+        }
+
+        if (value is IEnumerable<object> list)
+        {
+            return list
+                .Select(item => item?.ToString())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s!.Trim())
+                .ToList();
+        }
+
+        return [];
     }
 
     /// <summary>Generate DKIM keys with short retries until the TXT file is readable.</summary>

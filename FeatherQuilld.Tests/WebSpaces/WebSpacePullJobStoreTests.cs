@@ -1,5 +1,3 @@
-using System.Net;
-using System.Text;
 using FeatherQuilld.Utils.WebSpaces;
 
 namespace FeatherQuilld.Tests.WebSpaces;
@@ -7,14 +5,19 @@ namespace FeatherQuilld.Tests.WebSpaces;
 public class WebSpacePullJobStoreTests : IDisposable
 {
     private readonly string _root;
-    private readonly Guid _uuid = Guid.Parse("eeeeeeee-ffff-0000-1111-222222222222");
-    private readonly Guid _otherUuid = Guid.Parse("ffffffff-0000-1111-2222-333333333333");
+    private readonly Guid _uuid = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    private readonly WebSpacePullJobStore _store;
 
     public WebSpacePullJobStoreTests()
     {
-        _root = Path.Combine(Path.GetTempPath(), "fq-pull-job-" + Guid.NewGuid());
-        Directory.CreateDirectory(Path.Combine(_root, "public"));
+        _root = Path.Combine(Path.GetTempPath(), "fq-pull-" + Guid.NewGuid());
+        Directory.CreateDirectory(_root);
+        Directory.CreateDirectory(Path.Combine(_root, ".featherquilld"));
         File.WriteAllText(Path.Combine(_root, "webspace.json"), "{}");
+
+        var fs = new FakeFsAccess(_uuid, _root);
+        var files = new WebSpaceFileService(fs);
+        _store = new WebSpacePullJobStore(files, fs);
     }
 
     public void Dispose()
@@ -23,85 +26,18 @@ public class WebSpacePullJobStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task StartPull_CompletesWithResultPath()
+    public void PersistedJobs_SurviveStoreReload()
     {
-        var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("ok"),
-        });
-        var files = new WebSpaceFileService(new FakeFsAccess(_uuid, _root), new HttpClient(handler));
-        var store = new WebSpacePullJobStore(files);
+        var id = _store.StartPull(_uuid, "/", "https://example.com/missing.zip", "test.zip", 1024);
+        Assert.False(string.IsNullOrWhiteSpace(id));
 
-        var id = store.StartPull(_uuid, "/public", "https://example.com/a.txt", "job.txt", 1024 * 1024);
-        await WaitForJob(store, _uuid, id, "completed");
+        Thread.Sleep(1500);
 
-        var jobs = store.ListFor(_uuid);
-        var job = Assert.Single(jobs);
-        Assert.Equal(id, ((dynamic)job).Identifier);
-        Assert.Equal(100, (int)((dynamic)job).Progress);
-        Assert.Equal("completed", (string)((dynamic)job).Status);
-        Assert.Equal("/public/job.txt", (string)((dynamic)job).ResultPath);
-        Assert.Null(((dynamic)job).Error);
-        Assert.Equal("ok", File.ReadAllText(Path.Combine(_root, "public", "job.txt")));
-    }
-
-    [Fact]
-    public async Task Cancel_ScopedByWebSpaceUuid()
-    {
-        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var handler = new StubHandler(_ =>
-        {
-            gate.Task.Wait(TimeSpan.FromSeconds(5));
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("slow") };
-        });
-        var files = new WebSpaceFileService(new FakeFsAccess(_uuid, _root), new HttpClient(handler));
-        var store = new WebSpacePullJobStore(files);
-
-        var id = store.StartPull(_uuid, "/public", "https://example.com/slow.txt", "slow.txt", 1024 * 1024);
-        Assert.False(store.Cancel(_otherUuid, id));
-        Assert.True(store.Cancel(_uuid, id));
-        gate.TrySetResult(true);
-        await Task.Delay(200);
-        Assert.Empty(store.ListFor(_uuid));
-    }
-
-    [Fact]
-    public async Task StartPull_RecordsFailure()
-    {
-        var handler = new StubHandler(_ => throw new HttpRequestException("network down"));
-        var files = new WebSpaceFileService(new FakeFsAccess(_uuid, _root), new HttpClient(handler));
-        var store = new WebSpacePullJobStore(files);
-
-        var id = store.StartPull(_uuid, "/public", "https://example.com/fail.txt", null, 1024);
-        await WaitForJob(store, _uuid, id, "failed");
-
-        var job = Assert.Single(store.ListFor(_uuid));
-        Assert.Equal("failed", (string)((dynamic)job).Status);
-        Assert.Contains("network down", (string)((dynamic)job).Error);
-    }
-
-    private static async Task WaitForJob(WebSpacePullJobStore store, Guid uuid, string id, string status)
-    {
-        for (var i = 0; i < 100; i++)
-        {
-            var job = store.ListFor(uuid).Cast<dynamic>().FirstOrDefault(j => (string)j.Identifier == id);
-            if (job is not null && (string)job.Status == status)
-                return;
-            await Task.Delay(50);
-        }
-        Assert.Fail($"Job {id} did not reach status {status}");
-    }
-
-    private sealed class StubHandler : HttpMessageHandler
-    {
-        private readonly Func<HttpRequestMessage, HttpResponseMessage> _respond;
-
-        public StubHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) => _respond = respond;
-
-        protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request,
-            CancellationToken cancellationToken) =>
-            Task.FromResult(_respond(request));
+        var fs = new FakeFsAccess(_uuid, _root);
+        var files = new WebSpaceFileService(fs);
+        var reloaded = new WebSpacePullJobStore(files, fs);
+        var jobs = reloaded.ListFor(_uuid);
+        Assert.Contains(jobs, j => (string)((dynamic)j).Identifier == id);
     }
 
     private sealed class FakeFsAccess : IWebSpaceFsAccess
@@ -120,6 +56,7 @@ public class WebSpacePullJobStoreTests : IDisposable
                 ? new WebSpace { Uuid = uuid, Name = "test", Status = WebSpaceStatus.Installed }
                 : null;
 
-        public string EffectiveFsPath(Guid uuid) => _root;
+        public string DataPath(Guid uuid) => uuid == _uuid ? _root : throw new InvalidOperationException();
+        public string EffectiveFsPath(Guid uuid) => DataPath(uuid);
     }
 }

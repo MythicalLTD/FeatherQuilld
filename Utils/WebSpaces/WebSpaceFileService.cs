@@ -5,6 +5,10 @@ using System.Security.Cryptography;
 using System.Text;
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.IO;
+using SharpCompress.Archives;
+using SharpCompress.Common;
+using SharpCompress.Writers;
+using SharpCompress.Writers.SevenZip;
 
 namespace FeatherQuilld.Utils.WebSpaces;
 
@@ -33,16 +37,36 @@ public sealed class WebSpaceFileService
     }
 
     public IReadOnlyList<object> List(Guid uuid, string? directory) =>
+        ListPaged(uuid, directory, page: 1, perPage: 0).Entries;
+
+    public WebSpaceFileListResult ListPaged(Guid uuid, string? directory, int page = 1, int perPage = 250) =>
         _events.WithHooks(
             new FileListBeforeEvent { WebSpaceUuid = uuid, Directory = directory },
-            (entries, err) => new FileListAfterEvent
+            (result, err) => new FileListAfterEvent
             {
                 WebSpaceUuid = uuid,
                 Directory = directory,
-                Entries = entries,
+                Entries = result?.Entries,
                 Error = err,
             },
-            () => ListCore(uuid, directory));
+            () => ListPagedCore(uuid, directory, page, perPage));
+
+    private WebSpaceFileListResult ListPagedCore(Guid uuid, string? directory, int page, int perPage)
+    {
+        var all = ListCore(uuid, directory);
+        var total = all.Count;
+        if (perPage <= 0)
+        {
+            return new WebSpaceFileListResult(all, total, 1, total);
+        }
+
+        page = Math.Max(1, page);
+        perPage = Math.Clamp(perPage, 1, 1000);
+        var skip = (page - 1) * perPage;
+        var slice = all.Skip(skip).Take(perPage).ToList();
+
+        return new WebSpaceFileListResult(slice, total, page, perPage);
+    }
 
     private IReadOnlyList<object> ListCore(Guid uuid, string? directory)
     {
@@ -419,9 +443,15 @@ public sealed class WebSpaceFileService
             : Path.GetFileName(archiveName.Trim());
         if (!(baseName.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)
               || baseName.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase)
-              || baseName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)))
+              || baseName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+              || baseName.EndsWith(".7z", StringComparison.OrdinalIgnoreCase)))
         {
-            baseName += ext == "zip" ? ".zip" : ".tar.gz";
+            baseName += ext switch
+            {
+                "zip" => ".zip",
+                "7z" => ".7z",
+                _ => ".tar.gz",
+            };
         }
 
         var archiveVirtual = CombineVirtual(workDirVirtual, baseName);
@@ -451,6 +481,8 @@ public sealed class WebSpaceFileService
 
         if (ext == "zip")
             CreateZip(archivePath, sources);
+        else if (ext == "7z")
+            Create7z(archivePath, sources);
         else
             CreateTarGz(archivePath, sources);
 
@@ -478,8 +510,10 @@ public sealed class WebSpaceFileService
             ExtractZipSafe(archivePath, destDir, root);
         else if (name.EndsWith(".tar.gz", StringComparison.Ordinal) || name.EndsWith(".tgz", StringComparison.Ordinal))
             ExtractTarGzSafe(archivePath, destDir, root);
+        else if (name.EndsWith(".7z", StringComparison.Ordinal))
+            Extract7zSafe(archivePath, destDir, root);
         else
-            throw new InvalidOperationException("Unsupported archive type (use .zip or .tar.gz).");
+            throw new InvalidOperationException("Unsupported archive type (use .zip, .tar.gz, or .7z).");
     
     }
 
@@ -669,9 +703,12 @@ public sealed class WebSpaceFileService
             dirName = "root";
 
         var ext = NormalizeArchiveExtension(format);
-        var temp = Path.Combine(Path.GetTempPath(), $"fq-dl-{Guid.NewGuid():N}.{(ext == "zip" ? "zip" : "tar.gz")}");
+        var tempExt = ext switch { "zip" => "zip", "7z" => "7z", _ => "tar.gz" };
+        var temp = Path.Combine(Path.GetTempPath(), $"fq-dl-{Guid.NewGuid():N}.{tempExt}");
         if (ext == "zip")
             CreateZip(temp, [(dirPath, dirName)]);
+        else if (ext == "7z")
+            Create7z(temp, [(dirPath, dirName)]);
         else
             CreateTarGz(temp, [(dirPath, dirName)]);
         return temp;
@@ -713,6 +750,19 @@ public sealed class WebSpaceFileService
                     continue;
                 var isDir = entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList;
                 if (!TryArchiveChild(prefix, rel, isDir, entry.Length, out var child, out var childPath, out var childIsDir, out var size))
+                    continue;
+                MergeArchiveChild(children, child, childPath, childIsDir, size);
+            }
+        }
+        else if (lower.EndsWith(".7z"))
+        {
+            using var archive = ArchiveFactory.OpenArchive(archivePath);
+            foreach (var entry in archive.Entries)
+            {
+                if (string.IsNullOrEmpty(entry.Key))
+                    continue;
+                var rel = entry.Key.Replace('\\', '/').TrimEnd('/');
+                if (!TryArchiveChild(prefix, rel, entry.IsDirectory, entry.Size, out var child, out var childPath, out var childIsDir, out var size))
                     continue;
                 MergeArchiveChild(children, child, childPath, childIsDir, size);
             }
@@ -1123,7 +1173,12 @@ public sealed class WebSpaceFileService
     private static string NormalizeArchiveExtension(string? extension)
     {
         var e = (extension ?? "tar.gz").Trim().TrimStart('.').ToLowerInvariant();
-        return e is "zip" ? "zip" : "tar.gz";
+        return e switch
+        {
+            "zip" => "zip",
+            "7z" => "7z",
+            _ => "tar.gz",
+        };
     }
 
     internal static UnixFileMode ParseOctalMode(string modeStr)
@@ -1266,6 +1321,58 @@ public sealed class WebSpaceFileService
         }
     }
 
+    private static void Create7z(string archivePath, List<(string FullPath, string EntryName)> sources)
+    {
+        using var stream = File.Create(archivePath);
+        using var writer = WriterFactory.OpenWriter(
+            stream,
+            ArchiveType.SevenZip,
+            new SevenZipWriterOptions(CompressionType.LZMA2));
+        foreach (var (full, entryName) in sources)
+        {
+            if (Directory.Exists(full))
+                AddDirectoryTo7z(writer, full, entryName);
+            else
+            {
+                using var fileStream = File.OpenRead(full);
+                writer.Write(Path.GetFileName(entryName), fileStream, File.GetLastWriteTimeUtc(full));
+            }
+        }
+    }
+
+    private static void AddDirectoryTo7z(IWriter writer, string dirPath, string entryPrefix)
+    {
+        var prefix = entryPrefix.TrimEnd('/') + "/";
+        foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
+        {
+            var rel = Path.GetRelativePath(dirPath, file).Replace('\\', '/');
+            using var fs = File.OpenRead(file);
+            writer.Write(prefix + rel, fs, File.GetLastWriteTimeUtc(file));
+        }
+    }
+
+    private static void Extract7zSafe(string archivePath, string destDir, string jailRoot)
+    {
+        using var archive = ArchiveFactory.OpenArchive(archivePath);
+        foreach (var entry in archive.Entries)
+        {
+            if (entry.IsDirectory || string.IsNullOrEmpty(entry.Key))
+                continue;
+
+            var relative = entry.Key.Replace('\\', '/');
+            if (relative.StartsWith('/') || relative.Split('/').Any(p => p == ".."))
+                throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
+
+            var target = Path.GetFullPath(Path.Combine(destDir, relative.Replace('/', Path.DirectorySeparatorChar)));
+            EnsureUnderRoot(jailRoot, target);
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+
+            using var entryStream = entry.OpenEntryStream();
+            using var outStream = File.Create(target);
+            entryStream.CopyTo(outStream);
+        }
+    }
+
     private static void ExtractTarGzSafe(string archivePath, string destDir, string jailRoot)
     {
         var staging = Path.Combine(Path.GetTempPath(), "fq-extract-" + Guid.NewGuid().ToString("N"));
@@ -1304,3 +1411,9 @@ public sealed class WebSpaceFileService
         }
     }
 }
+
+public sealed record WebSpaceFileListResult(
+    IReadOnlyList<object> Entries,
+    int Total,
+    int Page,
+    int PerPage);

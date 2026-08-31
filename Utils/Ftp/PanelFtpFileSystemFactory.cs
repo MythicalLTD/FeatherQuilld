@@ -22,7 +22,7 @@ internal sealed class PanelFtpFileSystemFactory : IFileSystemClassFactory
     public async Task<IUnixFileSystem> Create(IAccountInformation accountInformation)
     {
         var fs = await _inner.Create(accountInformation).ConfigureAwait(false);
-        var username = accountInformation.FtpUser.Identity.Name ?? string.Empty;
+        var username = accountInformation.FtpUser.Identity?.Name ?? string.Empty;
         if (!FtpSessionStore.TryGet(username, out var session))
             return fs;
         return session.ReadOnly ? new ReadOnlyUnixFileSystem(fs) : fs;

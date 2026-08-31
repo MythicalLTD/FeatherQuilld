@@ -145,6 +145,36 @@ public sealed class MailController : ControllerBase
         }
     }
 
+    [HttpGet("mailboxes/{email}/spam")]
+    public IActionResult GetSpamFilter(string email, [FromServices] AppConfig config)
+    {
+        if (string.IsNullOrWhiteSpace(email))
+            return BadRequest(new { error = "email is required." });
+        try
+        {
+            var mgr = RequireManager(config);
+            return Ok(new { email = email.Trim().ToLowerInvariant(), enabled = mgr.GetSpamFilterEnabled(email) });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("lists")]
+    public IActionResult ListMailingLists([FromQuery] string? domain, [FromServices] AppConfig config)
+    {
+        try
+        {
+            var mgr = RequireManager(config);
+            return Ok(new { lists = mgr.ListMailingLists(domain) });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpGet("deliverability")]
     public IActionResult Deliverability(
         [FromQuery] string domain,
