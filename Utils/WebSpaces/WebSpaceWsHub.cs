@@ -36,6 +36,32 @@ public sealed class WebSpaceWsHub
             _spacesTryRemove(uuid);
     }
 
+    public async Task CloseAllAsync(string reason = "shutting down")
+    {
+        foreach (var (uuid, map) in _sockets.ToArray())
+        {
+            foreach (var (socketId, socket) in map.ToArray())
+            {
+                if (socket.State == WebSocketState.Open)
+                {
+                    try
+                    {
+                        await socket.CloseAsync(
+                            WebSocketCloseStatus.EndpointUnavailable,
+                            reason,
+                            CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // ignore close races during shutdown
+                    }
+                }
+
+                Unregister(uuid, socketId);
+            }
+        }
+    }
+
     private void _spacesTryRemove(Guid uuid) => _sockets.TryRemove(uuid, out _);
 
     public async Task BroadcastAsync(

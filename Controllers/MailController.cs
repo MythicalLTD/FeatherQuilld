@@ -144,6 +144,25 @@ public sealed class MailController : ControllerBase
             return BadRequest(new { error = ex.Message });
         }
     }
+
+    [HttpGet("deliverability")]
+    public IActionResult Deliverability(
+        [FromQuery] string domain,
+        [FromQuery] string? public_ip,
+        [FromServices] AppConfig config)
+    {
+        if (string.IsNullOrWhiteSpace(domain))
+            return BadRequest(new { error = "domain is required." });
+
+        try
+        {
+            return Ok(MailDeliverabilityHelper.BuildPayload(config, domain, public_ip));
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
 }
 
 public sealed class MailDomainBody

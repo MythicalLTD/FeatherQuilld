@@ -30,12 +30,18 @@ public sealed class WebSpacesController : ControllerBase
     private readonly WebSpaceStore _spaces;
     private readonly ConsoleJwtValidator _consoleJwt;
     private readonly WebSpaceWsHub _wsHub;
+    private readonly WebSpaceUtilizationService _utilization;
 
-    public WebSpacesController(WebSpaceStore spaces, ConsoleJwtValidator consoleJwt, WebSpaceWsHub wsHub)
+    public WebSpacesController(
+        WebSpaceStore spaces,
+        ConsoleJwtValidator consoleJwt,
+        WebSpaceWsHub wsHub,
+        WebSpaceUtilizationService utilization)
     {
         _spaces = spaces;
         _consoleJwt = consoleJwt;
         _wsHub = wsHub;
+        _utilization = utilization;
     }
 
     [HttpGet]
@@ -177,6 +183,43 @@ public sealed class WebSpacesController : ControllerBase
         {
             var status = await _spaces.RenewSslAsync(uuid, cancellationToken);
             return Ok(status);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpGet("{uuid:guid}/redis")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult GetRedis(Guid uuid)
+    {
+        try
+        {
+            return Ok(_spaces.GetRedis(uuid));
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
+        }
+    }
+
+    [HttpPut("{uuid:guid}/redis")]
+    [EnableRateLimiting("expensive")]
+    [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<WebSpaceResponse> PutRedis(Guid uuid, [FromBody] RedisWebSpaceBody? body)
+    {
+        try
+        {
+            var space = _spaces.SetRedis(uuid, body?.Enabled ?? false);
+            return Ok(_spaces.ToResponse(space));
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
         {
@@ -335,19 +378,20 @@ public sealed class WebSpacesController : ControllerBase
         var socketId = _wsHub.Register(uuid, socket);
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var followTask = FollowAndSendAsync(socket, uuid, linked.Token);
         var canSend = ConsolePermissions.Allows(permissions, ConsolePermissions.Send);
+        var followTask = FollowAndSendAsync(socket, uuid, linked.Token);
+        var statsTask = PushStatsLoopAsync(socket, uuid, linked.Token);
         var recvTask = ReceiveLoopAsync(socket, uuid, canSend, linked.Token);
 
         try
         {
-            await Task.WhenAny(followTask, recvTask);
+            await recvTask;
         }
         finally
         {
             linked.Cancel();
             _wsHub.Unregister(uuid, socketId);
-            try { await Task.WhenAll(followTask, recvTask); } catch { /* cancelled */ }
+            try { await Task.WhenAll(followTask, statsTask); } catch { /* cancelled */ }
         }
 
         if (socket.State == WebSocketState.Open)
@@ -523,6 +567,17 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    [HttpPost("{uuid:guid}/install/abort")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult AbortInstall(Guid uuid)
+    {
+        if (!_spaces.AbortInstall(uuid))
+            return NotFound(new { error = "No install in progress for this WebSpace." });
+
+        return Ok(new { aborted = true });
+    }
+
     [HttpPost("{uuid:guid}/sync")]
     [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -635,10 +690,14 @@ public sealed class WebSpacesController : ControllerBase
     }
 
     [HttpGet("{uuid:guid}/utilization")]
-    public IActionResult Utilization(Guid uuid, [FromServices] WebSpaceUtilizationService utilization)
+    public IActionResult Utilization(
+        Guid uuid,
+        [FromServices] WebSpaceUtilizationService utilization,
+        [FromServices] WebSpaceBandwidthMeter bandwidthMeter)
     {
         try
         {
+            bandwidthMeter.Sync(uuid);
             var stats = utilization.Get(uuid);
             return Ok(new
             {
@@ -650,7 +709,35 @@ public sealed class WebSpacesController : ControllerBase
                 memory_limit_bytes = stats.MemoryLimitBytes,
                 network_rx_bytes = stats.NetworkRxBytes,
                 network_tx_bytes = stats.NetworkTxBytes,
+                bandwidth_limit_bytes = stats.BandwidthLimitBytes,
+                bandwidth_used_bytes = stats.BandwidthUsedBytes,
+                bandwidth_over_quota = stats.BandwidthOverQuota,
                 state = stats.State,
+            });
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
+        }
+    }
+
+    [HttpPost("{uuid:guid}/bandwidth/reset")]
+    public IActionResult ResetBandwidth(Guid uuid, [FromServices] WebSpaceBandwidthMeter bandwidthMeter)
+    {
+        try
+        {
+            bandwidthMeter.Sync(uuid);
+            var space = _spaces.Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+            space.BandwidthUsedBytes = 0;
+            space.BandwidthPeriodStart = WebSpaceBandwidthMeter.CurrentPeriodStart().ToString("yyyy-MM-dd");
+            space.UpdatedAt = DateTimeOffset.UtcNow;
+            _spaces.PersistPublic(space);
+            bandwidthMeter.Sync(uuid);
+            return Ok(new
+            {
+                uuid,
+                bandwidth_used_bytes = space.BandwidthUsedBytes,
+                bandwidth_period_start = space.BandwidthPeriodStart,
             });
         }
         catch (InvalidOperationException)
@@ -964,42 +1051,64 @@ public sealed class WebSpacesController : ControllerBase
 
     private async Task FollowAndSendAsync(WebSocket socket, Guid uuid, CancellationToken ct)
     {
-        try
+        while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
         {
-            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
+            var space = _spaces.Get(uuid);
+            if (space?.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling)
             {
-                var space = _spaces.Get(uuid);
-                if (space?.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling)
+                await Task.Delay(500, ct);
+                continue;
+            }
+
+            try
+            {
+                await foreach (var line in _spaces.FollowRuntimeLogsAsync(uuid, sinceLines: 0, ct))
                 {
-                    await Task.Delay(500, ct);
-                    continue;
+                    if (socket.State != WebSocketState.Open || ct.IsCancellationRequested)
+                        return;
+
+                    await SendWsEventAsync(socket, "console output", [line], ct);
                 }
 
-                break;
+                // Container stopped or log stream ended — stay connected and retry.
+                await TrySendStatusAsync(socket, uuid, ct);
+                await Task.Delay(1500, ct);
             }
-
-            await foreach (var line in _spaces.FollowRuntimeLogsAsync(uuid, sinceLines: 0, ct))
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                if (socket.State != WebSocketState.Open)
-                    break;
-
-                await SendWsEventAsync(socket, "console output", [line], ct);
+                return;
             }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (InvalidOperationException ex)
-        {
-            if (socket.State == WebSocketState.Open)
+            catch (InvalidOperationException ex)
             {
+                if (socket.State != WebSocketState.Open || ct.IsCancellationRequested)
+                    return;
+
                 try
                 {
-                    await SendWsEventAsync(socket, "console output", [ex.Message], CancellationToken.None);
+                    await TrySendStatusAsync(socket, uuid, ct);
+                    await SendWsEventAsync(
+                        socket,
+                        "console output",
+                        [$"[console paused: {ex.Message}]"],
+                        CancellationToken.None);
                 }
                 catch { /* ignore */ }
+
+                await Task.Delay(1500, ct);
             }
         }
+    }
+
+    private async Task TrySendStatusAsync(WebSocket socket, Guid uuid, CancellationToken ct)
+    {
+        var space = _spaces.Get(uuid);
+        if (space is null || socket.State != WebSocketState.Open)
+            return;
+
+        var statusPayload = space.Status is WebSpaceStatus.Installing or WebSpaceStatus.Reinstalling
+            ? space.Status
+            : space.State;
+        await SendWsEventAsync(socket, "status", [statusPayload], ct);
     }
 
     private async Task ReceiveLoopAsync(WebSocket socket, Guid uuid, bool canSend, CancellationToken ct)
@@ -1013,6 +1122,12 @@ public sealed class WebSpacesController : ControllerBase
                     break;
                 if (string.IsNullOrWhiteSpace(text))
                     continue;
+
+                if (TryParseSendStats(text))
+                {
+                    await SendUtilizationStatsAsync(socket, uuid, CancellationToken.None);
+                    continue;
+                }
 
                 if (!TryParseSendCommand(text, out var command))
                     continue;
@@ -1085,6 +1200,77 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    /// <summary>Parse Wings-shaped <c>send stats</c> events.</summary>
+    internal static bool TryParseSendStats(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var evt = root.TryGetProperty("event", out var eventEl)
+                ? eventEl.GetString()
+                : null;
+            return string.Equals(evt, "send stats", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(evt, "send_stats", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private async Task PushStatsLoopAsync(WebSocket socket, Guid uuid, CancellationToken ct)
+    {
+        var lastState = (string?)null;
+        try
+        {
+            while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
+            {
+                lastState = await SendUtilizationStatsAsync(socket, uuid, lastState, ct);
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task<string?> SendUtilizationStatsAsync(
+        WebSocket socket,
+        Guid uuid,
+        string? lastState,
+        CancellationToken ct)
+    {
+        if (socket.State != WebSocketState.Open)
+            return lastState;
+
+        try
+        {
+            var stats = _utilization.GetFresh(uuid);
+            var json = WebSpaceUtilizationService.ToWsStatsJson(stats);
+            await SendWsEventAsync(socket, "stats", [json], ct);
+
+            if (!string.IsNullOrWhiteSpace(stats.State)
+                && !string.Equals(stats.State, lastState, StringComparison.OrdinalIgnoreCase))
+            {
+                await SendWsEventAsync(socket, "status", [stats.State], ct);
+                return stats.State;
+            }
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (Exception)
+        {
+            // ignore transient stats failures
+        }
+
+        return lastState;
+    }
+
+    private Task SendUtilizationStatsAsync(WebSocket socket, Guid uuid, CancellationToken ct) =>
+        SendUtilizationStatsAsync(socket, uuid, null, ct);
+
     /// <summary>Parse Wings-shaped <c>send command</c> events. Returns false for other events.</summary>
     internal static bool TryParseSendCommand(string json, out string command)
     {
@@ -1129,6 +1315,11 @@ public sealed class WebSpacesController : ControllerBase
 public sealed class ExecWebSpaceBody
 {
     public string? Command { get; set; }
+}
+
+public sealed class RedisWebSpaceBody
+{
+    public bool Enabled { get; set; }
 }
 
 public sealed class CreateWebSpaceBody

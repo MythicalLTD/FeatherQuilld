@@ -38,6 +38,8 @@ public sealed class PanelWebSpaceConfig
     [JsonPropertyName("backend_host")]
     public string BackendHost { get; set; } = "";
 
+    public bool Suspended { get; set; }
+
     public PanelWebSpaceMeta? Meta { get; set; }
     public List<PanelWebSpaceSchedule> Schedules { get; set; } = [];
 }
@@ -128,6 +130,10 @@ public sealed class PanelWebSpaceBuild
     /// <summary>Memory limit in MiB. 0 = unlimited.</summary>
     [JsonPropertyName("memory_limit")]
     public long MemoryLimit { get; set; }
+
+    /// <summary>Monthly HTTP egress limit in GiB. 0 = unlimited.</summary>
+    [JsonPropertyName("bandwidth_limit_gb")]
+    public int BandwidthLimitGb { get; set; }
 }
 
 public sealed class PanelWebSpaceMeta

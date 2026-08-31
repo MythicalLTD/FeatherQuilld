@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using AppConfig = FeatherQuilld.Utils.Config.Config;
 using FeatherQuilld.Utils.WebSpaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -13,8 +14,21 @@ namespace FeatherQuilld.Controllers;
 public sealed class WebSpaceFilesController : ControllerBase
 {
     private readonly WebSpaceFileService _files;
+    private readonly WebSpaceTrashService _trash;
+    private readonly WebSpacePullJobStore _pullJobs;
+    private readonly AppConfig _config;
 
-    public WebSpaceFilesController(WebSpaceFileService files) => _files = files;
+    public WebSpaceFilesController(
+        WebSpaceFileService files,
+        WebSpaceTrashService trash,
+        WebSpacePullJobStore pullJobs,
+        AppConfig config)
+    {
+        _files = files;
+        _trash = trash;
+        _pullJobs = pullJobs;
+        _config = config;
+    }
 
     /// <summary>List files and directories under a path.</summary>
     [HttpGet("list")]
@@ -147,7 +161,71 @@ public sealed class WebSpaceFilesController : ControllerBase
     {
         try
         {
-            _files.Delete(uuid, body.Files ?? []);
+            var permanent = body.Permanent == true;
+            var useTrash = body.UseTrash != false && !permanent;
+            _files.Delete(uuid, body.Files ?? [], useTrash, permanent);
+            return Ok(new { ok = true, trash = useTrash && !permanent });
+        }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpGet("trash")]
+    public IActionResult ListTrash(
+        Guid uuid,
+        [FromQuery] long maxSizeBytes = 5L * 1024 * 1024 * 1024,
+        [FromQuery] int retentionDays = 30)
+    {
+        try
+        {
+            var result = _trash.ListTrash(uuid, maxSizeBytes, retentionDays);
+            return Ok(new
+            {
+                entries = result.Entries.Select(e => new
+                {
+                    id = e.Id,
+                    original_root = e.OriginalRoot,
+                    original_name = e.OriginalName,
+                    deleted_at = e.DeletedAt,
+                    size = e.Size,
+                    is_directory = e.IsDirectory,
+                }),
+                total_size = result.TotalSize,
+            });
+        }
+        catch (InvalidOperationException ex) { return NotFound(new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpPost("trash/restore")]
+    public IActionResult RestoreTrash(Guid uuid, [FromBody] TrashRestoreBody body)
+    {
+        try
+        {
+            _trash.RestoreTrash(uuid, body.Ids ?? [], body.Overwrite == true);
+            return Ok(new { ok = true });
+        }
+        catch (FileNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (InvalidOperationException ex) { return Conflict(new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpPost("trash/delete")]
+    public IActionResult DeleteTrash(Guid uuid, [FromBody] TrashIdsBody body)
+    {
+        try
+        {
+            _trash.DeleteTrashEntries(uuid, body.Ids ?? []);
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpPost("trash/empty")]
+    public IActionResult EmptyTrash(Guid uuid)
+    {
+        try
+        {
+            _trash.EmptyTrash(uuid);
             return Ok(new { ok = true });
         }
         catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
@@ -274,16 +352,181 @@ public sealed class WebSpaceFilesController : ControllerBase
     {
         try
         {
+            var directory = body.Directory ?? body.Root ?? "/";
+            var url = body.Url ?? "";
+            var maxBytes = body.MaxBytes > 0 ? body.MaxBytes : WebSpaceFileService.DefaultPullMaxBytes;
+
+            if (body.Background == true)
+            {
+                var id = _pullJobs.StartPull(uuid, directory, url, body.FileName ?? body.Filename, maxBytes);
+                return Accepted(new { identifier = id, background = true });
+            }
+
             var path = await _files.PullAsync(
                 uuid,
-                body.Directory ?? body.Root ?? "/",
-                body.Url ?? "",
+                directory,
+                url,
                 body.FileName ?? body.Filename,
-                body.MaxBytes > 0 ? body.MaxBytes : WebSpaceFileService.DefaultPullMaxBytes,
+                maxBytes,
                 ct);
             return Ok(new { ok = true, data = new { path } });
         }
         catch (UnauthorizedAccessException ex) { return StatusCode(403, new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpGet("pull-jobs")]
+    public IActionResult ListPullJobs(Guid uuid)
+    {
+        try { return Ok(new { data = _pullJobs.ListFor(uuid) }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpDelete("pull-jobs/{identifier}")]
+    public IActionResult CancelPullJob(Guid uuid, string identifier)
+    {
+        try
+        {
+            if (!_pullJobs.Cancel(uuid, identifier))
+                return NotFound(new { error = "Pull job not found." });
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpGet("download-directory")]
+    [EnableRateLimiting("expensive")]
+    public IActionResult DownloadDirectory(
+        Guid uuid,
+        [FromQuery] string directory,
+        [FromQuery] string format = "tar.gz")
+    {
+        try
+        {
+            var temp = _files.CreateDirectoryDownloadArchive(uuid, directory, format);
+            var stream = new FileStream(temp, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.DeleteOnClose);
+            var ext = format.Trim().Equals("zip", StringComparison.OrdinalIgnoreCase) ? "zip" : "tar.gz";
+            var name = (Path.GetFileName(directory.TrimEnd('/')) is { Length: > 0 } n ? n : "download") + "." + ext;
+            return File(stream, "application/octet-stream", name);
+        }
+        catch (UnauthorizedAccessException ex) { return StatusCode(403, new { error = ex.Message }); }
+        catch (FileNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpGet("archive-list")]
+    public IActionResult ListArchive(
+        Guid uuid,
+        [FromQuery] string? directory = "/",
+        [FromQuery] string? file = null,
+        [FromQuery(Name = "archive_path")] string? archivePath = null)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(file))
+                return BadRequest(new { error = "file is required." });
+            var result = _files.ListArchiveDirectory(uuid, directory ?? "/", file, archivePath);
+            return Ok(new { contents = result.Contents, truncated = result.Truncated });
+        }
+        catch (UnauthorizedAccessException ex) { return StatusCode(403, new { error = ex.Message }); }
+        catch (FileNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpPost("extract-archive-selection")]
+    [EnableRateLimiting("expensive")]
+    public IActionResult ExtractArchiveSelection(Guid uuid, [FromBody] ExtractArchiveBody body)
+    {
+        try
+        {
+            _files.ExtractArchiveSelection(
+                uuid,
+                body.Root ?? "/",
+                body.File ?? "",
+                body.Destination ?? "/",
+                body.Entries ?? []);
+            return Ok(new { ok = true });
+        }
+        catch (UnauthorizedAccessException ex) { return StatusCode(403, new { error = ex.Message }); }
+        catch (FileNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpGet("search-advanced")]
+    public IActionResult SearchAdvanced(
+        Guid uuid,
+        [FromQuery] string? directory = "/",
+        [FromQuery] string? pattern = null,
+        [FromQuery] string? include = null,
+        [FromQuery] string? exclude = null,
+        [FromQuery] bool case_insensitive = true,
+        [FromQuery] string? content = null,
+        [FromQuery] bool content_case_insensitive = true,
+        [FromQuery] long? min_size = null,
+        [FromQuery] long? max_size = null,
+        [FromQuery] int limit = 100)
+    {
+        try
+        {
+            var options = new WebSpaceFileService.AdvancedSearchOptions
+            {
+                Pattern = pattern,
+                Include = include,
+                Exclude = exclude,
+                CaseInsensitive = case_insensitive,
+                Content = content,
+                ContentCaseInsensitive = content_case_insensitive,
+                MinSize = min_size,
+                MaxSize = max_size,
+            };
+            return Ok(new { data = _files.SearchAdvanced(uuid, directory, options, limit) });
+        }
+        catch (UnauthorizedAccessException ex) { return StatusCode(403, new { error = ex.Message }); }
+        catch (FileNotFoundException ex) { return NotFound(new { error = ex.Message }); }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpPost("wipe")]
+    [EnableRateLimiting("expensive")]
+    public IActionResult Wipe(Guid uuid, [FromBody] WipeBody body)
+    {
+        try
+        {
+            if (!string.Equals(body.Confirm, "WIPE", StringComparison.Ordinal))
+                return BadRequest(new { error = "confirm must be WIPE" });
+            _files.WipeAll(uuid);
+            return Ok(new { ok = true });
+        }
+        catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
+    }
+
+    [HttpPost("upload-signed")]
+    [EnableRateLimiting("expensive")]
+    [RequestSizeLimit(1024L * 1024L * 512L)]
+    [AllowAnonymous]
+    public async Task<IActionResult> UploadSigned(
+        Guid uuid,
+        [FromQuery] string token,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (!WebSpaceUploadToken.TryValidate(token, uuid, out var payload)
+                || !WebSpaceUploadToken.ValidateSignature(_config, token))
+                return Unauthorized(new { error = "Invalid or expired upload token." });
+
+            if (Request.Form.Files.Count == 0)
+                return BadRequest(new { error = "No files uploaded." });
+
+            foreach (var formFile in Request.Form.Files)
+            {
+                await using var stream = formFile.OpenReadStream();
+                var name = string.IsNullOrWhiteSpace(payload.FileName) ? formFile.FileName : payload.FileName;
+                await _files.UploadAsync(uuid, payload.Directory, name, stream, ct);
+            }
+
+            return Ok(new { ok = true });
+        }
         catch (Exception ex) { return BadRequest(new { error = ex.Message }); }
     }
 
@@ -322,6 +565,21 @@ public sealed class WebSpaceFilesController : ControllerBase
     public sealed class DeleteBody
     {
         public List<string>? Files { get; set; }
+        public bool? Permanent { get; set; }
+
+        [JsonPropertyName("use_trash")]
+        public bool? UseTrash { get; set; }
+    }
+
+    public sealed class TrashRestoreBody
+    {
+        public List<string>? Ids { get; set; }
+        public bool? Overwrite { get; set; }
+    }
+
+    public sealed class TrashIdsBody
+    {
+        public List<string>? Ids { get; set; }
     }
 
     public sealed class CompressBody
@@ -361,5 +619,19 @@ public sealed class WebSpaceFilesController : ControllerBase
 
         public string? Filename { get; set; }
         public long MaxBytes { get; set; }
+        public bool? Background { get; set; }
+    }
+
+    public sealed class ExtractArchiveBody
+    {
+        public string? Root { get; set; }
+        public string? File { get; set; }
+        public string? Destination { get; set; }
+        public List<string>? Entries { get; set; }
+    }
+
+    public sealed class WipeBody
+    {
+        public string? Confirm { get; set; }
     }
 }

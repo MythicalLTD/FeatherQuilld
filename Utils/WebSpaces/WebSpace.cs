@@ -37,8 +37,21 @@ public sealed class WebSpace
     public string? ContainerId { get; set; }
     public string Status { get; set; } = WebSpaceStatus.Installed;
     public string State { get; set; } = WebSpaceState.Stopped;
+    [JsonPropertyName("bandwidth_limit_bytes")]
+    public long BandwidthLimitBytes { get; set; }
+    [JsonPropertyName("bandwidth_used_bytes")]
+    public long BandwidthUsedBytes { get; set; }
+    [JsonPropertyName("bandwidth_period_start")]
+    public string BandwidthPeriodStart { get; set; } = "";
+    /// <summary>Panel suspend flag — blocks proxy and stops runtime when synced.</summary>
+    public bool Suspended { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    public bool IsBandwidthOverQuota() =>
+        BandwidthLimitBytes > 0 && BandwidthUsedBytes >= BandwidthLimitBytes;
+
+    public bool IsSuspended() => Suspended;
 
     /// <summary>Owner ACME contact, else node <paramref name="nodeFallback"/>.</summary>
     public string ResolveAcmeEmail(string? nodeFallback = null)
@@ -104,7 +117,15 @@ public sealed record WebSpaceResponse(
     string Status,
     string State,
     [property: JsonPropertyName("created_at")] DateTimeOffset CreatedAt,
-    [property: JsonPropertyName("updated_at")] DateTimeOffset UpdatedAt);
+    [property: JsonPropertyName("updated_at")] DateTimeOffset UpdatedAt,
+    [property: JsonPropertyName("ssl_mode")] string SslMode = "acme",
+    [property: JsonPropertyName("waf_enabled")] bool WafEnabled = false,
+    [property: JsonPropertyName("waf_deny_ips")] IReadOnlyList<string>? WafDenyIps = null,
+    [property: JsonPropertyName("waf_deny_paths")] IReadOnlyList<string>? WafDenyPaths = null,
+    [property: JsonPropertyName("bandwidth_limit_bytes")] long BandwidthLimitBytes = 0,
+    [property: JsonPropertyName("bandwidth_used_bytes")] long BandwidthUsedBytes = 0,
+    [property: JsonPropertyName("bandwidth_over_quota")] bool BandwidthOverQuota = false,
+    [property: JsonPropertyName("domain_routes")] IReadOnlyList<WebSpaceDomainRoute>? DomainRoutes = null);
 
 public sealed record WebSpaceStatusResponse(
     Guid Uuid,

@@ -587,6 +587,44 @@ public class ReverseProxyManagerTests
     }
 
     [Fact]
+    public void BuildConfig_Caddy_OverQuota_Emits503AndSkipsReverseProxy()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "fq-proxy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var config = new AppConfig
+            {
+                System = new SystemConfig
+                {
+                    RootDirectory = root,
+                    Data = Path.Combine(root, "data"),
+                    Proxy = new ProxyConfig { Enabled = true, Provider = "caddy" },
+                },
+            };
+
+            var mgr = new ReverseProxyManager(config);
+            var space = new WebSpace
+            {
+                Uuid = Guid.NewGuid(),
+                Domains = ["quota.example.com"],
+                BackendPort = 20123,
+                BandwidthLimitBytes = 1024,
+                BandwidthUsedBytes = 2048,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+
+            var caddyfile = mgr.BuildConfig([space]);
+            Assert.Contains("respond \"Bandwidth quota exceeded\" 503", caddyfile);
+            Assert.DoesNotContain("reverse_proxy", caddyfile);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
     public void BuildConfig_Nginx_WafDenyOnHttpAndAccessLog()
     {
         var root = Path.Combine(Path.GetTempPath(), "fq-proxy-" + Guid.NewGuid().ToString("N"));

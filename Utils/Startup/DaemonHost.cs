@@ -1,6 +1,7 @@
 using FeatherQuilld.Controllers;
 using FeatherQuilld.Middleware;
 using FeatherQuilld.Utils.Config.System;
+using FeatherQuilld.Utils.Ftp;
 using FeatherQuilld.Utils.Plugins;
 using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.Remote;
@@ -158,6 +159,11 @@ public sealed class DaemonHost
         else
             Logger.Info(LoggerTypes.Application, "SFTP disabled");
 
+        if (config.Ftp.Enabled)
+            Logger.Info(LoggerTypes.Application, $"FTP → 0.0.0.0:{config.Ftp.Port}");
+        else
+            Logger.Info(LoggerTypes.Application, "FTP disabled");
+
         Logger.Info(LoggerTypes.Disk,
             $"Disk limiter effective={config.System.EffectiveDiskLimiterMode} (configured={config.System.DiskLimiterMode})");
         Logger.Info(LoggerTypes.Proxy,
@@ -177,6 +183,7 @@ public sealed class DaemonHost
         builder.Services.AddSingleton(config.Plugins);
         builder.Services.AddSingleton(config.Remote);
         builder.Services.AddSingleton(config.Sftp);
+        builder.Services.AddSingleton(config.Ftp);
         builder.Services.AddSingleton(config.Docker);
         builder.Services.AddSingleton<DaemonState>();
         builder.Services.AddSingleton<PanelClient>();
@@ -245,11 +252,24 @@ public sealed class DaemonHost
         builder.Services.AddSingleton(sp =>
             new Utils.WebSpaces.TransferProgressService(sp.GetRequiredService<AppConfig>()));
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceTransferService>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceTrashService>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpacePullJobStore>();
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceFileService>();
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceScheduleManager>();
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceActivityReporter>();
+        builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceBandwidthMeter>(sp =>
+            new Utils.WebSpaces.WebSpaceBandwidthMeter(
+                sp.GetRequiredService<AppConfig>(),
+                sp.GetRequiredService<WebSpaceStore>(),
+                sp.GetRequiredService<ReverseProxyManager>(),
+                sp.GetService<AppLogger>()));
         builder.Services.AddHostedService<Utils.WebSpaces.WebSpaceScheduleHostedService>();
-        builder.Services.AddHostedService<Utils.Proxy.ProxyLogRetentionHostedService>();
+        builder.Services.AddHostedService(sp =>
+            new Utils.Proxy.ProxyLogRetentionHostedService(
+                sp.GetRequiredService<AppConfig>(),
+                sp.GetRequiredService<WebSpaceStore>(),
+                sp.GetService<Utils.WebSpaces.WebSpaceBandwidthMeter>(),
+                sp.GetService<AppLogger>()));
         builder.Services.AddSingleton<Utils.WebSpaces.WebSpaceUserAccessService>();
         builder.Services.AddSingleton<Utils.Auth.ConsoleJwtValidator>();
         builder.Services.AddSingleton<Utils.SystemInfo.HostMetricsSampler>();
@@ -260,7 +280,10 @@ public sealed class DaemonHost
                 sp.GetService<Utils.SystemInfo.SystemPackageWsHub>(),
                 sp.GetRequiredService<global::FeatherQuilld.Utils.Config.Config>()));
         builder.Services.AddHostedService<Utils.Sftp.SftpHostedService>();
+        builder.Services.AddFeatherQuilldFtp(config);
+        builder.Services.AddHostedService<Utils.Ftp.FtpHostedService>();
         builder.Services.AddSingleton<Utils.Proxy.NginxAcmeService>();
+        builder.Services.AddHostedService<Utils.Proxy.AcmeRenewalHostedService>();
 
         builder.Services.AddRateLimiter(options =>
         {
@@ -420,6 +443,7 @@ public sealed class DaemonHost
             try
             {
                 app.Services.GetService<Utils.SystemInfo.SystemPackageWsHub>()?.CloseAllAsync().GetAwaiter().GetResult();
+                app.Services.GetService<WebSpaceWsHub>()?.CloseAllAsync().GetAwaiter().GetResult();
             }
             catch
             {

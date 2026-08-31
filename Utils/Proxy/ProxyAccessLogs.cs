@@ -64,6 +64,22 @@ public static class ProxyAccessLogs
             });
         }
 
+        // When a history window is requested, headline totals must match the daily series
+        // (tail parsing alone only covers the last N log lines).
+        if (days > 0 && byDay.Count > 0)
+        {
+            totalHits = 0;
+            bytesOut = 0;
+            statusCounts = new Dictionary<int, int>();
+            foreach (var bucket in byDay.Values)
+            {
+                totalHits += bucket.Hits;
+                bytesOut += bucket.Bytes;
+                foreach (var kv in bucket.Status)
+                    statusCounts[kv.Key] = statusCounts.GetValueOrDefault(kv.Key) + kv.Value;
+            }
+        }
+
         return new
         {
             uuid = space.Uuid,
@@ -385,5 +401,34 @@ public static class ProxyAccessLogs
         }
 
         return 0;
+    }
+
+    public static long SumLineBytes(IEnumerable<string> lines)
+    {
+        long total = 0;
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                continue;
+            total += ExtractBytes(line);
+        }
+
+        return total;
+    }
+
+    public static long LoadSummaryBytes(string path)
+    {
+        if (!File.Exists(path))
+            return 0;
+        try
+        {
+            var json = File.ReadAllText(path);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("bytes", out var b) ? b.GetInt64() : 0;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 }

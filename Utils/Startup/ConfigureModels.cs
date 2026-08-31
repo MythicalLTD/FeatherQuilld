@@ -37,6 +37,8 @@ public sealed class ConfigureSummary
     public required string Version { get; init; }
     public bool SftpEnabled { get; init; }
     public int SftpPort { get; init; }
+    public bool FtpEnabled { get; init; }
+    public int FtpPort { get; init; }
     public bool ServiceInstalled { get; init; }
     public bool ServiceStarted { get; init; }
     public bool ServiceSkipped { get; init; }

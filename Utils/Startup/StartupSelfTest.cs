@@ -6,6 +6,7 @@ using FeatherQuilld.Utils.SystemInfo;
 using FeatherQuilld.Utils.WebSpaces;
 using FeatherQuilld.Utils.WebSpaces.Malware;
 using FeatherQuilld.Utils.Mail;
+using FeatherQuilld.Utils.Ftp;
 using FeatherQuilld.Utils.WebSpaces.Disk;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 using AppLogger = FeatherQuilld.Utils.Logger.Logger;
@@ -85,6 +86,7 @@ public static class StartupSelfTest
         checks.AddRange(CheckProxy(config, logger, reporter));
         checks.Add(CheckPowerDns(config, logger, reporter));
         checks.AddRange(CheckMail(config, logger, reporter));
+        checks.Add(CheckFtp(config, logger, reporter));
         checks.Add(CheckClamAv(logger, reporter));
         checks.AddRange(CheckModSecurity(config, spaces, logger, reporter));
         checks.Add(CheckDockerCli(logger, reporter));
@@ -349,6 +351,25 @@ public static class StartupSelfTest
 
         logger.Debug(LoggerTypes.SelfTest, "PowerDNS available");
         return new DiagnosticCheck("dns.powerdns", "ok", "PowerDNS API available", config.System.Dns.PowerDnsApiUrl);
+    }
+
+    private static DiagnosticCheck CheckFtp(AppConfig config, AppLogger logger, BootReporter? reporter)
+    {
+        if (!config.Ftp.Enabled)
+            return new DiagnosticCheck("ftp.listener", "ok", "Classic FTP disabled in config", null);
+
+        if (FtpProbe.IsListening(config.Ftp))
+        {
+            logger.Debug(LoggerTypes.SelfTest, $"FTP listening on port {config.Ftp.Port}");
+            return new DiagnosticCheck("ftp.listener", "ok", $"FTP listening on port {config.Ftp.Port}", null);
+        }
+
+        Warn($"FTP enabled but not listening on port {config.Ftp.Port}", logger, reporter);
+        return new DiagnosticCheck(
+            "ftp.listener",
+            "warn",
+            "FTP enabled but listener not ready",
+            $"port={config.Ftp.Port}");
     }
 
     private static IEnumerable<DiagnosticCheck> CheckMail(AppConfig config, AppLogger logger, BootReporter? reporter)

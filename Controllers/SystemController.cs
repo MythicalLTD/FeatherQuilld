@@ -161,6 +161,7 @@ public sealed class SystemController : ApiControllerBase
 
         var snap = _diagnostics.Snapshot();
         var host = _metrics.Capture(_config.System.Data);
+        var services = HostingServicesDiagnostics.Capture(_config);
 
         return Ok(new DiagnosticsResponse(
             Version: StartupBanner.Version,
@@ -177,7 +178,8 @@ public sealed class SystemController : ApiControllerBase
                 host.Os,
                 host.KernelVersion,
                 host.CpuCount,
-                host.CpuModel)));
+                host.CpuModel),
+            Services: services));
     }
 
     /// <summary>Basic daemon identity (non-secret).</summary>
@@ -515,7 +517,8 @@ public sealed record DiagnosticsResponse(
     [property: JsonPropertyName("boot_checked_at")] DateTimeOffset? BootCheckedAt,
     [property: JsonPropertyName("live_checked_at")] DateTimeOffset LiveCheckedAt,
     IReadOnlyList<DiagnosticCheck> Checks,
-    DiagnosticsHost Host);
+    DiagnosticsHost Host,
+    [property: JsonPropertyName("services")] HostingServicesSnapshot? Services = null);
 
 public sealed record DiagnosticsHost(
     string Architecture,

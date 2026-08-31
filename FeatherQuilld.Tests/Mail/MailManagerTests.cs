@@ -28,6 +28,30 @@ public class MailDnsHelperTests
     }
 
     [Fact]
+    public void BuildDmarc_UsesNonePolicyAndPostmasterRua()
+    {
+        var dmarc = MailDnsHelper.BuildDmarc("example.com");
+        Assert.Contains("v=DMARC1", dmarc);
+        Assert.Contains("p=none", dmarc);
+        Assert.Contains("rua=mailto:postmaster@example.com", dmarc);
+    }
+
+    [Fact]
+    public void BuildHints_IncludesDmarcRecord()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig { Hostname = "mail.example.com" },
+            },
+        };
+
+        var hints = MailDnsHelper.BuildHints(config, "example.com");
+        Assert.Contains(hints, h => h.Type == "TXT" && h.Name == "_dmarc" && h.Value.Contains("v=DMARC1"));
+    }
+
+    [Fact]
     public void BuildHints_IncludesMxAndSpfWithoutDkimFile()
     {
         var config = new AppConfig
@@ -150,5 +174,31 @@ public class HostPackageMailServerTests
         var mgr = new FeatherQuilld.Utils.SystemInfo.HostPackageManager();
         var packages = mgr.List();
         Assert.Contains(packages, p => p.Id == "mailserver");
+        Assert.Contains(packages, p => p.Id == "webmail");
+    }
+}
+
+public class MailDeliverabilityHelperTests
+{
+    [Fact]
+    public void CheckPtr_WarnsWhenPublicIpMissing()
+    {
+        var result = MailDeliverabilityHelper.CheckPtr("mail.example.com", null);
+        Assert.Equal("warn", result.Status);
+    }
+
+    [Fact]
+    public void BuildPayload_IncludesPortsAndMxHost()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig { Hostname = "mail.example.com" },
+            },
+        };
+
+        var payload = MailDeliverabilityHelper.BuildPayload(config, "example.com", "203.0.113.10");
+        Assert.NotNull(payload);
     }
 }

@@ -9,6 +9,7 @@ public class ConsoleWsCommandTests
     [InlineData("""{"event":"send_command","args":["x"]}""", true, "x")]
     [InlineData("""{"event":"auth","args":["tok"]}""", false, "")]
     [InlineData("""{"event":"send command","args":[]}""", false, "")]
+    [InlineData("""{"event":"send stats","args":[]}""", false, "")]
     [InlineData("not-json", false, "")]
     public void TryParseSendCommand(string json, bool expected, string command)
     {
@@ -16,5 +17,14 @@ public class ConsoleWsCommandTests
         Assert.Equal(expected, ok);
         if (expected)
             Assert.Equal(command, parsed);
+    }
+
+    [Theory]
+    [InlineData("""{"event":"send stats","args":[]}""", true)]
+    [InlineData("""{"event":"send_stats","args":[]}""", true)]
+    [InlineData("""{"event":"send command","args":["x"]}""", false)]
+    public void TryParseSendStats(string json, bool expected)
+    {
+        Assert.Equal(expected, WebSpacesController.TryParseSendStats(json));
     }
 }

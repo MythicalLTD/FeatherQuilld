@@ -1,6 +1,7 @@
 using FeatherQuilld.Utils.Config.Api;
 using FeatherQuilld.Utils.Config.Docker;
 using FeatherQuilld.Utils.Config.Remote;
+using FeatherQuilld.Utils.Config.Ftp;
 using FeatherQuilld.Utils.Config.Sftp;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Plugins;
@@ -28,6 +29,7 @@ public class Config
     public PluginsConfig Plugins { get; set; } = new();
     public RemoteConfig Remote { get; set; } = new();
     public SftpConfig Sftp { get; set; } = new();
+    public FtpConfig Ftp { get; set; } = new();
     public DockerConfig Docker { get; set; } = new();
 
     [YamlIgnore]
@@ -117,6 +119,7 @@ public class Config
         Plugins = runtime.Plugins;
         Remote = runtime.Remote;
         Sftp = runtime.Sftp;
+        Ftp = runtime.Ftp;
         Docker = runtime.Docker;
 
         Uuid = uuid;

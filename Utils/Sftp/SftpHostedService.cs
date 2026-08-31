@@ -427,24 +427,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
 
     private SftpAuthResult? AuthenticateCore(string authMethod, string username, string password, string? publicKey)
     {
-        var result = _panel.AuthenticateSftpAsync(authMethod, username, password, publicKey)
-            .GetAwaiter().GetResult();
-
-        if (result is null || string.IsNullOrWhiteSpace(result.Server))
-            return null;
-
-        if (!Guid.TryParse(result.Server, out var uuid) || _spaces.Get(uuid) is null)
-            return null;
-
-        var basePath = _spaces.EffectiveFsPath(uuid);
-        var relative = WebSpaceStore.NormalizeDocumentRoot(result.RelativeRoot);
-        result.RootPath = string.IsNullOrEmpty(relative)
-            ? basePath
-            : Path.Combine(basePath, relative.Replace('/', Path.DirectorySeparatorChar));
-        Directory.CreateDirectory(result.RootPath);
-        if (string.IsNullOrWhiteSpace(result.User))
-            result.User = username;
-        return result;
+        return WebSpaceAccessRoot.Resolve(_panel, _spaces, authMethod, username, password, publicKey);
     }
 
     private RootedSftpSession OpenSession(object channelOrTransport, SftpAuthResult auth, string? username)

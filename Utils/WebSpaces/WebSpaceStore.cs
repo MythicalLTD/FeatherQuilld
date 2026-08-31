@@ -39,6 +39,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     private WebSpaceScheduleManager? _schedules;
     private readonly ConcurrentDictionary<Guid, WebSpace> _spaces = new();
     private readonly ConcurrentDictionary<Guid, byte> _installInFlight = new();
+    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _installTokens = new();
     private readonly object _mutateGate = new();
 
     public WebSpaceStore(
@@ -113,7 +114,15 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             space.Status,
             space.State,
             space.CreatedAt,
-            space.UpdatedAt);
+            space.UpdatedAt,
+            space.SslMode,
+            space.WafEnabled,
+            space.WafDenyIps,
+            space.WafDenyPaths,
+            space.BandwidthLimitBytes,
+            space.BandwidthUsedBytes,
+            space.IsBandwidthOverQuota(),
+            space.DomainRoutes);
 
     public WebSpaceStatusResponse ToStatus(WebSpace space) =>
         new(space.Uuid, space.Status, space.State, space.BackendPort, space.ContainerId);
@@ -164,6 +173,9 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 : 0L;
             var cpuLimit = remote.Build?.CpuLimit > 0 ? remote.Build.CpuLimit : 0;
             var memoryLimitMiB = remote.Build?.MemoryLimit > 0 ? remote.Build.MemoryLimit : 0;
+            var bandwidthLimitBytes = remote.Build?.BandwidthLimitGb > 0
+                ? remote.Build.BandwidthLimitGb * 1024L * 1024L * 1024L
+                : 0L;
 
             var useFuse = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota;
             if ((useFuse || _config.System.Quotas.Enabled) && diskBytes <= 0)
@@ -188,6 +200,9 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 DiskLimitBytes = diskBytes,
                 CpuLimit = cpuLimit,
                 MemoryLimitMiB = memoryLimitMiB,
+                BandwidthLimitBytes = bandwidthLimitBytes,
+                BandwidthPeriodStart = WebSpaceBandwidthMeter.CurrentPeriodStart().ToString("yyyy-MM-dd"),
+                Suspended = remote.Suspended,
                 Domains = domains,
                 DomainRoutes = domainRoutes,
                 Ssl = remote.Ssl,
@@ -287,15 +302,20 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         if (!_installInFlight.TryAdd(uuid, 0))
             return;
 
+        var cts = new CancellationTokenSource();
+        _installTokens[uuid] = cts;
+
         _ = Task.Run(async () =>
         {
             try
             {
-                await RunDeferredInstallAsync(uuid, request, remote, fsPath).ConfigureAwait(false);
+                await RunDeferredInstallAsync(uuid, request, remote, fsPath, cts.Token).ConfigureAwait(false);
             }
             finally
             {
                 _installInFlight.TryRemove(uuid, out _);
+                if (_installTokens.TryRemove(uuid, out var token))
+                    token.Dispose();
             }
         });
     }
@@ -304,7 +324,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         Guid uuid,
         CreateWebSpaceRequest request,
         PanelWebSpaceConfig remote,
-        string fsPath)
+        string fsPath,
+        CancellationToken cancellationToken)
     {
         if (_wsHub is not null)
             await _wsHub.SendInstallStartedAsync(uuid).ConfigureAwait(false);
@@ -321,7 +342,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 Persist(space);
             }
 
-            await _installer.RunAsync(space, fsPath, install).ConfigureAwait(false);
+            await _installer.RunAsync(space, fsPath, install, cancellationToken).ConfigureAwait(false);
 
             lock (_mutateGate)
             {
@@ -366,6 +387,37 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 TrySyncSchedules(uuid, remote);
             }
         }
+        catch (OperationCanceledException)
+        {
+            lock (_mutateGate)
+            {
+                var space = Get(uuid);
+                if (space is not null)
+                {
+                    space.Status = WebSpaceStatus.Failed;
+                    space.State = WebSpaceState.Stopped;
+                    space.UpdatedAt = DateTimeOffset.UtcNow;
+                    Persist(space);
+                }
+            }
+
+            try
+            {
+                await _panel.ReportWebSpaceInstallAsync(uuid, successful: false).ConfigureAwait(false);
+            }
+            catch (Exception reportEx)
+            {
+                _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to report install abort: {reportEx.Message}");
+            }
+
+            if (_wsHub is not null)
+            {
+                await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Failed).ConfigureAwait(false);
+                await _wsHub.SendInstallFailedAsync(uuid, "Install aborted").ConfigureAwait(false);
+            }
+
+            _logger?.Info(LoggerTypes.WebSpaces, $"Install aborted for {uuid}");
+        }
         catch (Exception ex)
         {
             lock (_mutateGate)
@@ -397,6 +449,27 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
 
             _logger?.Error(LoggerTypes.WebSpaces, $"Install failed for {uuid}: {ex.Message}");
         }
+    }
+
+    /// <summary>Cancel an in-flight WebSpace install or reinstall job.</summary>
+    public bool AbortInstall(Guid uuid)
+    {
+        if (!_installInFlight.ContainsKey(uuid))
+            return false;
+
+        if (_installTokens.TryGetValue(uuid, out var cts))
+            cts.Cancel();
+
+        try
+        {
+            _installer.CleanupAsync(uuid).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(LoggerTypes.WebSpaces, $"Install abort cleanup for {uuid}: {ex.Message}");
+        }
+
+        return true;
     }
 
     /// <summary>Pull latest panel config and apply domains, ssl, disk, document_root, proxy.</summary>
@@ -457,6 +530,9 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             // Always apply panel limits (including 0 = unlimited) when Build is present.
             var cpuLimit = remote.Build is not null ? remote.Build.CpuLimit : space.CpuLimit;
             var memoryLimitMiB = remote.Build is not null ? remote.Build.MemoryLimit : space.MemoryLimitMiB;
+            var bandwidthLimitBytes = remote.Build?.BandwidthLimitGb > 0
+                ? remote.Build.BandwidthLimitGb * 1024L * 1024L * 1024L
+                : remote.Build is not null ? 0L : space.BandwidthLimitBytes;
 
             var runtime = string.IsNullOrWhiteSpace(remote.Webplate?.Runtime)
                 ? space.Runtime
@@ -495,6 +571,9 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             space.DiskLimitBytes = diskBytes;
             space.CpuLimit = cpuLimit;
             space.MemoryLimitMiB = memoryLimitMiB;
+            space.BandwidthLimitBytes = bandwidthLimitBytes;
+            if (string.IsNullOrWhiteSpace(space.BandwidthPeriodStart))
+                space.BandwidthPeriodStart = WebSpaceBandwidthMeter.CurrentPeriodStart().ToString("yyyy-MM-dd");
             space.DocumentRoot = remote.Meta is null
                 ? space.DocumentRoot
                 : NormalizeDocumentRoot(remote.Meta.DocumentRoot);
@@ -511,8 +590,22 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             }
 
             space.BackendHost = NormalizeBackendHost(remote.BackendHost);
+            space.Suspended = remote.Suspended;
 
             space.UpdatedAt = DateTimeOffset.UtcNow;
+
+            if (space.Suspended && space.State == WebSpaceState.Running)
+            {
+                try
+                {
+                    PowerInternal(space, "stop");
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Warning(LoggerTypes.WebSpaces,
+                        $"Failed to stop suspended WebSpace {uuid}: {ex.Message}");
+                }
+            }
 
             var useFuse = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota;
             if (useFuse && diskBytes > 0)
@@ -801,6 +894,44 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         return GetSslStatus(uuid);
     }
 
+    public object GetRedis(Guid uuid)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        var cfg = WebSpaceRedisAddon.Read(DataPath(uuid));
+        return new
+        {
+            enabled = cfg.Enabled,
+            host = cfg.Host,
+            port = cfg.Port,
+            password = cfg.Password,
+        };
+    }
+
+    public WebSpace SetRedis(Guid uuid, bool enabled)
+    {
+        lock (_mutateGate)
+        {
+            var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+            var dataPath = DataPath(uuid);
+            var cfg = enabled ? WebSpaceRedisAddon.Enable(dataPath) : WebSpaceRedisAddon.Disable(dataPath);
+
+            if (WebSpaceRuntime.NeedsContainer(space.Runtime) &&
+                string.Equals(space.Runtime, "php", StringComparison.OrdinalIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(space.ContainerImage))
+            {
+                _runtime.StopAsync(space, kill: false).GetAwaiter().GetResult();
+                _runtime.RemoveAsync(uuid).GetAwaiter().GetResult();
+                _runtime.StartAsync(space, EffectiveFsPath(uuid), space.Startup).GetAwaiter().GetResult();
+                space.UpdatedAt = DateTimeOffset.UtcNow;
+                Persist(space);
+                SyncPanelState(space);
+                RebuildProxy();
+            }
+
+            return space;
+        }
+    }
+
     private static bool ProbeCaddyCert(string domain)
     {
         try
@@ -1000,20 +1131,25 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         if (!_installInFlight.TryAdd(uuid, 0))
             return;
 
+        var cts = new CancellationTokenSource();
+        _installTokens[uuid] = cts;
+
         _ = Task.Run(async () =>
         {
             try
             {
-                await RunDeferredReinstallAsync(uuid, fsPath, startOnCompletion).ConfigureAwait(false);
+                await RunDeferredReinstallAsync(uuid, fsPath, startOnCompletion, cts.Token).ConfigureAwait(false);
             }
             finally
             {
                 _installInFlight.TryRemove(uuid, out _);
+                if (_installTokens.TryRemove(uuid, out var token))
+                    token.Dispose();
             }
         });
     }
 
-    private async Task RunDeferredReinstallAsync(Guid uuid, string fsPath, bool startOnCompletion)
+    private async Task RunDeferredReinstallAsync(Guid uuid, string fsPath, bool startOnCompletion, CancellationToken cancellationToken)
     {
         if (_wsHub is not null)
         {
@@ -1034,7 +1170,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             }
 
             SeedDocumentRoot(space, fsPath);
-            await _installer.RunAsync(space, fsPath, install).ConfigureAwait(false);
+            await _installer.RunAsync(space, fsPath, install, cancellationToken).ConfigureAwait(false);
 
             lock (_mutateGate)
             {
@@ -1077,6 +1213,39 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 SyncPanelState(space);
                 RebuildProxy();
             }
+        }
+        catch (OperationCanceledException)
+        {
+            lock (_mutateGate)
+            {
+                var space = Get(uuid);
+                if (space is not null)
+                {
+                    space.Status = WebSpaceStatus.Failed;
+                    space.State = WebSpaceState.Stopped;
+                    space.UpdatedAt = DateTimeOffset.UtcNow;
+                    Persist(space);
+                    SyncPanelState(space);
+                }
+            }
+
+            try
+            {
+                await _panel.ReportWebSpaceInstallAsync(uuid, successful: false, reinstall: true)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception reportEx)
+            {
+                _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to report reinstall abort: {reportEx.Message}");
+            }
+
+            if (_wsHub is not null)
+            {
+                await _wsHub.SendStatusAsync(uuid, WebSpaceStatus.Failed).ConfigureAwait(false);
+                await _wsHub.SendInstallFailedAsync(uuid, "Reinstall aborted").ConfigureAwait(false);
+            }
+
+            _logger?.Info(LoggerTypes.WebSpaces, $"Reinstall aborted for {uuid}");
         }
         catch (Exception ex)
         {
@@ -1486,6 +1655,15 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             {
                 _logger?.Warning(LoggerTypes.Disk, $"Failed to attach fusequota for {space.Uuid}: {ex.Message}");
             }
+        }
+    }
+
+    public void PersistPublic(WebSpace space)
+    {
+        lock (_mutateGate)
+        {
+            _spaces[space.Uuid] = space;
+            Persist(space);
         }
     }
 

@@ -229,12 +229,20 @@ public sealed class ReverseProxyManager
                 }
 
                 AppendCaddyWaf(sb, space);
+                AppendCaddyBandwidthQuota(sb, space);
 
                 var accessLog = ProxyAccessLogs.AccessLogPath(_config.System.RootDirectory, space.Uuid, route.Domain);
                 sb.AppendLine("\tlog {");
                 sb.AppendLine($"\t\toutput file {accessLog}");
                 sb.AppendLine("\t\tformat json");
                 sb.AppendLine("\t}");
+
+                if (space.IsSuspended() || space.IsBandwidthOverQuota())
+                {
+                    sb.AppendLine("}");
+                    sb.AppendLine();
+                    continue;
+                }
 
                 if (space.BackendPort > 0)
                 {
@@ -745,6 +753,20 @@ public sealed class ReverseProxyManager
             ? FeatherQuilld.Utils.WebSpaces.Disk.FuseQuotaLimiter.GetMountPath(_config.System, space.Uuid)
             : Path.Combine(_config.System.Data, space.Uuid.ToString());
 
+    private static void AppendCaddyBandwidthQuota(StringBuilder sb, WebSpace space)
+    {
+        if (space.IsSuspended())
+        {
+            sb.AppendLine("\trespond \"WebSpace suspended\" 403");
+            return;
+        }
+
+        if (!space.IsBandwidthOverQuota())
+            return;
+
+        sb.AppendLine("\trespond \"Bandwidth quota exceeded\" 503");
+    }
+
     private static void AppendCaddyWaf(StringBuilder sb, WebSpace space)
     {
         if (!space.WafEnabled)
@@ -820,6 +842,24 @@ public sealed class ReverseProxyManager
 
     private void AppendNginxAppLocation(StringBuilder sb, WebSpace space, WebSpaceDomainRoute? route = null)
     {
+        if (space.IsSuspended())
+        {
+            sb.AppendLine("    location / {");
+            sb.AppendLine("        default_type text/plain;");
+            sb.AppendLine("        return 403 \"WebSpace suspended\";");
+            sb.AppendLine("    }");
+            return;
+        }
+
+        if (space.IsBandwidthOverQuota())
+        {
+            sb.AppendLine("    location / {");
+            sb.AppendLine("        default_type text/plain;");
+            sb.AppendLine("        return 503 \"Bandwidth quota exceeded\";");
+            sb.AppendLine("    }");
+            return;
+        }
+
         if (space.BackendPort > 0)
         {
             var upstream = BackendHostResolver.ResolveUpstream(_config.System.Proxy, space);

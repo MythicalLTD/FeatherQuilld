@@ -58,6 +58,7 @@ public sealed class HostPackageManager
         packages.Add(DescribeClamAv());
         packages.Add(DescribeModSecurity());
         packages.Add(DescribeMailServer());
+        packages.Add(DescribeWebmail());
         return packages;
     }
 
@@ -121,6 +122,7 @@ public sealed class HostPackageManager
                 "clamav" => await InstallClamAvAsync(id, logger, innerCt).ConfigureAwait(false),
                 "modsecurity" => await InstallModSecurityAsync(id, logger, innerCt).ConfigureAwait(false),
                 "mailserver" => await InstallMailServerAsync(id, logger, innerCt).ConfigureAwait(false),
+                "webmail" => await InstallWebmailAsync(id, logger, innerCt).ConfigureAwait(false),
                 _ => HostPackageOperationResult.Fail($"Unknown package: {packageId}"),
             };
         }, logger, ct).ConfigureAwait(false);
@@ -147,6 +149,7 @@ public sealed class HostPackageManager
                 "clamav" => await RemoveViaPackageManagerAsync(id, "clamav clamav-daemon", purgeConfig, logger, innerCt).ConfigureAwait(false),
                 "modsecurity" => await RemoveModSecurityAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
                 "mailserver" => await RemoveMailServerAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
+                "webmail" => await RemoveWebmailAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
                 _ => HostPackageOperationResult.Fail($"Unknown package: {packageId}"),
             };
         }, logger, ct).ConfigureAwait(false);
@@ -268,6 +271,22 @@ public sealed class HostPackageManager
             Installed: running,
             BinaryPath: _config is not null ? MailPaths.ComposeFile(_config) : null,
             Version: running ? "docker-mailserver" : null,
+            Managed: true,
+            InstallBlocked: FindOnPath("docker") is null,
+            BlockedBy: FindOnPath("docker") is null ? "docker" : null,
+            BlockedByName: FindOnPath("docker") is null ? "Docker" : null);
+    }
+
+    private HostPackageStatus DescribeWebmail()
+    {
+        var running = _config is not null && WebmailProbe.ContainerRunning(_config);
+        return new HostPackageStatus(
+            Id: "webmail",
+            DisplayName: "Webmail (Roundcube)",
+            Category: "mail",
+            Installed: running,
+            BinaryPath: _config is not null ? WebmailPaths.ComposeFile(_config) : null,
+            Version: running ? "roundcube" : null,
             Managed: true,
             InstallBlocked: FindOnPath("docker") is null,
             BlockedBy: FindOnPath("docker") is null ? "docker" : null,
@@ -627,6 +646,62 @@ public sealed class HostPackageManager
             : HostPackageOperationResult.Fail("mailserver compose finished but container is not running");
     }
 
+    private async Task<HostPackageOperationResult> InstallWebmailAsync(string packageId, AppLogger? logger, CancellationToken ct)
+    {
+        if (_config is null)
+            return HostPackageOperationResult.Fail("FeatherQuilld config is not available.");
+
+        if (FindOnPath("docker") is null)
+            return HostPackageOperationResult.Fail("Install Docker before the webmail package.");
+
+        if (WebmailProbe.ContainerRunning(_config))
+            return HostPackageOperationResult.Ok("webmail is already running");
+
+        var root = WebmailPaths.Root(_config);
+        Directory.CreateDirectory(root);
+        Directory.CreateDirectory(WebmailPaths.DataDir(_config));
+
+        var compose = $"""
+            services:
+              webmail:
+                image: roundcube/roundcubemail:latest
+                container_name: {WebmailPaths.ContainerName}
+                ports:
+                  - "127.0.0.1:{WebmailPaths.DefaultPort}:80"
+                volumes:
+                  - ./data:/var/roundcube/db
+                environment:
+                  - ROUNDCUBEMAIL_DEFAULT_HOST=host.docker.internal
+                  - ROUNDCUBEMAIL_SMTP_SERVER=host.docker.internal
+                extra_hosts:
+                  - "host.docker.internal:host-gateway"
+                restart: unless-stopped
+            """;
+        await File.WriteAllTextAsync(WebmailPaths.ComposeFile(_config), compose, ct).ConfigureAwait(false);
+
+        await EmitOutputAsync(packageId, "Pulling Roundcube image…\n", ct).ConfigureAwait(false);
+        var pull = await RunShellAsync(
+            packageId,
+            "docker pull roundcube/roundcubemail:latest",
+            logger,
+            ct).ConfigureAwait(false);
+        if (!pull.Success)
+            return pull;
+
+        await EmitOutputAsync(packageId, "Starting webmail container…\n", ct).ConfigureAwait(false);
+        var up = await RunShellAsync(
+            packageId,
+            $"cd {Quote(root)} && docker compose up -d",
+            logger,
+            ct).ConfigureAwait(false);
+        if (!up.Success)
+            return up;
+
+        return WebmailProbe.ContainerRunning(_config)
+            ? HostPackageOperationResult.Ok($"webmail installed — http://127.0.0.1:{WebmailPaths.DefaultPort}")
+            : HostPackageOperationResult.Fail("webmail compose finished but container is not running");
+    }
+
     private async Task<HostPackageOperationResult> RemoveMailServerAsync(
         string packageId,
         bool purgeConfig,
@@ -655,6 +730,36 @@ public sealed class HostPackageManager
         }
 
         return HostPackageOperationResult.Ok("mailserver removed");
+    }
+
+    private async Task<HostPackageOperationResult> RemoveWebmailAsync(
+        string packageId,
+        bool purgeConfig,
+        AppLogger? logger,
+        CancellationToken ct)
+    {
+        if (_config is not null)
+        {
+            var root = WebmailPaths.Root(_config);
+            if (Directory.Exists(root) && File.Exists(WebmailPaths.ComposeFile(_config)))
+            {
+                await RunShellAsync(
+                    packageId,
+                    $"cd {Quote(root)} && docker compose down 2>/dev/null || true",
+                    logger,
+                    ct).ConfigureAwait(false);
+            }
+
+            if (purgeConfig && Directory.Exists(root))
+            {
+                try { Directory.Delete(root, recursive: true); } catch (Exception ex)
+                {
+                    logger?.Warning(LoggerTypes.Application, $"Failed to purge webmail dir: {ex.Message}");
+                }
+            }
+        }
+
+        return HostPackageOperationResult.Ok("webmail removed");
     }
 
     private async Task<HostPackageOperationResult> RemovePowerDnsAsync(

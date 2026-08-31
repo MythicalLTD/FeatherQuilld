@@ -24,7 +24,18 @@ public static class MailDnsHelper
             records.Add(new DnsHintRecord("TXT", dkimRecord.Selector + "._domainkey", dkimRecord.Value));
         }
 
+        records.Add(new DnsHintRecord("TXT", "_dmarc", BuildDmarc(domain)));
+
         return records;
+    }
+
+    public static string BuildDmarc(string domain, string? ruaEmail = null)
+    {
+        domain = NormalizeDomain(domain);
+        var rua = string.IsNullOrWhiteSpace(ruaEmail)
+            ? $"postmaster@{domain}"
+            : ruaEmail.Trim();
+        return $"v=DMARC1; p=none; rua=mailto:{rua}";
     }
 
     public static bool IsDkimReady(AppConfig config, string domain) =>
@@ -43,6 +54,7 @@ public static class MailDnsHelper
             dkim_ready = dkim is not null,
             dkim_selector = dkim?.Selector,
             dkim_record = dkim?.Value,
+            dmarc_record = BuildDmarc(domain),
             records = records.Select(r => new
             {
                 type = r.Type,

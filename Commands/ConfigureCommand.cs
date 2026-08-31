@@ -208,6 +208,8 @@ public static class ConfigureCommand
             Version = StartupBanner.Version,
             SftpEnabled = joinConfig.Sftp.Enabled,
             SftpPort = joinConfig.Sftp.Port,
+            FtpEnabled = joinConfig.Ftp.Enabled,
+            FtpPort = joinConfig.Ftp.Port,
             ServiceInstalled = serviceResult?.Installed ?? false,
             ServiceStarted = serviceResult?.Started ?? false,
             ServiceSkipped = !installServiceRequested,

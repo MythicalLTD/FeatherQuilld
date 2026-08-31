@@ -82,6 +82,8 @@ public sealed class StaticFileServerManager : IHostedService, IDisposable
                     continue;
                 if (space.Status != WebSpaceStatus.Installed && space.Status != WebSpaceStatus.Installing)
                     continue;
+                if (space.IsSuspended())
+                    continue;
 
                 desired[space.Uuid] = (space.BackendPort, ResolveContentRoot(space));
             }

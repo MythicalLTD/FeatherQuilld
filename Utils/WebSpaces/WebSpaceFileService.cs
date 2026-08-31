@@ -52,7 +52,7 @@ public sealed class WebSpaceFileService
         foreach (var path in Directory.EnumerateFileSystemEntries(dir))
         {
             var name = Path.GetFileName(path);
-            if (name is "webspace.json" or "site.json")
+            if (name is "webspace.json" or "site.json" or WebSpaceTrashService.TrashDirName)
                 continue;
             var info = new FileInfo(path);
             var isDir = Directory.Exists(path);
@@ -301,11 +301,22 @@ public sealed class WebSpaceFileService
         return Convert.ToHexString(digest).ToLowerInvariant();
     }
 
-    public void Delete(Guid uuid, IEnumerable<string> files) =>
+    public void Delete(Guid uuid, IEnumerable<string> files, bool useTrash = false, bool permanent = false)
+    {
+        if (useTrash && !permanent)
+        {
+            _events.WithHooks(
+                new FileDeleteBeforeEvent { WebSpaceUuid = uuid, Paths = files.ToList() },
+                err => new FileDeleteAfterEvent { WebSpaceUuid = uuid, Paths = files is IReadOnlyList<string> l ? l : files.ToList(), Error = err },
+                () => new WebSpaceTrashService(_spaces).MoveToTrash(uuid, files));
+            return;
+        }
+
         _events.WithHooks(
             new FileDeleteBeforeEvent { WebSpaceUuid = uuid, Paths = files.ToList() },
             err => new FileDeleteAfterEvent { WebSpaceUuid = uuid, Paths = files is IReadOnlyList<string> l ? l : files.ToList(), Error = err },
             () => DeleteCore(uuid, files));
+    }
 
         private void DeleteCore(Guid uuid, IEnumerable<string> files)
     {
@@ -519,8 +530,12 @@ public sealed class WebSpaceFileService
 
         foreach (var path in Directory.EnumerateFileSystemEntries(start, "*", SearchOption.AllDirectories))
         {
+            var virtualPath = RootedPath.ToVirtual(root, path);
+            if (WebSpaceTrashService.IsTrashPath(virtualPath.TrimStart('/')))
+                continue;
+
             var name = Path.GetFileName(path);
-            if (name is "webspace.json" or "site.json")
+            if (name is "webspace.json" or "site.json" or WebSpaceTrashService.TrashDirName)
                 continue;
             if (name.Contains(needle, StringComparison.OrdinalIgnoreCase))
             {
@@ -539,6 +554,343 @@ public sealed class WebSpaceFileService
         }
 
         return results;
+    }
+
+    public sealed class AdvancedSearchOptions
+    {
+        public string? Pattern { get; init; }
+        public string? Include { get; init; }
+        public string? Exclude { get; init; }
+        public bool CaseInsensitive { get; init; } = true;
+        public string? Content { get; init; }
+        public bool ContentCaseInsensitive { get; init; } = true;
+        public long? MinSize { get; init; }
+        public long? MaxSize { get; init; }
+        public long MaxContentSize { get; init; } = 512_000;
+    }
+
+    public IReadOnlyList<object> SearchAdvanced(
+        Guid uuid,
+        string? directory,
+        AdvancedSearchOptions options,
+        int limit = 100)
+    {
+        limit = Math.Clamp(limit, 1, 500);
+        var root = RequireRoot(uuid);
+        var startVirtual = string.IsNullOrWhiteSpace(directory) ? "/" : directory!;
+        var start = ResolveExisting(root, startVirtual, mustBeDirectory: true);
+        var results = new List<object>();
+        var comparison = options.CaseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+        foreach (var path in Directory.EnumerateFileSystemEntries(start, "*", SearchOption.AllDirectories))
+        {
+            if (WebSpaceTrashService.IsTrashPath(RootedPath.ToVirtual(root, path).TrimStart('/')))
+                continue;
+
+            var name = Path.GetFileName(path);
+            if (name is "webspace.json" or "site.json" or WebSpaceTrashService.TrashDirName)
+                continue;
+
+            var isDir = Directory.Exists(path);
+            var size = isDir ? 0L : new FileInfo(path).Length;
+            if (options.MinSize is > 0 && size < options.MinSize)
+                continue;
+            if (options.MaxSize is > 0 && size > options.MaxSize)
+                continue;
+
+            var virtualPath = RootedPath.ToVirtual(root, path);
+            if (!MatchesPattern(name, options.Pattern, comparison))
+                continue;
+            if (!MatchesPattern(name, options.Include, comparison, required: options.Include is not null))
+                continue;
+            if (options.Exclude is not null && MatchesPattern(name, options.Exclude, comparison, required: true))
+                continue;
+
+            if (!isDir && !string.IsNullOrWhiteSpace(options.Content))
+            {
+                if (size > options.MaxContentSize)
+                    continue;
+                try
+                {
+                    var text = File.ReadAllText(path);
+                    var contentCmp = options.ContentCaseInsensitive ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                    if (!text.Contains(options.Content, contentCmp))
+                        continue;
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+
+            results.Add(new
+            {
+                name,
+                directory = isDir,
+                file = !isDir,
+                path = virtualPath,
+                size,
+            });
+            if (results.Count >= limit)
+                break;
+        }
+
+        return results;
+    }
+
+    private static bool MatchesPattern(string name, string? pattern, StringComparison comparison, bool required = false)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+            return !required;
+        if (pattern.Contains('*'))
+        {
+            var parts = pattern.Split('*', StringSplitOptions.RemoveEmptyEntries);
+            var idx = 0;
+            foreach (var part in parts)
+            {
+                var found = name.IndexOf(part, idx, comparison);
+                if (found < 0)
+                    return false;
+                idx = found + part.Length;
+            }
+            return true;
+        }
+        return name.Contains(pattern, comparison);
+    }
+
+    /// <summary>Compress a directory to a temp tar.gz and return the file path (caller deletes).</summary>
+    public string CreateDirectoryDownloadArchive(Guid uuid, string directory, string format = "tar.gz")
+    {
+        var root = RequireRoot(uuid);
+        var dirVirtual = string.IsNullOrWhiteSpace(directory) ? "/" : directory;
+        var dirPath = ResolveExisting(root, dirVirtual, mustBeDirectory: true);
+        var dirName = Path.GetFileName(dirPath.TrimEnd(Path.DirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(dirName))
+            dirName = "root";
+
+        var ext = NormalizeArchiveExtension(format);
+        var temp = Path.Combine(Path.GetTempPath(), $"fq-dl-{Guid.NewGuid():N}.{(ext == "zip" ? "zip" : "tar.gz")}");
+        if (ext == "zip")
+            CreateZip(temp, [(dirPath, dirName)]);
+        else
+            CreateTarGz(temp, [(dirPath, dirName)]);
+        return temp;
+    }
+
+    public ArchiveListResult ListArchiveDirectory(Guid uuid, string rootDirectory, string archiveFile, string? innerPath)
+    {
+        var root = RequireRoot(uuid);
+        var archiveVirtual = archiveFile.Contains('/') || archiveFile.StartsWith('/')
+            ? archiveFile
+            : CombineVirtual(rootDirectory, archiveFile);
+        var archivePath = ResolveExisting(root, archiveVirtual, mustBeDirectory: false);
+        var prefix = NormalizeArchiveInnerPath(innerPath);
+
+        var children = new Dictionary<string, (bool Dir, long Size, string Path)>(StringComparer.Ordinal);
+        var lower = archivePath.ToLowerInvariant();
+        if (lower.EndsWith(".zip"))
+        {
+            using var zip = ZipFile.OpenRead(archivePath);
+            foreach (var entry in zip.Entries)
+            {
+                if (string.IsNullOrEmpty(entry.FullName))
+                    continue;
+                var rel = entry.FullName.Replace('\\', '/').TrimEnd('/');
+                if (!TryArchiveChild(prefix, rel, entry.FullName.EndsWith('/'), entry.Length, out var child, out var childPath, out var isDir, out var size))
+                    continue;
+                MergeArchiveChild(children, child, childPath, isDir, size);
+            }
+        }
+        else if (lower.EndsWith(".tar.gz") || lower.EndsWith(".tgz"))
+        {
+            using var file = File.OpenRead(archivePath);
+            using var gzip = new GZipStream(file, CompressionMode.Decompress);
+            using var reader = new TarReader(gzip);
+            while (reader.GetNextEntry() is { } entry)
+            {
+                var rel = (entry.Name ?? "").Replace('\\', '/').TrimEnd('/');
+                if (string.IsNullOrEmpty(rel))
+                    continue;
+                var isDir = entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList;
+                if (!TryArchiveChild(prefix, rel, isDir, entry.Length, out var child, out var childPath, out var childIsDir, out var size))
+                    continue;
+                MergeArchiveChild(children, child, childPath, childIsDir, size);
+            }
+        }
+        else
+        {
+            throw new InvalidOperationException("Unsupported archive format.");
+        }
+
+        var entries = children
+            .OrderBy(kv => kv.Key, StringComparer.Ordinal)
+            .Select(kv => (object)new
+            {
+                name = kv.Key,
+                path = kv.Value.Path,
+                directory = kv.Value.Dir,
+                size = kv.Value.Size,
+            })
+            .ToList();
+
+        return new ArchiveListResult(entries.Take(500).ToList(), entries.Count > 500);
+    }
+
+    private static string NormalizeArchiveInnerPath(string? innerPath)
+    {
+        var prefix = (innerPath ?? "").Replace('\\', '/').Trim('/');
+        if (prefix is "." or "/")
+            prefix = "";
+        if (prefix.Length > 0 && !prefix.EndsWith('/'))
+            prefix += "/";
+        return prefix;
+    }
+
+    private static bool TryArchiveChild(
+        string prefix,
+        string rel,
+        bool entryIsDirectory,
+        long entryLength,
+        out string child,
+        out string childPath,
+        out bool isDir,
+        out long size)
+    {
+        child = "";
+        childPath = "";
+        isDir = false;
+        size = 0;
+
+        string rest;
+        if (prefix.Length == 0)
+            rest = rel;
+        else if (rel.StartsWith(prefix, StringComparison.Ordinal))
+            rest = rel[prefix.Length..];
+        else if (rel == prefix.TrimEnd('/'))
+            return false;
+        else
+            return false;
+
+        if (rest.Length == 0)
+            return false;
+
+        var slash = rest.IndexOf('/');
+        child = slash < 0 ? rest : rest[..slash];
+        isDir = slash >= 0 || entryIsDirectory;
+        childPath = prefix.Length == 0 ? child : prefix.TrimEnd('/') + "/" + child;
+        size = slash < 0 && !isDir ? entryLength : 0;
+        return true;
+    }
+
+    private static void MergeArchiveChild(
+        Dictionary<string, (bool Dir, long Size, string Path)> children,
+        string child,
+        string childPath,
+        bool isDir,
+        long size)
+    {
+        if (children.TryGetValue(child, out var existing))
+            children[child] = (existing.Dir || isDir, existing.Size + size, childPath);
+        else
+            children[child] = (isDir, size, childPath);
+    }
+
+    public void ExtractArchiveSelection(
+        Guid uuid,
+        string rootDirectory,
+        string archiveFile,
+        string destinationDirectory,
+        IReadOnlyList<string> entries)
+    {
+        if (entries is null || entries.Count == 0)
+            throw new ArgumentException("entries must be a non-empty list.");
+
+        var root = RequireRoot(uuid);
+        var archiveVirtual = archiveFile.Contains('/') || archiveFile.StartsWith('/')
+            ? archiveFile
+            : CombineVirtual(rootDirectory, archiveFile);
+        var archivePath = ResolveExisting(root, archiveVirtual, mustBeDirectory: false);
+        var destVirtual = string.IsNullOrWhiteSpace(destinationDirectory) ? "/" : destinationDirectory;
+        var destDir = ResolveWritable(root, destVirtual);
+        Directory.CreateDirectory(destDir);
+
+        var wanted = new HashSet<string>(entries.Select(e => e.Replace('\\', '/').Trim('/')), StringComparer.Ordinal);
+        var lower = archivePath.ToLowerInvariant();
+
+        if (lower.EndsWith(".zip"))
+        {
+            using var zip = ZipFile.OpenRead(archivePath);
+            foreach (var entry in zip.Entries)
+            {
+                var rel = entry.FullName.Replace('\\', '/').TrimEnd('/');
+                if (!wanted.Any(w => rel == w || rel.StartsWith(w + "/", StringComparison.Ordinal)))
+                    continue;
+                if (rel.StartsWith('/') || rel.Split('/').Any(p => p == ".."))
+                    throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
+                var target = Path.GetFullPath(Path.Combine(destDir, rel.Replace('/', Path.DirectorySeparatorChar)));
+                EnsureUnderRoot(root, target);
+                if (entry.FullName.EndsWith('/'))
+                {
+                    Directory.CreateDirectory(target);
+                    continue;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                entry.ExtractToFile(target, overwrite: true);
+            }
+        }
+        else
+        {
+            using var file = File.OpenRead(archivePath);
+            using var gzip = new GZipStream(file, CompressionMode.Decompress);
+            using var reader = new TarReader(gzip);
+            while (reader.GetNextEntry() is { } entry)
+            {
+                var rel = (entry.Name ?? "").Replace('\\', '/').TrimEnd('/');
+                if (string.IsNullOrEmpty(rel))
+                    continue;
+                if (!wanted.Any(w => rel == w || rel.StartsWith(w + "/", StringComparison.Ordinal)))
+                    continue;
+                if (rel.StartsWith("..", StringComparison.Ordinal) || rel.Split('/').Any(p => p == ".."))
+                    throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
+                var target = Path.GetFullPath(Path.Combine(destDir, rel.Replace('/', Path.DirectorySeparatorChar)));
+                EnsureUnderRoot(root, target);
+                if (entry.EntryType is TarEntryType.Directory)
+                {
+                    Directory.CreateDirectory(target);
+                    continue;
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                using var outStream = File.Create(target);
+                entry.DataStream?.CopyTo(outStream);
+            }
+        }
+    }
+
+    public void WipeAll(Guid uuid)
+    {
+        var root = RequireRoot(uuid);
+        foreach (var path in Directory.EnumerateFileSystemEntries(root))
+        {
+            var name = Path.GetFileName(path);
+            if (name is "webspace.json" or "site.json" or WebSpaceTrashService.TrashDirName)
+                continue;
+            if (Directory.Exists(path))
+                Directory.Delete(path, recursive: true);
+            else
+                File.Delete(path);
+        }
+    }
+
+    public sealed class ArchiveListResult
+    {
+        public ArchiveListResult(IReadOnlyList<object> contents, bool truncated)
+        {
+            Contents = contents;
+            Truncated = truncated;
+        }
+
+        public IReadOnlyList<object> Contents { get; }
+        public bool Truncated { get; }
     }
 
     /// <summary>
@@ -731,6 +1083,12 @@ public sealed class WebSpaceFileService
 
         return CombineVirtual(dir, $"{stem} copy{ext}");
     }
+
+    internal static string ResolveExistingStatic(string root, string virtualPath, bool? mustBeDirectory) =>
+        ResolveExisting(root, virtualPath, mustBeDirectory);
+
+    internal static string ResolveWritableStatic(string root, string virtualPath) =>
+        ResolveWritable(root, virtualPath);
 
     private static string ResolveExisting(string root, string virtualPath, bool? mustBeDirectory)
     {

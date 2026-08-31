@@ -256,6 +256,9 @@ public sealed class ConfigureSequence
         if (summary.SftpEnabled)
             rows.Add(new Markup(ColoredConsole.ToMarkup($"&7sftp&r   &a:{summary.SftpPort}&r &8enabled&r")));
 
+        if (summary.FtpEnabled)
+            rows.Add(new Markup(ColoredConsole.ToMarkup($"&7ftp&r    &a:{summary.FtpPort}&r &8enabled&r")));
+
         if (summary.ServiceInstalled)
         {
             rows.Add(new Markup(ColoredConsole.ToMarkup(

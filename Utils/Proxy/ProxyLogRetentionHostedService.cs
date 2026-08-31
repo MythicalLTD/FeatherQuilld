@@ -9,6 +9,7 @@ namespace FeatherQuilld.Utils.Proxy;
 public sealed class ProxyLogRetentionHostedService(
     AppConfig config,
     WebSpaceStore spaces,
+    WebSpaceBandwidthMeter? bandwidthMeter = null,
     AppLogger? logger = null) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -21,6 +22,7 @@ public sealed class ProxyLogRetentionHostedService(
                 try
                 {
                     ProxyAccessLogs.RotateAll(config.System.RootDirectory, spaces.List());
+                    bandwidthMeter?.SyncAll();
                 }
                 catch (Exception ex)
                 {
