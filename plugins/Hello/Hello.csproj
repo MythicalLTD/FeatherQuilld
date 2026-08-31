@@ -17,7 +17,7 @@
         <PluginOutputDir>/var/lib/featherquilld/plugins/hello</PluginOutputDir>
     </PropertyGroup>
 
-    <Target Name="DeployPlugin" AfterTargets="Build">
+    <Target Name="DeployPlugin" AfterTargets="Build" Condition="'$(DeployPlugin)' == 'true'">
         <MakeDir Directories="$(PluginOutputDir)" />
         <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="true" />
         <Copy SourceFiles="$(MSBuildProjectDirectory)\plugin.yml" DestinationFolder="$(PluginOutputDir)" SkipUnchangedFiles="true" />

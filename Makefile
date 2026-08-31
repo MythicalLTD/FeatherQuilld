@@ -31,7 +31,7 @@ build: build-plugins ## Build host + plugins (fusequota auto-downloads at runtim
 	dotnet build FeatherQuilld.csproj -c $(CONFIG) --nologo
 
 build-plugins: ## Build and deploy sample plugins
-	dotnet build plugins/Hello/Hello.csproj -c $(CONFIG) --nologo
+	dotnet build plugins/Hello/Hello.csproj -c $(CONFIG) --nologo -p:DeployPlugin=true
 
 run: build ## Run the daemon (CONFIG_FILE=config.yml)
 	FEATHERQUILLD_CONFIG=$(CONFIG_FILE) ASPNETCORE_ENVIRONMENT=Development \
