@@ -114,6 +114,36 @@ public sealed class AdminPanelClient : IDisposable
         return data.Locations ?? [];
     }
 
+    /// <summary>Creates a web location via PUT /api/admin/locations (same shape as FeatherWings, type=web).</summary>
+    public async Task<AdminPanelLocation> CreateWebLocationAsync(
+        CreateLocationRequest request,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name))
+            throw new ArgumentException("Location name is required.", nameof(request));
+
+        if (string.IsNullOrWhiteSpace(request.Type))
+            request.Type = "web";
+
+        if (!string.IsNullOrWhiteSpace(request.FlagCode))
+            request.FlagCode = request.FlagCode.Trim().ToLowerInvariant();
+        else
+            request.FlagCode = null;
+
+        if (!string.IsNullOrWhiteSpace(request.Description))
+            request.Description = request.Description.Trim();
+        else
+            request.Description = null;
+
+        request.Name = request.Name.Trim();
+
+        var data = await PutJsonAsync<LocationPayload>("/api/admin/locations", request, ct)
+            .ConfigureAwait(false);
+        if (data.Location is null || data.Location.Id <= 0)
+            throw new InvalidOperationException("Panel: location create response did not include a location id.");
+        return data.Location;
+    }
+
     public async Task<AdminWebNode> CreateWebNodeAsync(CreateWebNodeRequest request, CancellationToken ct = default)
     {
         ApplyDefaults(request);
@@ -254,6 +284,12 @@ public sealed class AdminPanelClient : IDisposable
         public List<AdminPanelLocation>? Locations { get; set; }
     }
 
+    private sealed class LocationPayload
+    {
+        [JsonPropertyName("location")]
+        public AdminPanelLocation? Location { get; set; }
+    }
+
     private sealed class WebNodePayload
     {
         [JsonPropertyName("web_node")]
@@ -276,6 +312,25 @@ public sealed class AdminPanelLocation
     public string? Short { get; set; }
     public string? Type { get; set; }
     public string? Description { get; set; }
+
+    [JsonPropertyName("flag_code")]
+    public string? FlagCode { get; set; }
+}
+
+/// <summary>Create payload for PUT /api/admin/locations (FeatherWings-compatible).</summary>
+public sealed class CreateLocationRequest
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = "";
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = "web";
+
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
+
+    [JsonPropertyName("flag_code")]
+    public string? FlagCode { get; set; }
 }
 
 public sealed class AdminWebNode

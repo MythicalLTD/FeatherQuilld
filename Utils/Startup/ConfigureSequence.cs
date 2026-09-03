@@ -168,6 +168,8 @@ public sealed class ConfigureSequence
         ColoredConsole.WriteLine("  &7featherquilld configure &b--join-data &f<base64>&r      &8From FeatherPanel&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--panel-url &f<url>&r         &8OAuth quick setup&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--callback-host &f<ip>&r      &8Public IP for OAuth callback&r");
+        ColoredConsole.WriteLine("  &7featherquilld configure &b--location-id &f<id>&r        &8Existing web location (or create interactively)&r");
+        ColoredConsole.WriteLine("  &7featherquilld configure &b--behind-proxy&r              &8Node behind Cloudflare/nginx/Caddy&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--install-service&r           &8Auto-install systemd&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--no-service&r                &8Skip systemd setup&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--override&r                  &8Replace existing config&r");

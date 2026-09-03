@@ -25,6 +25,9 @@ public sealed class ConfigureOAuthOptions
     public int? DaemonListen { get; init; }
     public int? SftpPort { get; init; }
     public string? DaemonBase { get; init; }
+    public bool? BehindProxy { get; init; }
+    public string? Scheme { get; init; }
+    public string? AcmeEmail { get; init; }
 }
 
 /// <summary>FeatherWings-style OAuth2 configure flow for FeatherQuilld web nodes.</summary>
@@ -38,10 +41,10 @@ public static class ConfigureOAuth
 
     public static string ResolveJoinData(ConfigureOAuthOptions options)
     {
-        return ResolveJoinDataAsync(options).GetAwaiter().GetResult();
+        return ResolveJoinDataAsync(options).GetAwaiter().GetResult().JoinData;
     }
 
-    public static async Task<string> ResolveJoinDataAsync(ConfigureOAuthOptions options, CancellationToken ct = default)
+    public static async Task<OAuthJoinResult> ResolveJoinDataAsync(ConfigureOAuthOptions options, CancellationToken ct = default)
     {
         var panelUrl = options.PanelUrl?.Trim();
         if (string.IsNullOrWhiteSpace(panelUrl))
@@ -67,8 +70,29 @@ public static class ConfigureOAuth
         ColoredConsole.WriteLine($"&a✓&r &7Authorized as &f{clientInfo.Username}&r");
         AnsiConsole.WriteLine();
 
+        var oauthOptions = options;
+        if (string.IsNullOrWhiteSpace(oauthOptions.AcmeEmail) && !string.IsNullOrWhiteSpace(clientInfo.Email))
+        {
+            oauthOptions = new ConfigureOAuthOptions
+            {
+                PanelUrl = options.PanelUrl,
+                CallbackHost = options.CallbackHost,
+                AllowInsecure = options.AllowInsecure,
+                KeepOAuthKey = options.KeepOAuthKey,
+                NodeName = options.NodeName,
+                NodeFqdn = options.NodeFqdn,
+                LocationId = options.LocationId,
+                DaemonListen = options.DaemonListen,
+                SftpPort = options.SftpPort,
+                DaemonBase = options.DaemonBase,
+                BehindProxy = options.BehindProxy,
+                Scheme = options.Scheme,
+                AcmeEmail = clientInfo.Email,
+            };
+        }
+
         using var panel = new AdminPanelClient(panelUrl, apiKey, options.AllowInsecure);
-        var createRequest = await PromptWebNodeDetailsAsync(panel, callbackHost, options, ct)
+        var (createRequest, tls) = await PromptWebNodeDetailsAsync(panel, callbackHost, oauthOptions, ct)
             .ConfigureAwait(false);
 
         var node = await panel.CreateWebNodeAsync(createRequest, ct).ConfigureAwait(false);
@@ -79,7 +103,7 @@ public static class ConfigureOAuth
 
         await MaybeRevokeOAuthKeyAsync(panel, clientInfo, options.KeepOAuthKey, ct).ConfigureAwait(false);
 
-        return joinData;
+        return new OAuthJoinResult(joinData, tls);
     }
 
     private static async Task<(OAuthCredentials Credentials, string CallbackHost)> RunOAuthAsync(
@@ -584,7 +608,7 @@ public static class ConfigureOAuth
         }
     }
 
-    private static async Task<CreateWebNodeRequest> PromptWebNodeDetailsAsync(
+    private static async Task<(CreateWebNodeRequest Request, NodeTlsCertificate? Tls)> PromptWebNodeDetailsAsync(
         AdminPanelClient panel,
         string nodeIp,
         ConfigureOAuthOptions options,
@@ -594,42 +618,82 @@ public static class ConfigureOAuth
             && !string.IsNullOrWhiteSpace(options.NodeFqdn)
             && options.LocationId is > 0)
         {
-            return BuildRequest(options, nodeIp, options.LocationId.Value);
+            var request = BuildRequest(options, nodeIp, options.LocationId.Value, panel.BaseUrl);
+            NodeTlsCertificate? tls = null;
+            if (string.Equals(request.Scheme, "https", StringComparison.OrdinalIgnoreCase)
+                && request.BehindProxy != true
+                && !IPAddress.TryParse(request.Fqdn, out _))
+            {
+                tls = ConfigureLetsEncrypt.Ensure(request.Fqdn, options.AcmeEmail, nodeIp, ct);
+            }
+
+            return (request, tls);
         }
 
         if (!ConfigureWizard.IsInteractive)
         {
             throw new InvalidOperationException(
-                "Missing --node-name, --node-fqdn, and --location-id for non-interactive OAuth setup.");
+                "Missing --node-name, --node-fqdn, and --location-id for non-interactive OAuth setup. " +
+                "Create a web location in the panel first, or run interactively to create one.");
         }
 
         var locations = await panel.ListWebLocationsAsync(ct).ConfigureAwait(false);
-        if (locations.Count == 0)
-            throw new InvalidOperationException("No web locations found on the panel. Create a web location first.");
-
-        return ConfigurePrompts.PromptWebNodeDetails(locations, nodeIp, options);
+        return await ConfigurePrompts.PromptWebNodeDetailsAsync(
+                panel, locations, nodeIp, panel.BaseUrl, options, ct)
+            .ConfigureAwait(false);
     }
 
-    internal static CreateWebNodeRequest BuildRequest(ConfigureOAuthOptions options, string nodeIp, int locationId)
+    internal static CreateWebNodeRequest BuildRequest(
+        ConfigureOAuthOptions options,
+        string nodeIp,
+        int locationId,
+        string? panelUrl = null)
     {
         var hostname = Dns.GetHostName();
         if (string.IsNullOrWhiteSpace(hostname))
             hostname = "node";
 
+        var behindProxy = options.BehindProxy ?? false;
+        var scheme = ResolveScheme(panelUrl, behindProxy, options.Scheme);
+        var fqdn = string.IsNullOrWhiteSpace(options.NodeFqdn)
+            ? (behindProxy || string.IsNullOrWhiteSpace(nodeIp) ? hostname : nodeIp)
+            : options.NodeFqdn.Trim();
+
         return new CreateWebNodeRequest
         {
             Name = string.IsNullOrWhiteSpace(options.NodeName) ? hostname : options.NodeName.Trim(),
-            Fqdn = string.IsNullOrWhiteSpace(options.NodeFqdn) ? hostname : options.NodeFqdn.Trim(),
+            Fqdn = fqdn,
             LocationId = locationId,
-            Scheme = "https",
+            Scheme = scheme,
             Public = true,
+            BehindProxy = behindProxy,
             DaemonListen = options.DaemonListen is > 0 ? options.DaemonListen : 8989,
             SftpPort = options.SftpPort is > 0 ? options.SftpPort : 2222,
             DaemonBase = string.IsNullOrWhiteSpace(options.DaemonBase)
                 ? "/var/lib/featherquilld"
                 : options.DaemonBase.Trim(),
             Description = $"FeatherQuilld node at {nodeIp}",
+            SftpEnabled = true,
         };
+    }
+
+    private static string ResolveScheme(string? panelUrl, bool behindProxy, string? forcedScheme)
+    {
+        if (!string.IsNullOrWhiteSpace(forcedScheme))
+            return forcedScheme.Trim().ToLowerInvariant();
+
+        if (behindProxy)
+            return "https";
+
+        if (string.IsNullOrWhiteSpace(panelUrl)
+            || !Uri.TryCreate(panelUrl.Trim(), UriKind.Absolute, out var uri))
+            return "https";
+
+        if (string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            || IPAddress.TryParse(uri.Host, out _))
+            return "http";
+
+        return "https";
     }
 
     private static async Task MaybeRevokeOAuthKeyAsync(
@@ -688,3 +752,6 @@ public static class ConfigureOAuth
         public string? ErrorDescription { get; set; }
     }
 }
+
+/// <summary>OAuth configure result: join-data plus optional Let's Encrypt paths.</summary>
+public sealed record OAuthJoinResult(string JoinData, NodeTlsCertificate? Tls);

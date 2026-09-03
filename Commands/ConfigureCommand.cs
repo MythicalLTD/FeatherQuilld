@@ -42,6 +42,10 @@ public static class ConfigureCommand
                 DaemonListen = TryParseInt(GetOptionValue(args, "--daemon-listen")),
                 SftpPort = TryParseInt(GetOptionValue(args, "--sftp-port")),
                 DaemonBase = GetOptionValue(args, "--daemon-base"),
+                BehindProxy = HasFlag(args, "--behind-proxy") ? true
+                    : HasFlag(args, "--no-behind-proxy") ? false
+                    : null,
+                Scheme = GetOptionValue(args, "--scheme"),
             };
 
             ConfigureWizardResult? wizard = null;
@@ -80,6 +84,7 @@ public static class ConfigureCommand
             }
 
             Config? joinConfig = wizard?.JoinConfig;
+            var tls = wizard?.Tls;
             var inputMode = wizard?.Mode ?? ConfigureInputMode.JoinData;
             var usesJoinData = inputMode is ConfigureInputMode.JoinData or ConfigureInputMode.OAuth
                                || !string.IsNullOrWhiteSpace(joinData);
@@ -146,12 +151,23 @@ public static class ConfigureCommand
 
                     var runtime = panelClient.FetchRuntimeConfigAsync().GetAwaiter().GetResult();
                     joinConfig!.MergeRuntime(runtime);
+                    if (tls is not null)
+                    {
+                        joinConfig.Api.Ssl.Enabled = true;
+                        joinConfig.Api.Ssl.Cert = tls.CertPath;
+                        joinConfig.Api.Ssl.Key = tls.KeyPath;
+                        reporter.Detail($"&7TLS &aenabled&r &8→&r &f{tls.CertPath}&r");
+                    }
+
                     joinConfig.EnsureDirectories();
                     joinConfig.Save();
 
                     return StepOk(
                         "&aRuntime config received&r",
                         $"&7API port &a{joinConfig.Api.Port}&r",
+                        joinConfig.Api.Ssl.Enabled
+                            ? "&7API TLS &aenabled&r &8(Let's Encrypt)&r"
+                            : "&7API TLS &8disabled&r",
                         joinConfig.Sftp.Enabled
                             ? $"&7SFTP &aenabled&r &8on port &a{joinConfig.Sftp.Port}&r"
                             : "&7SFTP &8disabled&r");

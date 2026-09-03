@@ -16,6 +16,7 @@ public sealed record ConfigureWizardResult
     public string? JoinData { get; init; }
     public Config? JoinConfig { get; init; }
     public bool InstallService { get; init; }
+    public NodeTlsCertificate? Tls { get; init; }
 }
 
 /// <summary>
@@ -37,11 +38,12 @@ public static class ConfigureWizard
         {
             if (!string.IsNullOrWhiteSpace(oauthOptions.PanelUrl))
             {
-                var joinData = ConfigureOAuth.ResolveJoinData(oauthOptions);
+                var oauth = ConfigureOAuth.ResolveJoinDataAsync(oauthOptions).GetAwaiter().GetResult();
                 return new ConfigureWizardResult
                 {
                     Mode = ConfigureInputMode.OAuth,
-                    JoinData = joinData,
+                    JoinData = oauth.JoinData,
+                    Tls = oauth.Tls,
                     InstallService = !noService && (installServiceFlag || SystemdServiceInstaller.CanInstall()),
                 };
             }
@@ -56,11 +58,7 @@ public static class ConfigureWizard
 
         var result = mode switch
         {
-            ConfigureInputMode.OAuth => new ConfigureWizardResult
-            {
-                Mode = ConfigureInputMode.OAuth,
-                JoinData = ConfigureOAuth.ResolveJoinData(oauthOptions),
-            },
+            ConfigureInputMode.OAuth => BuildOAuthResult(oauthOptions),
             ConfigureInputMode.JoinData => new ConfigureWizardResult
             {
                 Mode = ConfigureInputMode.JoinData,
@@ -71,6 +69,17 @@ public static class ConfigureWizard
 
         var installService = ResolveServiceInstall(noService, installServiceFlag);
         return result with { InstallService = installService };
+    }
+
+    private static ConfigureWizardResult BuildOAuthResult(ConfigureOAuthOptions oauthOptions)
+    {
+        var oauth = ConfigureOAuth.ResolveJoinDataAsync(oauthOptions).GetAwaiter().GetResult();
+        return new ConfigureWizardResult
+        {
+            Mode = ConfigureInputMode.OAuth,
+            JoinData = oauth.JoinData,
+            Tls = oauth.Tls,
+        };
     }
 
     private static ConfigureWizardResult BuildManualResult(ConfigurePrompts.ManualCredentials creds)
