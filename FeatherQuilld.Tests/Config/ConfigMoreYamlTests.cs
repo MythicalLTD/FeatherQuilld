@@ -43,6 +43,67 @@ public class ConfigMoreYamlTests
     }
 
     [Fact]
+    public void ApplyLocalDevPaths_StaysUnderBaseDirectory()
+    {
+        var config = new AppConfig { FilePath = "/tmp/fq-dev/config.yml" };
+        config.ApplyLocalDevPaths("/tmp/fq-dev");
+
+        Assert.Equal("/tmp/fq-dev/data", config.System.RootDirectory);
+        Assert.Equal("/tmp/fq-dev/logs", config.System.LogDirectory);
+        Assert.Equal("/tmp/fq-dev/data/volumes", config.System.Data);
+        Assert.Equal("/tmp/fq-dev/data/plugins", config.Plugins.Directory);
+        Assert.DoesNotContain("/var/log", config.System.LogDirectory);
+    }
+
+    [Fact]
+    public void Load_MissingDefaultPath_ThrowsConfigNotReady()
+    {
+        if (File.Exists(AppConfig.DefaultPath()))
+            return;
+
+        var ex = Assert.Throws<ConfigNotReadyException>(() => AppConfig.Load());
+        Assert.Contains("sudo quilld configure", ex.Message);
+    }
+
+    [Fact]
+    public void IsJoinedToPanel_RejectsPlaceholderAndEmptyPanel()
+    {
+        var stub = new AppConfig
+        {
+            TokenId = "fqld_abc",
+            Token = "secret",
+            Remote = { Panel = AppConfig.PlaceholderPanelUrl },
+        };
+        Assert.False(stub.IsJoinedToPanel());
+
+        stub.Remote.Panel = "";
+        Assert.False(stub.IsJoinedToPanel());
+
+        stub.Remote.Panel = "https://panel.example.com";
+        Assert.True(stub.IsJoinedToPanel());
+    }
+
+    [Fact]
+    public void Load_ExplicitMissingPath_UsesLocalLayout()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fq-load-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "config.yml");
+
+        try
+        {
+            var config = AppConfig.Load(path);
+            Assert.True(File.Exists(path));
+            Assert.StartsWith(dir, config.System.LogDirectory);
+            Assert.StartsWith(dir, config.System.RootDirectory);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
     public void HasPanelCredentials_RequiresPanelAndTokens()
     {
         var config = new AppConfig

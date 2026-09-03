@@ -7,6 +7,9 @@ on:
       - '**.csproj'
       - '**.sln'
       - '**.slnx'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - '.dockerignore'
       - '.github/workflows/featherquilld.yml'
   pull_request:
     paths:
@@ -14,8 +17,15 @@ on:
       - '**.csproj'
       - '**.sln'
       - '**.slnx'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - '.dockerignore'
       - '.github/workflows/featherquilld.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   test:
@@ -29,6 +39,14 @@ jobs:
         working-directory: .
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -50,5 +68,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build daemon image
-        run: docker compose build featherquilld
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: featherquilld:latest
+          cache-from: type=gha,scope=featherquilld-docker
+          cache-to: type=gha,mode=max,scope=featherquilld-docker

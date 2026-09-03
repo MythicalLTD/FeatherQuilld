@@ -5,7 +5,7 @@ public class RemoteConfig
     public const string DefaultConfigPath = "/api/quilld-remote/config";
     public const string DefaultHealthPath = "/api/quilld-remote/health";
 
-    public string Panel { get; set; } = "https://panel.mythical.systems";
+    public string Panel { get; set; } = "";
 
     /// <summary>Panel route for runtime config YAML (<c>/api/quilld-remote/config</c>).</summary>
     public string ConfigPath { get; set; } = DefaultConfigPath;

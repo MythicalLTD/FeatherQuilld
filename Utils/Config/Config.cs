@@ -15,6 +15,11 @@ public class Config
 {
     public const string DefaultFileName = "config.yml";
 
+    /// <summary>
+    /// Placeholder baked into older auto-generated configs. Not a joined node.
+    /// </summary>
+    public const string PlaceholderPanelUrl = "https://panel.mythical.systems";
+
     [YamlIgnore]
     public string FilePath { get; set; } = DefaultPath();
 
@@ -39,38 +44,57 @@ public class Config
         IoPath.Combine("/etc/featherquilld", DefaultFileName);
 
     /// <summary>
-    /// Loads config from disk. Creates and saves defaults when the file is missing.
-    /// Falls back to <c>./config.yml</c> if the system path is not writable.
+    /// Loads config from disk. The system path is never auto-created — a missing
+    /// <c>/etc/featherquilld/config.yml</c> means the node is not joined yet.
+    /// An explicit <c>--config</c> path outside /etc may still be created for local/dev.
     /// </summary>
     public static Config Load(string? filePath = null)
     {
         var path = filePath ?? DefaultPath();
         var explicitPath = filePath is not null;
+        var systemDefault = IsSystemDefaultPath(path);
 
         if (!File.Exists(path))
         {
+            if (systemDefault || !explicitPath)
+                throw new ConfigNotReadyException(ConfigNotReadyException.Hint);
+
             var config = new Config { FilePath = path };
-            config.ApplyDefaultPaths();
-            try
-            {
-                config.EnsureDirectories();
-                config.Save();
-                return config;
-            }
-            catch (UnauthorizedAccessException) when (!explicitPath)
-            {
-                return CreateLocalFallback();
-            }
-            catch (IOException) when (!explicitPath)
-            {
-                return CreateLocalFallback();
-            }
+            var baseDir = IoPath.GetDirectoryName(IoPath.GetFullPath(path));
+            config.ApplyLocalDevPaths(string.IsNullOrEmpty(baseDir)
+                ? Directory.GetCurrentDirectory()
+                : baseDir);
+            config.EnsureDirectories();
+            config.Save();
+            return config;
         }
 
         var yaml = File.ReadAllText(path);
         var loaded = DeserializeYaml(yaml) ?? new Config();
         loaded.FilePath = path;
         return loaded;
+    }
+
+    public static bool IsSystemDefaultPath(string path) =>
+        string.Equals(
+            IoPath.GetFullPath(path),
+            IoPath.GetFullPath(DefaultPath()),
+            StringComparison.Ordinal);
+
+    /// <summary>
+    /// True when this config was produced by join-data / OAuth / a real panel,
+    /// not a generated stub with the old placeholder panel URL.
+    /// </summary>
+    public bool IsJoinedToPanel()
+    {
+        if (!HasPanelCredentials())
+            return false;
+
+        var panel = Remote.Panel.Trim().TrimEnd('/');
+        if (string.Equals(panel, PlaceholderPanelUrl, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return true;
     }
 
     public static Config DeserializeYaml(string yaml) =>
@@ -140,8 +164,21 @@ public class Config
     /// </summary>
     public void ApplyDefaultPaths()
     {
-        var root = SystemConfig.DefaultRootDirectory;
+        ApplyLayout(SystemConfig.DefaultRootDirectory, SystemConfig.DefaultLogDirectory, SystemConfig.DefaultPluginsDirectory);
+    }
 
+    /// <summary>
+    /// Layout under a writable directory (local/dev). Used when <c>--config</c> is outside /etc.
+    /// </summary>
+    public void ApplyLocalDevPaths(string baseDirectory)
+    {
+        var root = IoPath.Combine(baseDirectory, "data");
+        ApplyLayout(root, IoPath.Combine(baseDirectory, "logs"), IoPath.Combine(root, "plugins"));
+        System.TmpDirectory = IoPath.Combine(baseDirectory, "tmp");
+    }
+
+    private void ApplyLayout(string root, string logDirectory, string pluginsDirectory)
+    {
         System.RootDirectory = root;
         System.Data = IoPath.Combine(root, "volumes");
         System.Websites = IoPath.Combine(root, "websites");
@@ -149,15 +186,15 @@ public class Config
         System.BackupDirectory = IoPath.Combine(root, "backups");
         System.EggsDirectory = IoPath.Combine(root, "eggs");
         System.VmountDirectory = IoPath.Combine(root, "vmounts");
-        System.LogDirectory = SystemConfig.DefaultLogDirectory;
-        Plugins.Directory = SystemConfig.DefaultPluginsDirectory;
+        System.LogDirectory = logDirectory;
+        Plugins.Directory = pluginsDirectory;
     }
 
     public void Save()
     {
         var directory = IoPath.GetDirectoryName(FilePath);
         if (!string.IsNullOrEmpty(directory))
-            Directory.CreateDirectory(directory);
+            CreateDirectoryOrThrow(directory);
 
         var yaml = SerializeYaml(this);
         File.WriteAllText(FilePath, yaml);
@@ -165,17 +202,17 @@ public class Config
 
     public void EnsureDirectories()
     {
-        Directory.CreateDirectory(System.RootDirectory);
-        Directory.CreateDirectory(System.LogDirectory);
-        Directory.CreateDirectory(System.Data);
-        Directory.CreateDirectory(System.Websites);
-        Directory.CreateDirectory(System.ArchiveDirectory);
-        Directory.CreateDirectory(System.BackupDirectory);
-        Directory.CreateDirectory(System.EggsDirectory);
-        Directory.CreateDirectory(System.VmountDirectory);
-        Directory.CreateDirectory(IoPath.Combine(System.RootDirectory, "proxy"));
-        Directory.CreateDirectory(System.TmpDirectory);
-        Directory.CreateDirectory(Plugins.Directory);
+        CreateDirectoryOrThrow(System.RootDirectory);
+        CreateDirectoryOrThrow(System.LogDirectory);
+        CreateDirectoryOrThrow(System.Data);
+        CreateDirectoryOrThrow(System.Websites);
+        CreateDirectoryOrThrow(System.ArchiveDirectory);
+        CreateDirectoryOrThrow(System.BackupDirectory);
+        CreateDirectoryOrThrow(System.EggsDirectory);
+        CreateDirectoryOrThrow(System.VmountDirectory);
+        CreateDirectoryOrThrow(IoPath.Combine(System.RootDirectory, "proxy"));
+        CreateDirectoryOrThrow(System.TmpDirectory);
+        CreateDirectoryOrThrow(Plugins.Directory);
     }
 
     public bool HasPanelCredentials() =>
@@ -183,17 +220,54 @@ public class Config
         && !string.IsNullOrWhiteSpace(TokenId)
         && !string.IsNullOrWhiteSpace(Token);
 
-    private static Config CreateLocalFallback()
+    internal static bool CanWriteSystemLayout()
     {
-        var config = new Config
-        {
-            FilePath = IoPath.Combine(Directory.GetCurrentDirectory(), DefaultFileName),
-        };
+        var configDir = IoPath.GetDirectoryName(DefaultPath());
+        return CanCreateDirectory(configDir)
+               && CanCreateDirectory(SystemConfig.DefaultRootDirectory)
+               && CanCreateDirectory(SystemConfig.DefaultLogDirectory);
+    }
 
-        config.ApplyDefaultPaths();
-        config.EnsureDirectories();
-        config.Save();
-        return config;
+    private static bool CanCreateDirectory(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                var probe = IoPath.Combine(path, $".featherquilld-write-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(probe);
+                Directory.Delete(probe);
+                return true;
+            }
+
+            Directory.CreateDirectory(path);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    private static void CreateDirectoryOrThrow(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(path);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            throw new ConfigNotReadyException(
+                $"Cannot create '{path}'. {ex.Message}\n\n{ConfigNotReadyException.Hint}",
+                ex);
+        }
     }
 
     internal static ISerializer CreateSerializer() =>

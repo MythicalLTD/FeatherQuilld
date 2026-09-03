@@ -15,10 +15,19 @@ jobs:
     permissions:
       contents: write
       packages: write
+      actions: write
 
     steps:
       - name: Code Checkout
         uses: actions/checkout@v4
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -170,6 +179,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: write
 
     steps:
       - name: Code Checkout
@@ -215,5 +225,5 @@ jobs:
             INFORMATIONAL_VERSION=${{ steps.build_info.outputs.version_tag }}
           labels: ${{ steps.docker_meta.outputs.labels }}
           tags: ${{ steps.docker_meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=featherquilld-docker
+          cache-to: type=gha,mode=max,scope=featherquilld-docker

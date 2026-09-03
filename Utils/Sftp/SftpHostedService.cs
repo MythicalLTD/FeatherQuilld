@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Text.Json.Serialization;
@@ -107,7 +108,16 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         _fxServer.ConnectionAccepted += OnFxConnectionAccepted;
         _fxServer.ExceptionRasied += (_, ex) =>
             _logger?.Warning(LoggerTypes.Application, $"SFTP exception: {ex.Message}");
-        _fxServer.Start();
+        try
+        {
+            _fxServer.Start();
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+        {
+            throw new InvalidOperationException(
+                $"SFTP port {_config.Sftp.Port} is already in use. Stop the other process or change sftp.port in config.yml.",
+                ex);
+        }
     }
 
     private void StartEmbeddedEd25519(SftpHostKeys.HostKeyMaterial material)
@@ -131,7 +141,16 @@ public sealed class SftpHostedService : IHostedService, IDisposable
             return Task.CompletedTask;
         };
 
-        _embeddedServer.Start();
+        try
+        {
+            _embeddedServer.Start();
+        }
+        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+        {
+            throw new InvalidOperationException(
+                $"SFTP port {_config.Sftp.Port} is already in use. Stop the other process or change sftp.port in config.yml.",
+                ex);
+        }
     }
 
     private async Task HandleEmbeddedConnectionAsync(SshConnection connection, CancellationToken ct)

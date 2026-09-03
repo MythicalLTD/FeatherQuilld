@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
   packages: write
+  actions: write
 
 jobs:
   build-and-publish:
@@ -20,6 +21,14 @@ jobs:
     steps:
       - name: Code Checkout
         uses: actions/checkout@v4
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -82,7 +91,6 @@ jobs:
   docker:
     name: Push GHCR main
     runs-on: ubuntu-22.04
-    needs: build-and-publish
     if: "!contains(github.event.head_commit.message, 'skip docker') && !contains(github.event.head_commit.message, 'docker skip')"
 
     steps:
@@ -129,5 +137,5 @@ jobs:
             INFORMATIONAL_VERSION=dev-${{ steps.build_info.outputs.short_sha }}
           labels: ${{ steps.docker_meta.outputs.labels }}
           tags: ${{ steps.docker_meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=featherquilld-docker
+          cache-to: type=gha,mode=max,scope=featherquilld-docker
