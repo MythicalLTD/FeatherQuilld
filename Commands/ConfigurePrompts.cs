@@ -1,4 +1,5 @@
 using FeatherQuilld.Utils;
+using FeatherQuilld.Utils.Remote;
 using Spectre.Console;
 
 namespace FeatherQuilld.Commands;
@@ -41,6 +42,150 @@ internal static class ConfigurePrompts
                 .UseConverter(o => o.Label));
     }
 
+    public static string PromptPanelUrl()
+    {
+        AnsiConsole.WriteLine();
+        return AnsiConsole.Prompt(
+            new TextPrompt<string>(Mc("&b›&r &7FeatherPanel URL&r"))
+                .PromptStyle(new Style(Color.FromHex(Teal)))
+                .ValidationErrorMessage(Mc("&cEnter a valid http(s) URL.&r"))
+                .Validate(input =>
+                {
+                    if (string.IsNullOrWhiteSpace(input))
+                        return ValidationResult.Error(Mc("&cPanel URL is required.&r"));
+                    if (!Uri.TryCreate(input.Trim(), UriKind.Absolute, out var uri)
+                        || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                        return ValidationResult.Error(Mc("&cURL must start with http:// or https://&r"));
+                    return ValidationResult.Success();
+                }));
+    }
+
+    public static string PromptCallbackHost(IReadOnlyList<(string Host, string Source)> candidates)
+    {
+        AnsiConsole.WriteLine();
+
+        if (candidates.Count == 0)
+        {
+            return AnsiConsole.Prompt(
+                new TextPrompt<string>(Mc("&b›&r &7This machine's public IP&r"))
+                    .PromptStyle(new Style(Color.FromHex(Teal)))
+                    .Validate(v => string.IsNullOrWhiteSpace(v)
+                        ? ValidationResult.Error(Mc("&cIP is required.&r"))
+                        : ValidationResult.Success()));
+        }
+
+        if (candidates.Count == 1)
+        {
+            var host = candidates[0].Host;
+            var confirmed = AnsiConsole.Prompt(
+                new TextPrompt<string>(Mc($"&b›&r &7This machine's public IP&r &8(detected {host})&r"))
+                    .PromptStyle(new Style(Color.FromHex(Teal)))
+                    .DefaultValue(host)
+                    .Validate(v => string.IsNullOrWhiteSpace(v)
+                        ? ValidationResult.Error(Mc("&cIP is required.&r"))
+                        : ValidationResult.Success()));
+            return confirmed.Trim();
+        }
+
+        var choices = candidates
+            .Select(c => $"{c.Host} ({SourceLabel(c.Source)})")
+            .Append("Enter a different IP…")
+            .ToList();
+
+        var pick = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title(Mc("&b&lThis machine's IP&r"))
+                .HighlightStyle(new Style(Color.FromHex(Teal), decoration: Decoration.Bold))
+                .AddChoices(choices));
+
+        if (pick.StartsWith("Enter a different", StringComparison.Ordinal))
+        {
+            return AnsiConsole.Prompt(
+                new TextPrompt<string>(Mc("&b›&r &7Public IP&r"))
+                    .PromptStyle(new Style(Color.FromHex(Teal)))
+                    .Validate(v => string.IsNullOrWhiteSpace(v)
+                        ? ValidationResult.Error(Mc("&cIP is required.&r"))
+                        : ValidationResult.Success())).Trim();
+        }
+
+        return pick.Split(' ', 2)[0];
+    }
+
+    public static CreateWebNodeRequest PromptWebNodeDetails(
+        IReadOnlyList<AdminPanelLocation> locations,
+        string nodeIp,
+        ConfigureOAuthOptions options)
+    {
+        var hostname = System.Net.Dns.GetHostName();
+        if (string.IsNullOrWhiteSpace(hostname))
+            hostname = "node";
+
+        var locationChoice = AnsiConsole.Prompt(
+            new SelectionPrompt<AdminPanelLocation>()
+                .Title(Mc("&b&lWeb location&r"))
+                .HighlightStyle(new Style(Color.FromHex(Teal), decoration: Decoration.Bold))
+                .AddChoices(locations)
+                .UseConverter(l => $"[{Teal}]{l.Id}[/] {l.Name}"));
+
+        var name = AnsiConsole.Prompt(
+            new TextPrompt<string>(Mc("&b›&r &7Node name&r"))
+                .PromptStyle(new Style(Color.FromHex(Teal)))
+                .DefaultValue(string.IsNullOrWhiteSpace(options.NodeName) ? hostname : options.NodeName!)
+                .Validate(v => string.IsNullOrWhiteSpace(v)
+                    ? ValidationResult.Error(Mc("&cName is required.&r"))
+                    : ValidationResult.Success()));
+
+        var fqdn = AnsiConsole.Prompt(
+            new TextPrompt<string>(Mc("&b›&r &7FQDN or public hostname&r"))
+                .PromptStyle(new Style(Color.FromHex(Teal)))
+                .DefaultValue(string.IsNullOrWhiteSpace(options.NodeFqdn)
+                    ? (string.IsNullOrWhiteSpace(nodeIp) ? hostname : nodeIp)
+                    : options.NodeFqdn!)
+                .Validate(v => string.IsNullOrWhiteSpace(v)
+                    ? ValidationResult.Error(Mc("&cFQDN is required.&r"))
+                    : ValidationResult.Success()));
+
+        var daemonListen = options.DaemonListen is > 0
+            ? options.DaemonListen.Value
+            : AnsiConsole.Prompt(
+                new TextPrompt<int>(Mc("&b›&r &7Daemon API port&r"))
+                    .PromptStyle(new Style(Color.FromHex(Teal)))
+                    .DefaultValue(8989));
+
+        var sftpPort = options.SftpPort is > 0
+            ? options.SftpPort.Value
+            : AnsiConsole.Prompt(
+                new TextPrompt<int>(Mc("&b›&r &7SFTP port&r"))
+                    .PromptStyle(new Style(Color.FromHex(Teal)))
+                    .DefaultValue(2222));
+
+        return new CreateWebNodeRequest
+        {
+            Name = name.Trim(),
+            Fqdn = fqdn.Trim(),
+            LocationId = locationChoice.Id,
+            Scheme = "https",
+            Public = true,
+            DaemonListen = daemonListen,
+            SftpPort = sftpPort,
+            DaemonBase = string.IsNullOrWhiteSpace(options.DaemonBase)
+                ? "/var/lib/featherquilld"
+                : options.DaemonBase.Trim(),
+            Description = $"FeatherQuilld node at {nodeIp}",
+            SftpEnabled = true,
+        };
+    }
+
+    public static bool PromptRevokeOAuthKey(string keyName)
+    {
+        var description = "Recommended — the node is registered and this key is no longer needed.";
+        if (!string.IsNullOrWhiteSpace(keyName))
+            description = $"{description} ({keyName})";
+
+        AnsiConsole.WriteLine();
+        return AnsiConsole.Confirm(Mc($"&7Delete the temporary OAuth API key?&r &8{description}&r"), true);
+    }
+
     public static string PromptJoinData()
     {
         AnsiConsole.WriteLine();
@@ -78,9 +223,9 @@ internal static class ConfigurePrompts
     {
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Panel(new Markup(Mc(
-                "&7Enter credentials from &fAdmin → Web Nodes → FeatherQuilld&r\n" +
-                "&8Web node tokens use the &ffqld_&8 prefix.&r")))
-            .Header("[bold] manual setup [/]", Justify.Center)
+                "&7Enter credentials from &fAdmin → Web Nodes&7.&r\n" +
+                "&8Token ID starts with &ffqld_&8.&r")))
+            .Header("[bold] manual [/]", Justify.Center)
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.FromHex(Teal))
             .Padding(1, 0));
@@ -88,75 +233,37 @@ internal static class ConfigurePrompts
 
         var panel = AnsiConsole.Prompt(
             new TextPrompt<string>(Mc("&b›&r &7Panel URL&r"))
-                .DefaultValue("https://panel.example.com")
-                .PromptStyle(new Style(Color.FromHex(Teal)))
-                .ValidationErrorMessage(Mc("&cPanel URL is required.&r"))
-                .Validate(v => string.IsNullOrWhiteSpace(v)
-                    ? ValidationResult.Error(Mc("&cPanel URL is required.&r"))
-                    : ValidationResult.Success()));
+                .PromptStyle(new Style(Color.FromHex(Teal))));
 
         var tokenId = AnsiConsole.Prompt(
-            new TextPrompt<string>(Mc("&b›&r &7Token ID&r &8(fqld_…)&r"))
-                .PromptStyle(new Style(Color.FromHex(Teal)))
-                .ValidationErrorMessage(Mc("&cToken ID is required.&r"))
-                .Validate(v => string.IsNullOrWhiteSpace(v)
-                    ? ValidationResult.Error(Mc("&cToken ID is required.&r"))
-                    : ValidationResult.Success()));
-
-        if (!tokenId.StartsWith("fqld_", StringComparison.Ordinal))
-        {
-            AnsiConsole.MarkupLine(Mc("&e  ! &7Token should start with &ffqld_&7 for web nodes.&r"));
-        }
+            new TextPrompt<string>(Mc("&b›&r &7Token ID&r"))
+                .PromptStyle(new Style(Color.FromHex(Teal))));
 
         var token = AnsiConsole.Prompt(
             new TextPrompt<string>(Mc("&b›&r &7Token secret&r"))
                 .PromptStyle(new Style(Color.FromHex(Teal)))
-                .Secret()
-                .ValidationErrorMessage(Mc("&cToken secret is required.&r"))
-                .Validate(v => string.IsNullOrWhiteSpace(v)
-                    ? ValidationResult.Error(Mc("&cToken secret is required.&r"))
-                    : ValidationResult.Success()));
+                .Secret());
 
-        var uuidRaw = AnsiConsole.Prompt(
-            new TextPrompt<string>(Mc("&b›&r &7Node UUID&r &8(optional — Enter to skip)&r"))
-                .AllowEmpty()
-                .DefaultValue("")
-                .PromptStyle(new Style(Color.FromHex(Teal))));
-
-        Guid uuid = Guid.Empty;
-        if (!string.IsNullOrWhiteSpace(uuidRaw))
-        {
-            if (!Guid.TryParse(uuidRaw, out uuid))
-            {
-                AnsiConsole.MarkupLine(Mc("&e  ! &7Invalid UUID — a new one will be assigned.&r"));
-                uuid = Guid.Empty;
-            }
-        }
-
-        var portRaw = AnsiConsole.Prompt(
-            new TextPrompt<string>(Mc("&b›&r &7API port&r"))
-                .DefaultValue("8989")
+        var uuidText = AnsiConsole.Prompt(
+            new TextPrompt<string>(Mc("&b›&r &7Node UUID&r &8(optional — leave blank to generate)&r"))
                 .PromptStyle(new Style(Color.FromHex(Teal)))
-                .ValidationErrorMessage(Mc("&cPort must be 1–65535.&r"))
-                .Validate(v => int.TryParse(v, out var p) && p is > 0 and <= 65535
-                    ? ValidationResult.Success()
-                    : ValidationResult.Error(Mc("&cPort must be 1–65535.&r"))));
+                .AllowEmpty());
 
-        _ = int.TryParse(portRaw, out var port);
+        var apiPort = AnsiConsole.Prompt(
+            new TextPrompt<int>(Mc("&b›&r &7API port&r"))
+                .PromptStyle(new Style(Color.FromHex(Teal)))
+                .DefaultValue(8989));
 
-        return new ManualCredentials(panel.Trim(), tokenId.Trim(), token, uuid, port);
+        Guid.TryParse(uuidText, out var uuid);
+
+        return new ManualCredentials(panel.Trim(), tokenId.Trim(), token.Trim(), uuid, apiPort);
     }
 
-    public static bool PromptInstallService(bool defaultValue = true)
+    public static bool PromptInstallService(bool defaultValue)
     {
-        if (!SystemdServiceInstaller.CanInstall())
-            return false;
-
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Panel(new Markup(Mc(
-                "&7Writes &f/etc/systemd/system/featherquilld.service&r\n" +
-                "&7Runs &fsystemctl enable --now featherquilld&r\n" +
-                "&8Requires root · needs a published binary (not dotnet run)&r")))
+                "&7Install &ffeatherquilld.service&7 so the daemon starts on boot.&r")))
             .Header("[bold] systemd [/]", Justify.Center)
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.FromHex(Teal))
@@ -167,6 +274,15 @@ internal static class ConfigurePrompts
             Mc("&7Install and start the &ffeatherquilld&7 systemd service?&r"),
             defaultValue);
     }
+
+    private static string SourceLabel(string source) => source switch
+    {
+        "outbound" => "outbound/public IP",
+        "interface" => "network interface",
+        "environment" => "environment",
+        "manual" => "manual",
+        _ => source,
+    };
 
     private static string Mc(string message) => ColoredConsole.ToMarkup(message);
 
@@ -186,13 +302,18 @@ internal static class ConfigurePrompts
         [
             new()
             {
+                Mode = ConfigureInputMode.OAuth,
+                Label = $"[{Teal}]▸[/] [bold {Ink}]OAuth quick setup[/]   [grey](recommended · browser authorize)",
+            },
+            new()
+            {
                 Mode = ConfigureInputMode.JoinData,
-                Label = $"[{Teal}]▸[/] [bold {Ink}]Paste join-data[/]      [grey](recommended · FeatherPanel admin)[/]",
+                Label = $"[{Teal}]▸[/] [bold {Ink}]Paste join-data[/]      [grey](FeatherPanel admin)",
             },
             new()
             {
                 Mode = ConfigureInputMode.Manual,
-                Label = $"[{Teal}]▸[/] [bold {Ink}]Manual credentials[/]   [grey](panel · fqld_ token · secret)[/]",
+                Label = $"[{Teal}]▸[/] [bold {Ink}]Manual credentials[/]   [grey](panel · fqld_ token · secret)",
             },
         ];
     }

@@ -1,0 +1,22 @@
+[Unit]
+Description=FeatherQuilld Web Node Daemon
+Documentation=https://github.com/mythicalltd/featherquilld
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/featherquilld/config.yml
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/featherquilld
+ExecStart=/usr/local/bin/featherquilld --config /etc/featherquilld/config.yml
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=180
+StartLimitBurst=30
+Environment=DOTNET_ENVIRONMENT=Production
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

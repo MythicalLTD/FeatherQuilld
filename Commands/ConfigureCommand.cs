@@ -28,19 +28,35 @@ public static class ConfigureCommand
             var joinData = GetOptionValue(args, "--join-data")
                            ?? Environment.GetEnvironmentVariable("FEATHERQUILLD_JOIN_DATA");
 
+            var oauthOptions = new ConfigureOAuthOptions
+            {
+                PanelUrl = GetOptionValue(args, "--panel-url")
+                           ?? Environment.GetEnvironmentVariable("FEATHERQUILLD_PANEL_URL"),
+                CallbackHost = GetOptionValue(args, "--callback-host")
+                               ?? Environment.GetEnvironmentVariable("FEATHERQUILLD_CALLBACK_HOST"),
+                AllowInsecure = HasFlag(args, "--allow-insecure"),
+                KeepOAuthKey = HasFlag(args, "--keep-oauth-key"),
+                NodeName = GetOptionValue(args, "--node-name"),
+                NodeFqdn = GetOptionValue(args, "--node-fqdn"),
+                LocationId = TryParseInt(GetOptionValue(args, "--location-id")),
+                DaemonListen = TryParseInt(GetOptionValue(args, "--daemon-listen")),
+                SftpPort = TryParseInt(GetOptionValue(args, "--sftp-port")),
+                DaemonBase = GetOptionValue(args, "--daemon-base"),
+            };
+
             ConfigureWizardResult? wizard = null;
 
             if (string.IsNullOrWhiteSpace(joinData))
             {
-                if (quiet)
+                if (quiet && string.IsNullOrWhiteSpace(oauthOptions.PanelUrl))
                 {
-                    ColoredConsole.WriteLine("&c&lMissing --join-data in non-interactive mode.&r");
+                    ColoredConsole.WriteLine("&c&lMissing --join-data or --panel-url in non-interactive mode.&r");
                     ConfigureSequence.RenderUsage();
                     return 1;
                 }
 
                 ConfigureBanner.Print();
-                wizard = ConfigureWizard.Run(noService, installServiceFlag);
+                wizard = ConfigureWizard.Run(noService, installServiceFlag, oauthOptions);
                 joinData = wizard.JoinData;
             }
             else if (!quiet)
@@ -65,14 +81,16 @@ public static class ConfigureCommand
 
             Config? joinConfig = wizard?.JoinConfig;
             var inputMode = wizard?.Mode ?? ConfigureInputMode.JoinData;
+            var usesJoinData = inputMode is ConfigureInputMode.JoinData or ConfigureInputMode.OAuth
+                               || !string.IsNullOrWhiteSpace(joinData);
 
             var sequence = new ConfigureSequence(quiet);
             ServiceInstallResult? serviceResult = null;
 
             var success = sequence
-                .Step(inputMode == ConfigureInputMode.JoinData ? "Decoding join data" : "Loading credentials", _ =>
+                .Step(usesJoinData ? "Decoding join data" : "Loading credentials", _ =>
                 {
-                    if (inputMode == ConfigureInputMode.JoinData)
+                    if (usesJoinData)
                     {
                         var yaml = DecodeJoinData(joinData!);
                         var bytes = Encoding.UTF8.GetByteCount(yaml);
@@ -88,7 +106,7 @@ public static class ConfigureCommand
                 })
                 .Step("Validating node credentials", reporter =>
                 {
-                    if (inputMode == ConfigureInputMode.JoinData)
+                    if (usesJoinData)
                     {
                         var yaml = DecodeJoinData(joinData!);
                         joinConfig = Config.DeserializeYaml(yaml);
@@ -249,4 +267,7 @@ public static class ConfigureCommand
 
         return null;
     }
+
+    private static int? TryParseInt(string? value) =>
+        int.TryParse(value, out var n) ? n : null;
 }

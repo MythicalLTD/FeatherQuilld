@@ -1,0 +1,60 @@
+name: "${NFPM_NAME}"
+arch: "${NFPM_ARCH}"
+platform: linux
+version: "${NFPM_VERSION}"
+section: admin
+priority: optional
+maintainer: MythicalSystems <support@mythicalsystems.org>
+vendor: MythicalSystems
+description: |-
+  FeatherQuilld web hosting node daemon for FeatherPanel.
+   FeatherQuilld manages WebSpaces, reverse proxy, SFTP/FTP, and exposes an
+   HTTP API for FeatherPanel. Includes an interactive setup wizard (join-data
+   or OAuth) and systemd integration for production deployments.
+homepage: https://github.com/mythicalltd/featherquilld
+license: MIT
+changelog: packaging/changelog.yaml
+depends:
+  - systemd
+  - ca-certificates
+recommends:
+  - curl
+  - gnupg
+conflicts:
+  - "${NFPM_CONFLICT}"
+replaces:
+  - "${NFPM_CONFLICT}"
+provides:
+  - featherquilld-daemon
+
+deb:
+  fields:
+    Bugs: https://github.com/mythicalltd/featherquilld/issues
+    Vcs-Browser: https://github.com/mythicalltd/featherquilld
+    Vcs-Git: https://github.com/mythicalltd/featherquilld.git
+
+contents:
+  - src: dist/featherquilld
+    dst: /usr/local/bin/featherquilld
+    file_info:
+      mode: 0755
+  - src: packaging/featherquilld.service
+    dst: /lib/systemd/system/featherquilld.service
+    file_info:
+      mode: 0644
+  - src: packaging/featherquilld.metainfo.xml
+    dst: /usr/share/metainfo/org.mythicalsystems.FeatherQuilld.metainfo.xml
+    file_info:
+      mode: 0644
+  - src: packaging/copyright
+    dst: /usr/share/doc/featherquilld/copyright
+    file_info:
+      mode: 0644
+  - src: packaging/README.Debian
+    dst: /usr/share/doc/featherquilld/README.Debian
+    file_info:
+      mode: 0644
+
+scripts:
+  preinstall: packaging/preinstall.sh
+  postinstall: packaging/postinstall.sh

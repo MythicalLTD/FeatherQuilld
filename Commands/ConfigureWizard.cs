@@ -5,6 +5,7 @@ namespace FeatherQuilld.Commands;
 
 public enum ConfigureInputMode
 {
+    OAuth,
     JoinData,
     Manual,
 }
@@ -18,19 +19,35 @@ public sealed record ConfigureWizardResult
 }
 
 /// <summary>
-/// Interactive setup wizard — arrow-key menus, join-data paste, or manual credentials.
+/// Interactive setup wizard — OAuth, join-data paste, or manual credentials.
 /// </summary>
 public static class ConfigureWizard
 {
     public static bool IsInteractive =>
         !Console.IsOutputRedirected && Environment.UserInteractive;
 
-    public static ConfigureWizardResult Run(bool noService, bool installServiceFlag)
+    public static ConfigureWizardResult Run(
+        bool noService,
+        bool installServiceFlag,
+        ConfigureOAuthOptions? oauthOptions = null)
     {
+        oauthOptions ??= new ConfigureOAuthOptions();
+
         if (!IsInteractive)
         {
+            if (!string.IsNullOrWhiteSpace(oauthOptions.PanelUrl))
+            {
+                var joinData = ConfigureOAuth.ResolveJoinData(oauthOptions);
+                return new ConfigureWizardResult
+                {
+                    Mode = ConfigureInputMode.OAuth,
+                    JoinData = joinData,
+                    InstallService = !noService && (installServiceFlag || SystemdServiceInstaller.CanInstall()),
+                };
+            }
+
             throw new InvalidOperationException(
-                "Non-interactive shell detected. Pass --join-data or set FEATHERQUILLD_JOIN_DATA.");
+                "Non-interactive shell detected. Pass --join-data, set FEATHERQUILLD_JOIN_DATA, or use --panel-url with OAuth flags.");
         }
 
         ConfigurePrompts.WriteWelcome();
@@ -39,6 +56,11 @@ public static class ConfigureWizard
 
         var result = mode switch
         {
+            ConfigureInputMode.OAuth => new ConfigureWizardResult
+            {
+                Mode = ConfigureInputMode.OAuth,
+                JoinData = ConfigureOAuth.ResolveJoinData(oauthOptions),
+            },
             ConfigureInputMode.JoinData => new ConfigureWizardResult
             {
                 Mode = ConfigureInputMode.JoinData,

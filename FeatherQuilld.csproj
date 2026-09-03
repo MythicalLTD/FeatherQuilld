@@ -11,7 +11,12 @@
         <Description>FeatherQuilld daemon — light as a feather, sharp as a quill.</Description>
         <!-- Sibling trees live under the Web project root; without excludes the SDK
              globs them as Content and copies gigabytes into bin/ on every build. -->
-        <DefaultItemExcludes>$(DefaultItemExcludes);FeatherQuilld.Tests/**;FeatherQuilld.Plugins/**;FeatherQuilld.Plugins.Sdk/**;FeatherQuilld.PluginSdk/**;plugins/**;featherpanel/**;fusequota/**;wings/**;deploy/**;scripts/**</DefaultItemExcludes>
+        <DefaultItemExcludes>$(DefaultItemExcludes);FeatherQuilld.Tests/**;FeatherQuilld.Plugins/**;FeatherQuilld.Plugins.Sdk/**;FeatherQuilld.PluginSdk/**;plugins/**;featherpanel/**;fusequota/**;wings/**;FeatherWings/**;deploy/**;scripts/**;packaging/**;dist/**</DefaultItemExcludes>
+        <!-- Used by scripts/build-deb.sh release publish; local `dotnet run` stays framework-dependent. -->
+        <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
+        <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
+        <IncludeNativeLibrariesForSelfExtract Condition="'$(RuntimeIdentifier)' != ''">true</IncludeNativeLibrariesForSelfExtract>
+        <EnableCompressionInSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</EnableCompressionInSingleFile>
     </PropertyGroup>
 
     <ItemGroup>

@@ -92,11 +92,14 @@ public static class SystemdServiceInstaller
                 return Path.GetFullPath(processPath);
         }
 
-        var published = Path.Combine(AppContext.BaseDirectory, "FeatherQuilld");
-        if (File.Exists(published))
-            return Path.GetFullPath(published);
+        foreach (var name in new[] { "featherquilld", "FeatherQuilld" })
+        {
+            var published = Path.Combine(AppContext.BaseDirectory, name);
+            if (File.Exists(published))
+                return Path.GetFullPath(published);
+        }
 
-        return FindOnPath("featherquilld");
+        return FindOnPath("featherquilld") ?? FindOnPath("FeatherQuilld");
     }
 
     private static string BuildUnitFile(string executable, string configPath, string? runAsUser)

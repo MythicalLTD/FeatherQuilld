@@ -164,11 +164,13 @@ public sealed class ConfigureSequence
     {
         AnsiConsole.WriteLine();
         ColoredConsole.WriteLine("&e&lUsage:&r");
-        ColoredConsole.WriteLine("  &7featherquilld configure&r                              &8Interactive wizard&r");
+        ColoredConsole.WriteLine("  &7featherquilld configure&r                              &8Interactive wizard (OAuth / join-data)&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--join-data &f<base64>&r      &8From FeatherPanel&r");
+        ColoredConsole.WriteLine("  &7featherquilld configure &b--panel-url &f<url>&r         &8OAuth quick setup&r");
+        ColoredConsole.WriteLine("  &7featherquilld configure &b--callback-host &f<ip>&r      &8Public IP for OAuth callback&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--install-service&r           &8Auto-install systemd&r");
         ColoredConsole.WriteLine("  &7featherquilld configure &b--no-service&r                &8Skip systemd setup&r");
-        ColoredConsole.WriteLine("  &7featherquilld configure &b--override&r                 &8Replace existing config&r");
+        ColoredConsole.WriteLine("  &7featherquilld configure &b--override&r                  &8Replace existing config&r");
         AnsiConsole.WriteLine();
     }
 

@@ -1,0 +1,218 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types: [published]
+
+jobs:
+  build-and-release:
+    name: Build and Create Release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Set deb version
+        id: deb_version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries and .deb packages
+        env:
+          PACKAGE_CHANNEL: prod
+          VERSION: ${{ steps.deb_version.outputs.version }}
+        run: ./scripts/build-deb.sh
+
+      - name: Extract changelog
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            sed -n "/^## ${REF:10}/,/^## /{/^## /b;p}" CHANGELOG.md > ./RELEASE_CHANGELOG || true
+          fi
+          if [ ! -s ./RELEASE_CHANGELOG ]; then
+            echo "FeatherQuilld ${{ steps.deb_version.outputs.version }}" > ./RELEASE_CHANGELOG
+          fi
+
+      - name: Create checksum and add to changelog
+        run: |
+          SUM=$(cd dist && sha256sum featherquilld_linux_amd64)
+          SUM2=$(cd dist && sha256sum featherquilld_linux_arm64)
+          SUM3=$(cd dist && sha256sum featherquilld_${{ steps.deb_version.outputs.version }}_amd64.deb)
+          SUM4=$(cd dist && sha256sum featherquilld_${{ steps.deb_version.outputs.version }}_arm64.deb)
+          echo -e "\n#### SHA256 Checksum\n\`\`\`\n$SUM\n$SUM2\n$SUM3\n$SUM4\n\`\`\`\n" >> ./RELEASE_CHANGELOG
+          echo -e "$SUM\n$SUM2\n$SUM3\n$SUM4" > checksums.txt
+
+      - name: Bump project version
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          VERSION="${REF:11}"
+          BRANCH="release/${REF:10}"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git checkout -b "${BRANCH}"
+          sed -i "s|<Version>.*</Version>|<Version>${VERSION}</Version>|" FeatherQuilld.csproj
+          sed -i "s|<InformationalVersion>.*</InformationalVersion>|<InformationalVersion>${VERSION}</InformationalVersion>|" FeatherQuilld.csproj
+          git add FeatherQuilld.csproj
+          git commit -m "bump version for release ${VERSION}" || true
+          git push -u origin "${BRANCH}"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref, 'rc') || contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
+          body_path: ./RELEASE_CHANGELOG
+          files: |
+            dist/featherquilld_linux_amd64
+            dist/featherquilld_linux_arm64
+            dist/featherquilld_${{ steps.deb_version.outputs.version }}_amd64.deb
+            dist/featherquilld_${{ steps.deb_version.outputs.version }}_arm64.deb
+            checksums.txt
+
+  upload-to-nexus:
+    name: Upload to Nexus APT Repository
+    if: github.event_name == 'release'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Download .deb release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mapfile -t deb_assets < <(gh release view "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --json assets \
+            -q '.assets[] | select(.name | endswith(".deb")) | .name')
+
+          if [ "${#deb_assets[@]}" -eq 0 ]; then
+            echo "No .deb assets found on release ${{ github.event.release.tag_name }}"
+            exit 1
+          fi
+
+          for asset in "${deb_assets[@]}"; do
+            gh release download "${{ github.event.release.tag_name }}" \
+              --repo "${{ github.repository }}" \
+              --pattern "${asset}" \
+              --dir dist
+          done
+
+      - name: Upload .deb packages to Nexus
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          NEXUS_HOST: https://apt.mythicalsystems.org
+          NEXUS_REPOSITORY: MythicalSystems
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NEXUS_USERNAME}" ] || [ -z "${NEXUS_PASSWORD}" ]; then
+            echo "NEXUS_USERNAME and NEXUS_PASSWORD secrets must be configured"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          deb_files=(dist/featherquilld_*.deb)
+
+          if [ "${#deb_files[@]}" -eq 0 ]; then
+            echo "No .deb files to upload"
+            exit 1
+          fi
+
+          for deb_file in "${deb_files[@]}"; do
+            case "$(basename "${deb_file}")" in
+              featherquilld-dev_*)
+                echo "Skipping unexpected -dev package on prod release: ${deb_file}"
+                continue
+                ;;
+            esac
+            set +e
+            ./scripts/nexus-upload-deb.sh "${deb_file}"
+            status=$?
+            set -e
+            if [ "${status}" -eq 1 ]; then
+              exit 1
+            fi
+          done
+
+  docker:
+    name: Push GHCR release
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Docker metadata
+        id: docker_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
+            type=ref,event=tag
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get Build Information
+        id: build_info
+        run: echo "version_tag=${GITHUB_REF/refs\/tags\/v/}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ steps.build_info.outputs.version_tag }}
+          labels: ${{ steps.docker_meta.outputs.labels }}
+          tags: ${{ steps.docker_meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

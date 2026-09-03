@@ -5,7 +5,7 @@ PORT         ?= 8989
 DOCKER_IMAGE ?= featherquilld
 DOCKER_TAG   ?= latest
 
-.PHONY: help restore build build-plugins ensure-fusequota build-fusequota build-fusequota-source run watch stop publish clean docker docker-run test fmt configure
+.PHONY: help restore build build-plugins ensure-fusequota build-fusequota build-fusequota-source run watch stop publish publish-linux deb deb-dev package clean docker docker-run test fmt configure
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -55,9 +55,28 @@ stop: ## Kill whatever is listening on PORT (default 8989)
 publish: build-plugins ## Publish single FeatherQuilld binary (fusequota fetched on first boot)
 	dotnet publish FeatherQuilld.csproj -c Release -o ./publish --nologo
 
+publish-linux: ## Publish self-contained linux-x64 + linux-arm64 binaries to dist/
+	PACKAGE_CHANNEL=dev ARCHES="amd64 arm64" bash scripts/build-deb.sh --binaries-only 2>/dev/null || \
+		PACKAGE_CHANNEL=dev bash scripts/build-deb.sh
+
+deb: ## Build featherquilld (prod) .deb for amd64 + arm64
+	PACKAGE_CHANNEL=prod bash scripts/build-deb.sh
+
+deb-dev: ## Build featherquilld-dev .deb for amd64 + arm64
+	PACKAGE_CHANNEL=dev bash scripts/build-deb.sh
+
+package: deb ## Build prod .deb and optionally upload to Nexus (set NEXUS_USERNAME + NEXUS_PASSWORD)
+	@if [ -n "$$NEXUS_USERNAME" ] && [ -n "$$NEXUS_PASSWORD" ]; then \
+		for f in dist/featherquilld_*.deb; do \
+			bash scripts/nexus-upload-deb.sh "$$f"; \
+		done; \
+	else \
+		echo "Skipping Nexus upload (NEXUS_USERNAME / NEXUS_PASSWORD not set)."; \
+	fi
+
 clean: ## Remove build artifacts
 	dotnet clean FeatherQuilld.slnx --nologo
-	rm -rf ./bin ./obj ./publish ./bins
+	rm -rf ./bin ./obj ./publish ./bins ./dist
 	-[ -d fusequota ] && $(MAKE) -C fusequota clean
 
 docker: ## Build Docker image

@@ -2,6 +2,10 @@ bin/
 obj/
 /packages/
 /bins/
+/dist/
+/publish/
+packaging/changelog.yaml
+packaging/featherquilld.metainfo.xml
 riderModule.iml
 /_ReSharper.Caches/
 logs/
@@ -20,3 +24,4 @@ config.cfg
 id_rsa
 sync.bash
 console.bash
+FeatherWings/
