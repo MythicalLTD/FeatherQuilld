@@ -303,17 +303,17 @@ internal static class ConfigurePrompts
             new()
             {
                 Mode = ConfigureInputMode.OAuth,
-                Label = $"[{Teal}]▸[/] [bold {Ink}]OAuth quick setup[/]   [grey](recommended · browser authorize)",
+                Label = $"[{Teal}]▸[/] [bold {Ink}]OAuth quick setup[/]   [grey](recommended · browser authorize)[/]",
             },
             new()
             {
                 Mode = ConfigureInputMode.JoinData,
-                Label = $"[{Teal}]▸[/] [bold {Ink}]Paste join-data[/]      [grey](FeatherPanel admin)",
+                Label = $"[{Teal}]▸[/] [bold {Ink}]Paste join-data[/]      [grey](FeatherPanel admin)[/]",
             },
             new()
             {
                 Mode = ConfigureInputMode.Manual,
-                Label = $"[{Teal}]▸[/] [bold {Ink}]Manual credentials[/]   [grey](panel · fqld_ token · secret)",
+                Label = $"[{Teal}]▸[/] [bold {Ink}]Manual credentials[/]   [grey](panel · fqld_ token · secret)[/]",
             },
         ];
     }
