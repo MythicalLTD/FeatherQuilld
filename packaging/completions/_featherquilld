@@ -1,0 +1,58 @@
+#compdef featherquilld quilld
+
+_featherquilld() {
+  local -a commands configure_opts
+  commands=(
+    'configure:Interactive wizard (OAuth / join-data)'
+    'help:Show usage'
+    'version:Print version'
+  )
+  configure_opts=(
+    '--join-data[Join YAML from FeatherPanel]:join data'
+    '--panel-url[Panel URL for OAuth setup]:url'
+    '--callback-host[Public IP for OAuth callback]:host'
+    '--allow-insecure[Allow insecure TLS to the panel]'
+    '--keep-oauth-key[Keep the temporary OAuth API key]'
+    '--node-name[Web node name]:name'
+    '--node-fqdn[Web node FQDN]:fqdn'
+    '--location-id[Web location id]:id'
+    '--daemon-listen[Daemon listen port]:port'
+    '--sftp-port[SFTP port]:port'
+    '--daemon-base[Daemon data directory]:directory:_files -/'
+    '--install-service[Install the systemd unit]'
+    '--no-service[Skip systemd setup]'
+    '--override[Replace an existing config]'
+    '--quiet[Non-interactive / quiet]'
+    '-q[Non-interactive / quiet]'
+    '--config[Config file]:file:_files'
+    '-c[Config file]:file:_files'
+    '--help[Show usage]'
+    '-h[Show usage]'
+  )
+
+  local cmd
+  integer i
+  for ((i = 2; i < CURRENT; i++)); do
+    case "${words[i]}" in
+      configure|help|version) cmd="${words[i]}"; break ;;
+      -c|--config) ((i++)) ;;
+    esac
+  done
+
+  if [[ -z "${cmd}" ]]; then
+    _arguments -C \
+      '(-h --help)'{-h,--help}'[Show usage]' \
+      '(-v --version)'{-v,--version}'[Print version]' \
+      '(-c --config)'{-c,--config}'[Config file]:file:_files' \
+      '1:command:->cmds' \
+      '*::arg:->args'
+    case "${state}" in
+      cmds) _describe -t commands 'command' commands ;;
+    esac
+    return
+  fi
+
+  if [[ "${cmd}" == configure ]]; then
+    _arguments -S $configure_opts
+  fi
+}

@@ -71,7 +71,10 @@ public static class StartupSelfTest
         AppLogger logger,
         BootReporter? reporter)
     {
-        logger.Info(LoggerTypes.SelfTest, "Running startup self-tests…");
+        if (reporter is not null)
+            logger.Info(LoggerTypes.SelfTest, "Running startup self-tests…");
+        else
+            logger.Debug(LoggerTypes.SelfTest, "Running live diagnostics checks…");
         logger.Debug(LoggerTypes.SelfTest, $"debug={config.Debug} quiet={config.Quiet}");
 
         var checks = new List<DiagnosticCheck>();
@@ -335,6 +338,7 @@ public static class StartupSelfTest
             var binary = PowerDnsProbe.ResolveBinary();
             if (binary is null)
             {
+                Warn("PowerDNS not installed — install the powerdns package for node DNS hosting", logger, reporter);
                 return new DiagnosticCheck(
                     "dns.powerdns",
                     "warn",
@@ -342,6 +346,7 @@ public static class StartupSelfTest
                     "Install the powerdns package from the host package manager for node DNS hosting.");
             }
 
+            Warn("PowerDNS is installed but the HTTP API is not reachable", logger, reporter);
             return new DiagnosticCheck(
                 "dns.powerdns",
                 "warn",
@@ -391,6 +396,7 @@ public static class StartupSelfTest
         }
         else
         {
+            Warn("Mail server not installed — install the mailserver package for SMTP/IMAP", logger, reporter);
             yield return new DiagnosticCheck(
                 "mail.stack",
                 "warn",

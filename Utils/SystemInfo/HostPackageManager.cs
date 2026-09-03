@@ -969,6 +969,8 @@ public sealed class HostPackageManager
         """
         set -e
         . /etc/os-release
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Use-Pty=0 gnupg curl ca-certificates
         curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
         if [ "${ID}" = "ubuntu" ]; then
           echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/ubuntu ${VERSION_CODENAME} nginx" > /etc/apt/sources.list.d/nginx.list

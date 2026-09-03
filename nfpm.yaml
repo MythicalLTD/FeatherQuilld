@@ -21,6 +21,7 @@ recommends:
   - curl
   - gnupg
   - docker-ce
+  - bash-completion
 conflicts:
   - "${NFPM_CONFLICT}"
 replaces:
@@ -56,6 +57,21 @@ contents:
       mode: 0644
   - src: packaging/README.Debian
     dst: /usr/share/doc/featherquilld/README.Debian
+    file_info:
+      mode: 0644
+  - src: packaging/completions/featherquilld.bash
+    dst: /usr/share/bash-completion/completions/featherquilld
+    file_info:
+      mode: 0644
+  - src: /usr/share/bash-completion/completions/featherquilld
+    dst: /usr/share/bash-completion/completions/quilld
+    type: symlink
+  - src: packaging/completions/_featherquilld
+    dst: /usr/share/zsh/vendor-completions/_featherquilld
+    file_info:
+      mode: 0644
+  - src: packaging/completions/featherquilld.fish
+    dst: /usr/share/fish/vendor_completions.d/featherquilld.fish
     file_info:
       mode: 0644
 

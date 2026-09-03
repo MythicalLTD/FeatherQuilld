@@ -21,6 +21,9 @@ Quick start
 Configuration lives in `/etc/featherquilld/config.yml`. The binary is installed
 to `/usr/local/bin/featherquilld`; a `quilld` symlink is created as a short alias.
 
+Tab completion for `quilld` and `featherquilld` is installed for bash, zsh, and
+fish. Open a new shell (or `source /etc/bash_completion`) after install.
+
 Channels
 --------
 

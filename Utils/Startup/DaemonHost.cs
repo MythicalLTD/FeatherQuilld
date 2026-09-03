@@ -118,7 +118,7 @@ public sealed class DaemonHost
                 ConfigurePipeline(app, config, pluginManager, logger);
                 return new BootStepResult();
             })
-            .Run(BuildSummary(config, pluginManager));
+            .Run(() => BuildSummary(config, pluginManager));
 
         ArgumentNullException.ThrowIfNull(app);
         ArgumentNullException.ThrowIfNull(pluginManager);

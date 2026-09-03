@@ -56,7 +56,7 @@ sudo featherquilld configure
 sudo systemctl enable --now featherquilld
 ```
 
-`quilld` is installed as a short alias for `featherquilld` (`sudo quilld configure` works the same).
+`quilld` is installed as a short alias for `featherquilld` (`sudo quilld configure` works the same). After install, `quilld <tab>` completes commands and flags in bash, zsh, and fish (open a new shell).
 
 ### One-liner (stable)
 

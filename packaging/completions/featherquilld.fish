@@ -1,0 +1,25 @@
+complete -c featherquilld -c quilld -f
+
+complete -c featherquilld -c quilld -n __fish_use_subcommand -a configure -d 'Interactive wizard (OAuth / join-data)'
+complete -c featherquilld -c quilld -n __fish_use_subcommand -a help -d 'Show usage'
+complete -c featherquilld -c quilld -n __fish_use_subcommand -a version -d 'Print version'
+
+complete -c featherquilld -c quilld -s h -l help -d 'Show usage'
+complete -c featherquilld -c quilld -s v -l version -d 'Print version'
+complete -c featherquilld -c quilld -s c -l config -r -d 'Config file'
+
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l join-data -d 'Join YAML from FeatherPanel'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l panel-url -d 'Panel URL for OAuth setup'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l callback-host -d 'Public IP for OAuth callback'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l allow-insecure -d 'Allow insecure TLS to the panel'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l keep-oauth-key -d 'Keep the temporary OAuth API key'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l node-name -d 'Web node name'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l node-fqdn -d 'Web node FQDN'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l location-id -d 'Web location id'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l daemon-listen -d 'Daemon listen port'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l sftp-port -d 'SFTP port'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l daemon-base -d 'Daemon data directory'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l install-service -d 'Install the systemd unit'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l no-service -d 'Skip systemd setup'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -l override -d 'Replace an existing config'
+complete -c featherquilld -c quilld -n '__fish_seen_subcommand_from configure' -s q -l quiet -d 'Non-interactive / quiet'

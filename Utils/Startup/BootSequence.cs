@@ -37,7 +37,13 @@ public sealed class BootSequence
         return this;
     }
 
-    public void Run(BootSummary? summary = null)
+    public void Run(BootSummary? summary = null) => Run(() => summary);
+
+    /// <summary>
+    /// Runs registered steps, then builds the ready panel.
+    /// The factory runs after steps so plugin counts and similar state are current.
+    /// </summary>
+    public void Run(Func<BootSummary?> summaryFactory)
     {
         var completed = new List<(string Label, BootStepResult Result)>();
 
@@ -67,6 +73,7 @@ public sealed class BootSequence
             return;
 
         AnsiConsole.WriteLine();
+        var summary = summaryFactory();
         if (summary is not null)
             AnsiConsole.Write(RenderSummary(summary));
 
