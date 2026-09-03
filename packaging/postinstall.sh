@@ -3,6 +3,7 @@ set -e
 
 CONFIG="/etc/featherquilld/config.yml"
 BINARY="/usr/local/bin/featherquilld"
+ALIAS="/usr/local/bin/quilld"
 SERVICE_UNIT="/lib/systemd/system/featherquilld.service"
 
 case "${1:-}" in
@@ -15,6 +16,10 @@ esac
 
 mkdir -p /etc/featherquilld /var/lib/featherquilld
 chmod 755 /etc/featherquilld /var/lib/featherquilld
+
+if [ -x "${BINARY}" ]; then
+  ln -sfn "${BINARY}" "${ALIAS}"
+fi
 
 systemctl daemon-reload || true
 

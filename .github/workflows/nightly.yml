@@ -125,7 +125,8 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           build-args: |
-            VERSION=dev-${{ steps.build_info.outputs.short_sha }}
+            VERSION=0.1.0
+            INFORMATIONAL_VERSION=dev-${{ steps.build_info.outputs.short_sha }}
           labels: ${{ steps.docker_meta.outputs.labels }}
           tags: ${{ steps.docker_meta.outputs.tags }}
           cache-from: type=gha

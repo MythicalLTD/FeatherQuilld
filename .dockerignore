@@ -25,7 +25,10 @@ LICENSE
 README.md
 featherpanel/
 wings/
+FeatherWings/
 fusequota/
+dist/
+packaging/
 id_rsa
 sync.bash
 **/.cursor

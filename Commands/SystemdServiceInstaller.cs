@@ -99,7 +99,7 @@ public static class SystemdServiceInstaller
                 return Path.GetFullPath(published);
         }
 
-        return FindOnPath("featherquilld") ?? FindOnPath("FeatherQuilld");
+        return FindOnPath("featherquilld") ?? FindOnPath("quilld") ?? FindOnPath("FeatherQuilld");
     }
 
     private static string BuildUnitFile(string executable, string configPath, string? runAsUser)

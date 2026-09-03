@@ -54,6 +54,8 @@ sudo featherquilld configure
 sudo systemctl enable --now featherquilld
 ```
 
+`quilld` is installed as a short alias for `featherquilld` (`sudo quilld configure` works the same).
+
 ### One-liner (stable)
 
 ```bash
@@ -80,7 +82,7 @@ sudo apt-get update && sudo apt-get install --only-upgrade featherquilld-dev
 
 ## Configuration wizard
 
-Run `featherquilld configure` to connect this machine to FeatherPanel as a web hosting node.
+Run `featherquilld configure` (or `quilld configure`) to connect this machine to FeatherPanel as a web hosting node.
 
 Three modes are available:
 

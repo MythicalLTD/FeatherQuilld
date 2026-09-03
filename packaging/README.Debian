@@ -11,13 +11,14 @@ Quick start
 1. Configure FeatherQuilld (OAuth quick setup or paste join-data):
 
        sudo featherquilld configure
+       # or: sudo quilld configure
 
 2. Enable and start the service:
 
        sudo systemctl enable --now featherquilld
 
 Configuration lives in `/etc/featherquilld/config.yml`. The binary is installed
-to `/usr/local/bin/featherquilld`.
+to `/usr/local/bin/featherquilld`; a `quilld` symlink is created as a short alias.
 
 Channels
 --------

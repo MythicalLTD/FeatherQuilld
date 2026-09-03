@@ -38,6 +38,9 @@ contents:
     dst: /usr/local/bin/featherquilld
     file_info:
       mode: 0755
+  - src: /usr/local/bin/featherquilld
+    dst: /usr/local/bin/quilld
+    type: symlink
   - src: packaging/featherquilld.service
     dst: /lib/systemd/system/featherquilld.service
     file_info:
