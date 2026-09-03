@@ -24,7 +24,7 @@ public static class SystemdServiceInstaller
     public const string DefaultUnitPath = "/etc/systemd/system/featherquilld.service";
 
     public static bool CanInstall() =>
-        OperatingSystem.IsLinux() && IsRoot();
+        OperatingSystem.IsLinux() && RootPrivileges.IsRoot();
 
     public static ServiceInstallResult Install(Config config)
     {
@@ -36,11 +36,11 @@ public static class SystemdServiceInstaller
             };
         }
 
-        if (!IsRoot())
+        if (!RootPrivileges.IsRoot())
         {
             return new ServiceInstallResult
             {
-                Message = "Systemd install requires root. Re-run with sudo configure …",
+                Message = "Systemd install requires root. Re-run with sudo quilld configure …",
             };
         }
 
@@ -62,7 +62,7 @@ public static class SystemdServiceInstaller
         }
 
         var unitPath = DefaultUnitPath;
-        var unit = BuildUnitFile(executable, config.FilePath, config.System.Username);
+        var unit = BuildUnitFile(executable, config.FilePath);
 
         Directory.CreateDirectory(Path.GetDirectoryName(unitPath)!);
         File.WriteAllText(unitPath, unit, Encoding.UTF8);
@@ -102,24 +102,20 @@ public static class SystemdServiceInstaller
         return FindOnPath("featherquilld") ?? FindOnPath("quilld") ?? FindOnPath("FeatherQuilld");
     }
 
-    private static string BuildUnitFile(string executable, string configPath, string? runAsUser)
+    private static string BuildUnitFile(string executable, string configPath)
     {
         var sb = new StringBuilder();
         sb.AppendLine("[Unit]");
         sb.AppendLine("Description=FeatherQuilld Web Node Daemon");
-        sb.AppendLine("After=network-online.target");
+        sb.AppendLine("Documentation=https://github.com/mythicalltd/featherquilld");
+        sb.AppendLine("After=docker.service network-online.target");
         sb.AppendLine("Wants=network-online.target");
+        sb.AppendLine("Requires=docker.service");
         sb.AppendLine();
         sb.AppendLine("[Service]");
         sb.AppendLine("Type=simple");
-
-        if (!string.IsNullOrWhiteSpace(runAsUser)
-            && !runAsUser.Equals("root", StringComparison.OrdinalIgnoreCase)
-            && UserExists(runAsUser))
-        {
-            sb.AppendLine($"User={runAsUser}");
-        }
-
+        sb.AppendLine("User=root");
+        sb.AppendLine("WorkingDirectory=/etc/featherquilld");
         sb.AppendLine($"ExecStart={Quote(executable)} --config {Quote(configPath)}");
         sb.AppendLine("Restart=on-failure");
         sb.AppendLine("RestartSec=5");
@@ -132,33 +128,6 @@ public static class SystemdServiceInstaller
 
     private static string Quote(string value) =>
         value.Contains(' ') ? $"\"{value}\"" : value;
-
-    private static bool UserExists(string username) =>
-        RunCommand("id", "-u", username) == 0;
-
-    private static bool IsRoot()
-    {
-        try
-        {
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = "id",
-                Arguments = "-u",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-            });
-
-            if (process is null)
-                return false;
-
-            process.WaitForExit();
-            return process.StandardOutput.ReadToEnd().Trim() == "0";
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     private static int RunSystemctl(params string[] args)
     {

@@ -1,8 +1,9 @@
 [Unit]
 Description=FeatherQuilld Web Node Daemon
 Documentation=https://github.com/mythicalltd/featherquilld
-After=network-online.target
+After=docker.service network-online.target
 Wants=network-online.target
+Requires=docker.service
 ConditionPathExists=/etc/featherquilld/config.yml
 
 [Service]

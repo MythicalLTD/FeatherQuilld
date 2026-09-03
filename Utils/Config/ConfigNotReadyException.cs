@@ -11,13 +11,11 @@ public sealed class ConfigNotReadyException : Exception
         """
         FeatherQuilld is not set up for this user.
 
-        The daemon will not start until this machine is joined to FeatherPanel.
-        That writes /etc/featherquilld/config.yml (root required):
+        The daemon will not start until this machine is joined to FeatherPanel
+        as root (Docker, bind-mounts, and system paths):
 
           sudo quilld configure
           sudo systemctl enable --now featherquilld
-
-        Or start the binary on a TTY — it opens the setup wizard automatically.
         """;
 
     public ConfigNotReadyException()

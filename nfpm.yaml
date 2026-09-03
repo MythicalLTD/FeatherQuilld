@@ -20,6 +20,7 @@ depends:
 recommends:
   - curl
   - gnupg
+  - docker-ce
 conflicts:
   - "${NFPM_CONFLICT}"
 replaces:

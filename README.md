@@ -2,6 +2,8 @@
 
 FeatherQuilld is FeatherPanel's web hosting node daemon — light as a feather, sharp as a quill. It manages WebSpaces, reverse proxy (Caddy / nginx / Traefik), SFTP/FTP, and exposes an HTTP API for FeatherPanel.
 
+The production daemon **runs as root**, same as FeatherWings: it talks to Docker, bind-mounts volumes, and owns `/etc/featherquilld` and `/var/lib/featherquilld`. Do not start it as a regular user — use `sudo quilld configure` then `systemctl`.
+
 ## Installation via APT (Debian/Ubuntu)
 
 FeatherQuilld is available from the MythicalSystems APT repository in two channels:

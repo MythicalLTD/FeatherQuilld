@@ -1,9 +1,10 @@
 FeatherQuilld for Debian
 ========================
 
-FeatherQuilld is the web hosting node daemon for FeatherPanel. It runs as a
-systemd service, manages WebSpaces, and exposes an HTTP API plus SFTP/FTP for
-the panel.
+FeatherQuilld is the web hosting node daemon for FeatherPanel. It runs as
+**root** (same as FeatherWings): Docker, bind-mounts, and paths under
+`/etc/featherquilld` and `/var/lib/featherquilld` require it. Install Docker
+Engine (`docker-ce`) before starting the service.
 
 Quick start
 -----------

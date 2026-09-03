@@ -32,11 +32,17 @@ public static class Program
 
         if (IsConfigureCommand(args))
         {
+            var configurePath = ResolveConfigPath(args) ?? Config.DefaultPath();
+            if (!EnsureRootFor(configurePath))
+                return;
+
             Environment.Exit(ConfigureCommand.Run(args));
             return;
         }
 
         var configPath = ResolveConfigPath(args) ?? Config.DefaultPath();
+        if (!EnsureRootFor(configPath))
+            return;
 
         if (NeedsSetup(configPath))
         {
@@ -111,12 +117,27 @@ public static class Program
         try { Console.WriteLine(); } catch { /* ignore */ }
     }
 
+    private static bool EnsureRootFor(string configPath)
+    {
+        if (!RootPrivileges.RequiresRoot(configPath) || RootPrivileges.IsRoot())
+            return true;
+
+        PrintHint(RootPrivileges.Hint);
+        Environment.Exit(1);
+        return false;
+    }
+
     private static void PrintNotReady(Exception ex)
     {
         var message = ex is ConfigNotReadyException
             ? ex.Message
             : $"{ex.Message}\n\n{ConfigNotReadyException.Hint}";
 
+        PrintHint(message);
+    }
+
+    private static void PrintHint(string message)
+    {
         Console.Error.WriteLine();
         ColoredConsole.WriteLine("&c&lFeatherQuilld cannot start&r");
         Console.Error.WriteLine();
