@@ -103,7 +103,6 @@ for arch in ${ARCHES}; do
     -p:PublishSingleFile=true \
     -p:IncludeNativeLibrariesForSelfExtract=true \
     -p:EnableCompressionInSingleFile=true \
-    -p:AssemblyName=featherquilld \
     -p:Version="${VERSION%%~*}" \
     -p:InformationalVersion="${VERSION}" \
     -o "${publish_dir}" \
