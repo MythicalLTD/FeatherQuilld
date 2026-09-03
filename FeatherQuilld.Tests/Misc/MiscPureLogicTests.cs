@@ -88,6 +88,20 @@ public class ColoredConsoleTests
         Assert.Contains("Hello", plain);
         Assert.Contains("World", plain);
     }
+
+    [Fact]
+    public void LiteralToMarkup_KeepsQueryAmpersands()
+    {
+        const string url =
+            "https://panel.example/oauth?name=node&callbackurl=http://10.0.0.1:1/callback&mode=server&appName=FeatherQuilld";
+
+        var markup = ColoredConsole.LiteralToMarkup("&b", url);
+
+        Assert.Contains("&callbackurl=", markup);
+        Assert.Contains("&mode=server", markup);
+        Assert.Contains("&appName=FeatherQuilld", markup);
+        Assert.DoesNotContain("&callbackurl=", ColoredConsole.ToMarkup("&b" + url));
+    }
 }
 
 public class FuseQuotaPathTests

@@ -100,18 +100,18 @@ public static class ConfigureOAuth
 
         ColoredConsole.WriteLine($"&a✓&r &7Using node IP &f{callbackHost}&r");
         ColoredConsole.WriteLine("&8FeatherPanel will send credentials to:&r");
-        ColoredConsole.WriteLine($"&f{callbackUrl}&r");
+        ColoredConsole.WriteLineLiteral("&f", callbackUrl);
         ColoredConsole.WriteLine("&8Ensure this port is open in your firewall and reachable from the panel.&r");
         AnsiConsole.WriteLine();
         ColoredConsole.WriteLine("&8Open this URL in your browser and approve the request:&r");
         AnsiConsole.WriteLine();
-        ColoredConsole.WriteLine($"&b{consentUrl}&r");
+        ColoredConsole.WriteLineLiteral("&b", consentUrl);
         AnsiConsole.WriteLine();
 
         if (TryOpenBrowser(consentUrl))
             ColoredConsole.WriteLine("&8Opened your browser — waiting for panel delivery…&r");
         else
-            ColoredConsole.WriteLine("&8Waiting for panel delivery…&r");
+            ColoredConsole.WriteLine("&8Open the URL above in your browser — waiting for panel delivery…&r");
         AnsiConsole.WriteLine();
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -378,22 +378,13 @@ public static class ConfigureOAuth
         try
         {
             if (OperatingSystem.IsLinux())
-            {
-                Process.Start(new ProcessStartInfo("xdg-open", url) { UseShellExecute = false });
-                return true;
-            }
+                return TryOpenLinuxBrowser(url);
 
             if (OperatingSystem.IsMacOS())
-            {
-                Process.Start(new ProcessStartInfo("open", url) { UseShellExecute = false });
-                return true;
-            }
+                return LaunchSilently("open", url);
 
             if (OperatingSystem.IsWindows())
-            {
-                Process.Start(new ProcessStartInfo("cmd", $"/c start {url}") { UseShellExecute = false });
-                return true;
-            }
+                return LaunchSilently("cmd", "/c", "start", "", url);
         }
         catch
         {
@@ -401,6 +392,196 @@ public static class ConfigureOAuth
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// <c>sudo quilld configure</c> has no X/Wayland session. Open as SUDO_USER
+    /// when possible; never dump xdg-open errors into the wizard.
+    /// </summary>
+    private static bool TryOpenLinuxBrowser(string url)
+    {
+        var sudoUser = Environment.GetEnvironmentVariable("SUDO_USER");
+        if (RootPrivileges.IsRoot())
+        {
+            if (!string.IsNullOrWhiteSpace(sudoUser)
+                && !sudoUser.Equals("root", StringComparison.Ordinal)
+                && TryOpenLinuxBrowserAsUser(sudoUser, url))
+                return true;
+
+            // Root's xdg-open cannot talk to the user's display and only
+            // prints "cannot open display" / "no method available" noise.
+            return false;
+        }
+
+        return LaunchSilently("xdg-open", url);
+    }
+
+    private static bool TryOpenLinuxBrowserAsUser(string user, string url)
+    {
+        var uid = TryReadUserId(user);
+        var home = TryReadHomeDirectory(user) ?? $"/home/{user}";
+
+        var display = Environment.GetEnvironmentVariable("DISPLAY");
+        var wayland = Environment.GetEnvironmentVariable("WAYLAND_DISPLAY");
+        var xauth = Environment.GetEnvironmentVariable("XAUTHORITY");
+
+        if (uid is not null
+            && string.IsNullOrWhiteSpace(wayland)
+            && Directory.Exists($"/run/user/{uid}/wayland-0"))
+            wayland = "wayland-0";
+
+        if (string.IsNullOrWhiteSpace(display) && string.IsNullOrWhiteSpace(wayland))
+            display = ":0";
+
+        if (string.IsNullOrWhiteSpace(xauth))
+        {
+            var candidate = Path.Combine(home, ".Xauthority");
+            if (File.Exists(candidate))
+                xauth = candidate;
+        }
+
+        var psi = NewHiddenProcess();
+        if (TryFindRunuser() is { } runuser)
+        {
+            psi.FileName = runuser;
+            psi.ArgumentList.Add("-u");
+            psi.ArgumentList.Add(user);
+            psi.ArgumentList.Add("--");
+        }
+        else
+        {
+            psi.FileName = "sudo";
+            psi.ArgumentList.Add("-n");
+            psi.ArgumentList.Add("-u");
+            psi.ArgumentList.Add(user);
+            psi.ArgumentList.Add("--");
+        }
+
+        psi.ArgumentList.Add("env");
+        psi.ArgumentList.Add($"HOME={home}");
+        if (uid is not null)
+        {
+            psi.ArgumentList.Add($"XDG_RUNTIME_DIR=/run/user/{uid}");
+            psi.ArgumentList.Add($"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus");
+        }
+
+        if (!string.IsNullOrWhiteSpace(display))
+            psi.ArgumentList.Add($"DISPLAY={display}");
+        if (!string.IsNullOrWhiteSpace(wayland))
+            psi.ArgumentList.Add($"WAYLAND_DISPLAY={wayland}");
+        if (!string.IsNullOrWhiteSpace(xauth))
+            psi.ArgumentList.Add($"XAUTHORITY={xauth}");
+        psi.ArgumentList.Add("xdg-open");
+        psi.ArgumentList.Add(url);
+
+        return LaunchSilently(psi);
+    }
+
+    private static string? TryFindRunuser()
+    {
+        foreach (var path in new[] { "/usr/sbin/runuser", "/usr/bin/runuser" })
+        {
+            if (File.Exists(path))
+                return path;
+        }
+
+        return null;
+    }
+
+    private static uint? TryReadUserId(string user) =>
+        uint.TryParse(ReadCommandOutput("id", "-u", user), out var uid) ? uid : null;
+
+    private static string? TryReadHomeDirectory(string user)
+    {
+        var passwd = ReadCommandOutput("getent", "passwd", user);
+        if (string.IsNullOrWhiteSpace(passwd))
+            return null;
+
+        var parts = passwd.Split(':');
+        return parts.Length >= 6 && !string.IsNullOrWhiteSpace(parts[5]) ? parts[5] : null;
+    }
+
+    private static string? ReadCommandOutput(string fileName, params string[] args)
+    {
+        try
+        {
+            var psi = NewHiddenProcess();
+            psi.FileName = fileName;
+            foreach (var arg in args)
+                psi.ArgumentList.Add(arg);
+
+            using var process = Process.Start(psi);
+            if (process is null)
+                return null;
+
+            var text = process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            return process.WaitForExit(1000) ? text.Trim() : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool LaunchSilently(string fileName, params string[] args)
+    {
+        var psi = NewHiddenProcess();
+        psi.FileName = fileName;
+        foreach (var arg in args)
+            psi.ArgumentList.Add(arg);
+        return LaunchSilently(psi);
+    }
+
+    private static ProcessStartInfo NewHiddenProcess() => new()
+    {
+        UseShellExecute = false,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        CreateNoWindow = true,
+    };
+
+    private static bool LaunchSilently(ProcessStartInfo psi)
+    {
+        try
+        {
+            var process = Process.Start(psi);
+            if (process is null)
+                return false;
+
+            _ = DrainAsync(process);
+
+            // xdg-open returns quickly; a hang means a browser likely started.
+            if (!process.WaitForExit(1500))
+                return true;
+
+            try
+            {
+                return process.ExitCode == 0;
+            }
+            finally
+            {
+                process.Dispose();
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task DrainAsync(Process process)
+    {
+        try
+        {
+            await Task.WhenAll(
+                process.StandardOutput.ReadToEndAsync(),
+                process.StandardError.ReadToEndAsync()).ConfigureAwait(false);
+        }
+        catch
+        {
+            /* ignore */
+        }
     }
 
     private static async Task<CreateWebNodeRequest> PromptWebNodeDetailsAsync(

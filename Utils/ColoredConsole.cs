@@ -23,6 +23,20 @@ public static partial class ColoredConsole
     public static void WriteLinePlain(string message) =>
         AnsiConsole.WriteLine(message);
 
+    /// <summary>
+    /// Writes <paramref name="literal"/> in the given Minecraft color without
+    /// parsing <c>&amp;</c> codes inside it (URLs, paths, tokens).
+    /// </summary>
+    public static void WriteLineLiteral(string codes, string literal) =>
+        AnsiConsole.MarkupLine(LiteralToMarkup(codes, literal));
+
+    public static string LiteralToMarkup(string codes, string literal)
+    {
+        const char placeholder = '\uE000';
+        var styled = ToMarkup(codes + placeholder);
+        return styled.Replace(placeholder.ToString(), Markup.Escape(literal), StringComparison.Ordinal);
+    }
+
     public static string StripCodes(string message) =>
         CodePattern.Replace(message, string.Empty);
 
