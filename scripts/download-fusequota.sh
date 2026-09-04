@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Optional dev helper — production nodes auto-download fusequota via FeatherQuilld on first boot.
+# Optional dev helper production nodes auto-download fusequota via FeatherQuilld on first boot.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

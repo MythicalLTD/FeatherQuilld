@@ -43,7 +43,7 @@ public sealed class WebSpace
     public long BandwidthUsedBytes { get; set; }
     [JsonPropertyName("bandwidth_period_start")]
     public string BandwidthPeriodStart { get; set; } = "";
-    /// <summary>Panel suspend flag — blocks proxy and stops runtime when synced.</summary>
+    /// <summary>Panel suspend flag blocks proxy and stops runtime when synced.</summary>
     public bool Suspended { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;

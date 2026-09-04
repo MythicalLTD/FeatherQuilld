@@ -46,7 +46,7 @@ public class PluginManagerTests
     public void DiscoverAndLoad_HelloPluginFolder_LoadsPlugin()
     {
         var helloDll = typeof(FeatherQuilld.Plugins.Hello.HelloPlugin).Assembly.Location;
-        Assert.True(File.Exists(helloDll), "Hello plugin assembly missing — build Hello first.");
+        Assert.True(File.Exists(helloDll), "Hello plugin assembly missing build Hello first.");
 
         var dir = Path.Combine(Path.GetTempPath(), "fq-plugins-" + Guid.NewGuid());
         var pluginDir = Path.Combine(dir, "hello");
@@ -60,7 +60,7 @@ public class PluginManagerTests
             enabled: true
             """);
 
-        // Sdk may be needed beside plugin depending on load context — copy if present next to Hello.
+        // Sdk may be needed beside plugin depending on load context copy if present next to Hello.
         var sdkBeside = Path.Combine(Path.GetDirectoryName(helloDll)!, "FeatherQuilld.Plugins.dll");
         if (File.Exists(sdkBeside))
             File.Copy(sdkBeside, Path.Combine(pluginDir, "FeatherQuilld.Plugins.dll"), overwrite: true);

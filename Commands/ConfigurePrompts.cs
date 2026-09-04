@@ -185,7 +185,7 @@ internal static class ConfigurePrompts
 
         if (locations.Count == 0)
         {
-            ColoredConsole.WriteLine("&8No web locations on the panel yet — create one to continue.&r");
+            ColoredConsole.WriteLine("&8No web locations on the panel yet create one to continue.&r");
             AnsiConsole.WriteLine();
             return await PromptCreateWebLocationAsync(panel, ct).ConfigureAwait(false);
         }
@@ -223,7 +223,7 @@ internal static class ConfigurePrompts
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Panel(new Markup(Mc(
                 "&7Create a &fweb&7 location on FeatherPanel (Admin → Locations).&r\n" +
-                "&8Same API as FeatherWings — type is set to &fweb&8 automatically.&r")))
+                "&8Same API as FeatherWings type is set to &fweb&8 automatically.&r")))
             .Header("[bold] new location [/]", Justify.Center)
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.FromHex(Teal))
@@ -249,7 +249,7 @@ internal static class ConfigurePrompts
                 .AllowEmpty());
 
         var flagCode = AnsiConsole.Prompt(
-            new TextPrompt<string>(Mc("&b›&r &7Flag code&r &8(optional — e.g. us, de, at)&r"))
+            new TextPrompt<string>(Mc("&b›&r &7Flag code&r &8(optional e.g. us, de, at)&r"))
                 .PromptStyle(new Style(Color.FromHex(Teal)))
                 .AllowEmpty());
 
@@ -302,7 +302,7 @@ internal static class ConfigurePrompts
                 : (!string.IsNullOrWhiteSpace(nodeIp) ? nodeIp : hostname);
             fqdnPrompt = panelHttps
                 ? "&b›&r &7FQDN or IP the panel uses to reach this node&r"
-                : "&b›&r &7FQDN or IP&r &8(panel is HTTP/IP — match how the panel reaches this machine)&r";
+                : "&b›&r &7FQDN or IP&r &8(panel is HTTP/IP match how the panel reaches this machine)&r";
         }
         else
         {
@@ -332,7 +332,7 @@ internal static class ConfigurePrompts
 
     private static string FormatLocationLabel(AdminPanelLocation location)
     {
-        // Spectre treats [DE] as markup — escape names and flag brackets.
+        // Spectre treats [DE] as markup escape names and flag brackets.
         var name = Markup.Escape(location.Name);
         var flag = string.IsNullOrWhiteSpace(location.FlagCode)
             ? ""
@@ -362,7 +362,7 @@ internal static class ConfigurePrompts
 
     public static bool PromptRevokeOAuthKey(string keyName)
     {
-        var description = "Recommended — the node is registered and this key is no longer needed.";
+        var description = "Recommended the node is registered and this key is no longer needed.";
         if (!string.IsNullOrWhiteSpace(keyName))
             description = $"{description} ({keyName})";
 
@@ -385,7 +385,7 @@ internal static class ConfigurePrompts
         return AnsiConsole.Prompt(
             new TextPrompt<string>(Mc("&b›&r &7Paste join-data&r"))
                 .PromptStyle(new Style(Color.FromHex(Teal)))
-                .ValidationErrorMessage(Mc("&cInvalid join-data — expected base64 YAML from FeatherPanel.&r"))
+                .ValidationErrorMessage(Mc("&cInvalid join-data expected base64 YAML from FeatherPanel.&r"))
                 .Validate(input =>
                 {
                     if (string.IsNullOrWhiteSpace(input))
@@ -429,7 +429,7 @@ internal static class ConfigurePrompts
                 .Secret());
 
         var uuidText = AnsiConsole.Prompt(
-            new TextPrompt<string>(Mc("&b›&r &7Node UUID&r &8(optional — leave blank to generate)&r"))
+            new TextPrompt<string>(Mc("&b›&r &7Node UUID&r &8(optional leave blank to generate)&r"))
                 .PromptStyle(new Style(Color.FromHex(Teal)))
                 .AllowEmpty());
 

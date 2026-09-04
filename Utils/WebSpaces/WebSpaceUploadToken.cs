@@ -43,7 +43,7 @@ public static class WebSpaceUploadToken
         if (!long.TryParse(segments[3], out var exp) || exp < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
             return false;
 
-        // Signature validated by caller with config — static helper used from controller with injected config
+        // Signature validated by caller with config static helper used from controller with injected config
         payload = new WebSpaceUploadTokenPayload
         {
             WebSpaceUuid = tokenUuid,

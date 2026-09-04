@@ -678,7 +678,6 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 return false;
 
             var dataPath = DataPath(uuid);
-            var useFuse = _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota;
 
             try { _runtime.RemoveAsync(uuid).GetAwaiter().GetResult(); }
             catch (Exception ex) { _logger?.Warning(LoggerTypes.WebSpaces, $"runtime remove: {ex.Message}"); }
@@ -686,18 +685,16 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             try { _installer.CleanupAsync(uuid).GetAwaiter().GetResult(); }
             catch (Exception ex) { _logger?.Warning(LoggerTypes.WebSpaces, $"installer cleanup: {ex.Message}"); }
 
-            if (useFuse)
+            // Always best-effort destroy leftover FUSE mounts may remain after mode=none.
+            try
             {
-                try
-                {
-                    var limiter = new FuseQuotaLimiter(
-                        _config, uuid, dataPath, space.DiskLimitBytes, _logger);
-                    limiter.DestroyAsync().GetAwaiter().GetResult();
-                }
-                catch (Exception ex)
-                {
-                    _logger?.Warning(LoggerTypes.Disk, $"fusequota destroy {uuid}: {ex.Message}");
-                }
+                var limiter = new FuseQuotaLimiter(
+                    _config, uuid, dataPath, space.DiskLimitBytes, _logger);
+                limiter.DestroyAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(LoggerTypes.Disk, $"fusequota destroy {uuid}: {ex.Message}");
             }
 
             try
@@ -936,7 +933,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     {
         try
         {
-            // Caddy stores certs under ~/.local/share/caddy or /var/lib/caddy — best-effort probe.
+            // Caddy stores certs under ~/.local/share/caddy or /var/lib/caddy best-effort probe.
             var candidates = new[]
             {
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -981,11 +978,33 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         return DataPath(uuid);
     }
 
+    /// <summary>
+    /// Path for interactive file access (SFTP/FTP). Falls back to the source volume when
+    /// FuseQuota is configured but the mount socket is unhealthy.
+    /// </summary>
+    public string ResolveAccessFsPath(Guid uuid, AppLogger? logger = null)
+    {
+        if (_config.System.EffectiveDiskLimiterMode != DiskLimiterModeKind.FuseQuota)
+            return DataPath(uuid);
+
+        var dataPath = DataPath(uuid);
+        var limiter = new FuseQuotaLimiter(_config, uuid, dataPath, 0, logger);
+        var healthy = limiter.IsSocketFunctionalAsync().GetAwaiter().GetResult()
+                      && Directory.Exists(limiter.MountPath);
+        if (healthy)
+            return limiter.MountPath;
+
+        logger?.Warning(
+            LoggerTypes.Disk,
+            $"fusequota unhealthy for {uuid}; using DataPath for SFTP/FTP access");
+        return dataPath;
+    }
+
     public string GetRuntimeLogs(Guid uuid, int lines = 100, string? query = null, bool regex = false, int searchScanLines = 10_000)
     {
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
-            return "(static WebSpace — no runtime container logs)\n";
+            return "(static WebSpace no runtime container logs)\n";
 
         var text = _runtime.GetLogsAsync(uuid, Math.Clamp(searchScanLines, lines, 10_000)).GetAwaiter().GetResult();
         if (string.IsNullOrWhiteSpace(query))
@@ -1064,7 +1083,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
         if (!WebSpaceRuntime.NeedsContainer(space.Runtime))
         {
-            yield return "(static WebSpace — no runtime container logs)";
+            yield return "(static WebSpace no runtime container logs)";
             yield break;
         }
 
@@ -1671,7 +1690,8 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     {
         if (_config.System.EffectiveDiskLimiterMode != DiskLimiterModeKind.FuseQuota)
         {
-            _logger?.Debug(LoggerTypes.Disk, "Skipping fusequota attach (limiter mode none)");
+            _logger?.Debug(LoggerTypes.Disk, "Limiter mode none destroying any leftover fusequota mounts");
+            DestroyAllFuseMounts();
             return;
         }
 
@@ -1694,6 +1714,41 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             {
                 _logger?.Warning(LoggerTypes.Disk, $"Failed to attach fusequota for {space.Uuid}: {ex.Message}");
             }
+        }
+    }
+
+    private void DestroyAllFuseMounts()
+    {
+        var seen = new HashSet<Guid>();
+        foreach (var space in _spaces.Values)
+        {
+            seen.Add(space.Uuid);
+            TryDestroyFuseMount(space.Uuid, DataPath(space.Uuid), space.DiskLimitBytes);
+        }
+
+        var vmountRoot = _config.System.VmountDirectory;
+        if (!Directory.Exists(vmountRoot))
+            return;
+
+        foreach (var dir in Directory.EnumerateDirectories(vmountRoot))
+        {
+            if (!Guid.TryParse(Path.GetFileName(dir), out var uuid) || !seen.Add(uuid))
+                continue;
+
+            TryDestroyFuseMount(uuid, DataPath(uuid), diskLimitBytes: 0);
+        }
+    }
+
+    private void TryDestroyFuseMount(Guid uuid, string dataPath, long diskLimitBytes)
+    {
+        try
+        {
+            var limiter = new FuseQuotaLimiter(_config, uuid, dataPath, diskLimitBytes, _logger);
+            limiter.DestroyAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(LoggerTypes.Disk, $"fusequota destroy {uuid}: {ex.Message}");
         }
     }
 

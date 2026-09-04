@@ -8,6 +8,9 @@ public interface IPanelClient
 {
     Task<AppConfig> FetchRuntimeConfigAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>Raw runtime YAML from the panel (preserves which keys were omitted cuz im just stupid (╯°□°）╯︵ ┻━┻)).</summary>
+    Task<string> FetchRuntimeConfigYamlAsync(CancellationToken cancellationToken = default);
+
     Task<PanelHealthResponse> FetchHealthAsync(CancellationToken cancellationToken = default);
 
     Task<PanelWebSpaceConfig> FetchWebSpaceAsync(Guid uuid, CancellationToken cancellationToken = default);
@@ -42,7 +45,7 @@ public interface IPanelClient
         string? publicKey = null,
         CancellationToken cancellationToken = default);
 
-    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/acme-dns — set or clear ACME DNS-01 TXT via panel PowerDNS.</summary>
+    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/acme-dns set or clear ACME DNS-01 TXT via panel PowerDNS.</summary>
     Task AcmeDnsAsync(
         Guid uuid,
         string action,

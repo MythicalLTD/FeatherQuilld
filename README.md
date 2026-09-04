@@ -1,8 +1,8 @@
 # FeatherQuilld
 
-FeatherQuilld is FeatherPanel's web hosting node daemon — light as a feather, sharp as a quill. It manages WebSpaces, reverse proxy (Caddy / nginx / Traefik), SFTP/FTP, and exposes an HTTP API for FeatherPanel.
+FeatherQuilld is FeatherPanel's web hosting node daemon light as a feather, sharp as a quill. It manages WebSpaces, reverse proxy (Caddy / nginx / Traefik), SFTP/FTP, and exposes an HTTP API for FeatherPanel.
 
-The production daemon **runs as root**, same as FeatherWings: it talks to Docker, bind-mounts volumes, and owns `/etc/featherquilld` and `/var/lib/featherquilld`. Do not start it as a regular user — use `sudo quilld configure` then `systemctl`.
+The production daemon **runs as root**, same as FeatherWings: it talks to Docker, bind-mounts volumes, and owns `/etc/featherquilld` and `/var/lib/featherquilld`. Do not start it as a regular user use `sudo quilld configure` then `systemctl`.
 
 ## Installation via APT (Debian/Ubuntu)
 
@@ -169,8 +169,8 @@ make package          # build prod .deb and upload to Nexus if creds set
 
 FeatherQuilld integrates with FeatherPanel via the `/api/quilld-remote/*` API prefix using a dedicated `fqld_` Bearer token separate from game node tokens. Configuration is two-phase:
 
-1. **Join / bootstrap config** — minimal YAML passed via `--join-data` at install time
-2. **Runtime config** — fetched from `GET /api/quilld-remote/config` on startup
+1. **Join / bootstrap config** minimal YAML passed via `--join-data` at install time
+2. **Runtime config** fetched from `GET /api/quilld-remote/config` on startup
 
 Ports (defaults): HTTP API `8989` · SFTP `2222`
 
@@ -178,6 +178,6 @@ Ports (defaults): HTTP API `8989` · SFTP `2222`
 
 ## Links
 
-- [FeatherPanel](https://github.com/mythicalltd/featherpanel) — the panel this daemon integrates with
-- [FeatherWings](https://github.com/mythicalltd/featherwings) — game server node daemon (same publish pipeline pattern)
+- [FeatherPanel](https://github.com/mythicalltd/featherpanel) the panel this daemon integrates with
+- [FeatherWings](https://github.com/mythicalltd/featherwings) game server node daemon (same publish pipeline pattern)
 - Issues: [github.com/mythicalltd/featherquilld/issues](https://github.com/mythicalltd/featherquilld/issues)

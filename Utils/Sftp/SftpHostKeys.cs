@@ -79,7 +79,7 @@ public static class SftpHostKeys
 
     private static HostKeyMaterial EnsureRsa(string dir, AppLogger? logger, bool dssFallback = false)
     {
-        // FxSsh host keys use XML RSA material (dss not generated — fall back to RSA).
+        // FxSsh host keys use XML RSA material (dss not generated fall back to RSA).
         var path = Path.Combine(dir, "id_rsa.xml");
         if (!File.Exists(path))
         {

@@ -34,7 +34,7 @@ public sealed class SftpHostKeysTests
             Assert.False(string.IsNullOrWhiteSpace(material.FingerprintSha256));
             Assert.StartsWith("SHA256:", material.FingerprintSha256!);
 
-            // Idempotent — second call reuses the same files.
+            // Idempotent second call reuses the same files.
             var again = SftpHostKeys.EnsureHostKey(config);
             Assert.Equal(material.PrivateKeyPath, again.PrivateKeyPath);
             Assert.Equal(material.FingerprintSha256, again.FingerprintSha256);

@@ -30,6 +30,9 @@ public class ApiSslConfig
     public bool Enabled { get; set; }
     public string Cert { get; set; } = "cert.pem";
     public string Key { get; set; } = "key.pem";
+
+    /// <summary>Optional password for PKCS#12 (.pfx / .p12) certificates.</summary>
+    public string Password { get; set; } = "";
 }
 
 public class RemoteDownloadConfig

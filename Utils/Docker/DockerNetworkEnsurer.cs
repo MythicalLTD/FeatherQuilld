@@ -117,7 +117,7 @@ public static class DockerNetworkEnsurer
         catch (DockerApiException ex) when (IsSubnetOverlap(ex))
         {
             logger?.Warning(LoggerTypes.Application,
-                $"Docker network '{name}' subnet {v4.Subnet} overlaps an existing network — creating with auto IPAM");
+                $"Docker network '{name}' subnet {v4.Subnet} overlaps an existing network creating with auto IPAM");
             create.IPAM = null;
             create.EnableIPv6 = false;
             try

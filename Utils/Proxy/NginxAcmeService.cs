@@ -121,7 +121,7 @@ public sealed class NginxAcmeService
         var resolved = (email ?? _config.System.Proxy.AcmeEmail)?.Trim();
         if (string.IsNullOrWhiteSpace(resolved))
         {
-            _logger?.Debug(LoggerTypes.Proxy, "nginx ACME skipped — no acme_email");
+            _logger?.Debug(LoggerTypes.Proxy, "nginx ACME skipped no acme_email");
             return;
         }
 
@@ -178,13 +178,13 @@ public sealed class NginxAcmeService
         var resolved = (email ?? _config.System.Proxy.AcmeEmail)?.Trim();
         if (string.IsNullOrWhiteSpace(resolved))
         {
-            _logger?.Debug(LoggerTypes.Proxy, "nginx ACME DNS-01 skipped — no acme_email");
+            _logger?.Debug(LoggerTypes.Proxy, "nginx ACME DNS-01 skipped no acme_email");
             return;
         }
 
         if (_panel is null)
         {
-            _logger?.Warning(LoggerTypes.Proxy, "nginx ACME DNS-01 skipped — no panel client");
+            _logger?.Warning(LoggerTypes.Proxy, "nginx ACME DNS-01 skipped no panel client");
             return;
         }
 

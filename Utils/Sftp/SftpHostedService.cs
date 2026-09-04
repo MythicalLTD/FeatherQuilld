@@ -446,7 +446,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
 
     private SftpAuthResult? AuthenticateCore(string authMethod, string username, string password, string? publicKey)
     {
-        return WebSpaceAccessRoot.Resolve(_panel, _spaces, authMethod, username, password, publicKey);
+        return WebSpaceAccessRoot.Resolve(_panel, _spaces, authMethod, username, password, publicKey, _logger);
     }
 
     private RootedSftpSession OpenSession(object channelOrTransport, SftpAuthResult auth, string? username)

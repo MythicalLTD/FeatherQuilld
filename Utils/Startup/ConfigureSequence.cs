@@ -127,7 +127,7 @@ public sealed class ConfigureSequence
             var status = reporter.Status;
             var activeLabel = string.IsNullOrWhiteSpace(status)
                 ? label + new string('.', frame % 3 + 1)
-                : $"{label} — {status}";
+                : $"{label} {status}";
 
             ctx.UpdateTarget(BuildChecklist(completed, activeIndex, activeLabel, showEllipsis: string.IsNullOrWhiteSpace(status)));
             ctx.Refresh();
@@ -279,7 +279,7 @@ public sealed class ConfigureSequence
         rows.Add(new Text(""));
         rows.Add(new Markup(ColoredConsole.ToMarkup(
             summary.ServiceStarted
-                ? "&8Daemon is live — &fsystemctl status featherquilld&r"
+                ? "&8Daemon is live &fsystemctl status featherquilld&r"
                 : "&8Start the daemon: &fsystemctl start featherquilld&r &8(or &ffeatherquilld&8 for foreground)&r")));
 
         return new Panel(new Rows(rows))

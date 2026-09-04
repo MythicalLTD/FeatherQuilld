@@ -28,7 +28,7 @@ public sealed class MailManager
         imap_open = MailProbe.ImapReachable(_config),
         deliverability_hint = MailProbe.PortOpen(25)
             ? null
-            : "SMTP port 25 is not listening — inbound MX and many providers require it; also set PTR/rDNS for outbound.",
+            : "SMTP port 25 is not listening inbound MX and many providers require it; also set PTR/rDNS for outbound.",
     };
 
     public IReadOnlyList<string> ListDomains()
@@ -255,7 +255,7 @@ public sealed class MailManager
             }
             catch
             {
-                // Container may still be starting — retry until file appears.
+                // Container may still be starting retry until file appears.
             }
 
             if (MailDnsHelper.IsDkimReady(_config, domain))

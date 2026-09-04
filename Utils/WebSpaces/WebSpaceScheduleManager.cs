@@ -64,7 +64,7 @@ public sealed class WebSpaceScheduleManager(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Soft shutdown / host stop — do not treat as a sync failure.
+            // Soft shutdown / host stop do not treat as a sync failure.
             throw;
         }
         catch (Exception ex)
@@ -168,7 +168,7 @@ public sealed class WebSpaceScheduleManager(
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Race with schedule completion — still treat as aborted.
+                    // Race with schedule completion still treat as aborted.
                 }
             }
 

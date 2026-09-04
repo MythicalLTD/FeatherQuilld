@@ -32,7 +32,7 @@ public sealed class HelloPlugin : IPlugin
 
         context.Events.On<ApplicationStartedEvent>(_ =>
         {
-            context.Logger.LogInformation("Host is up — {Name} is live.", Metadata.Name);
+            context.Logger.LogInformation("Host is up {Name} is live.", Metadata.Name);
             return HookResult.Continue();
         });
 

@@ -24,7 +24,7 @@ public class SystemConfig
     public string VmountDirectory { get; set; } = "/var/lib/featherquilld/vmounts";
     public string FusequotaPath { get; set; } = "fusequota";
 
-    /// <summary><c>none</c> or <c>fuse_quota</c>. Default is FuseQuota; empty/none + quotas.enabled → fuse_quota.</summary>
+    /// <summary><c>none</c> or <c>fuse_quota</c>. Default is FuseQuota. Explicit <c>none</c>/<c>off</c>/<c>disabled</c> hard-disables FUSE.</summary>
     public string DiskLimiterMode { get; set; } = "fuse_quota";
 
     public ProxyConfig Proxy { get; set; } = new();
@@ -37,7 +37,9 @@ public class SystemConfig
     public QuotasConfig Quotas { get; set; } = new();
 
     /// <summary>
-    /// Effective limiter: FuseQuota by default; explicit <c>none</c> disables unless quotas.enabled.
+    /// Effective limiter: FuseQuota by default; explicit <c>none</c>/<c>off</c>/<c>disabled</c>
+    /// always means no FuseQuota (even when <c>quotas.enabled</c> is true) so Node/npm and
+    /// operators can opt out of FUSE passthrough limitations.
     /// </summary>
     [YamlIgnore]
     public DiskLimiterModeKind EffectiveDiskLimiterMode
@@ -45,10 +47,10 @@ public class SystemConfig
         get
         {
             var mode = (DiskLimiterMode ?? "fuse_quota").Trim().ToLowerInvariant().Replace('-', '_');
+            if (mode is "none" or "off" or "disabled")
+                return DiskLimiterModeKind.None;
             if (mode is "fuse_quota" or "fusequota" or "")
                 return DiskLimiterModeKind.FuseQuota;
-            if (mode is "none" or "off" or "disabled")
-                return Quotas.Enabled ? DiskLimiterModeKind.FuseQuota : DiskLimiterModeKind.None;
             if (Quotas.Enabled)
                 return DiskLimiterModeKind.FuseQuota;
             return DiskLimiterModeKind.None;

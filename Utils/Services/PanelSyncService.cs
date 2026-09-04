@@ -30,7 +30,7 @@ public sealed class PanelSyncService : BackgroundService
     {
         if (!_config.HasPanelCredentials())
         {
-            _logger?.Info(LoggerTypes.Application, "Panel sync disabled — no remote credentials configured.");
+            _logger?.Info(LoggerTypes.Application, "Panel sync disabled no remote credentials configured.");
             return;
         }
 
@@ -46,7 +46,7 @@ public sealed class PanelSyncService : BackgroundService
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Soft shutdown — do not log as panel sync failure.
+            // Soft shutdown do not log as panel sync failure.
         }
     }
 
@@ -84,13 +84,13 @@ public sealed class PanelSyncService : BackgroundService
         _state.MaintenanceMode = health.Data?.Node?.MaintenanceMode ?? false;
 
         if (_state.MaintenanceMode)
-            _logger?.Warning(LoggerTypes.Application, "Panel reports maintenance mode — daemon marked unhealthy.");
+            _logger?.Warning(LoggerTypes.Application, "Panel reports maintenance mode daemon marked unhealthy.");
     }
 
     private async Task SyncConfigAsync(CancellationToken cancellationToken)
     {
-        var runtime = await _panelClient.FetchRuntimeConfigAsync(cancellationToken);
-        _config.MergeRuntime(runtime);
+        var runtimeYaml = await _panelClient.FetchRuntimeConfigYamlAsync(cancellationToken);
+        _config.MergeRuntimeYaml(runtimeYaml);
         _config.EnsureDirectories();
         _config.Save();
         _logger?.Info(LoggerTypes.Application, "Runtime config synced from panel.");

@@ -79,7 +79,7 @@ public static class SystemdServiceInstaller
             UnitPath = unitPath,
             Message = started
                 ? "Service installed and started."
-                : "Service installed — check journalctl -u featherquilld.",
+                : "Service installed check journalctl -u featherquilld.",
         };
     }
 

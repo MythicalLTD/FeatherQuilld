@@ -8,7 +8,7 @@ using System.Text.Json.Serialization;
 using FeatherQuilld.Utils;
 using FeatherQuilld.Utils.Remote;
 using Spectre.Console;
-// HttpListener intentionally avoided — TcpListener works without URL ACLs on Linux.
+// HttpListener intentionally avoided TcpListener works without URL ACLs on Linux.
 
 namespace FeatherQuilld.Commands;
 
@@ -133,9 +133,9 @@ public static class ConfigureOAuth
         AnsiConsole.WriteLine();
 
         if (TryOpenBrowser(consentUrl))
-            ColoredConsole.WriteLine("&8Opened your browser — waiting for panel delivery…&r");
+            ColoredConsole.WriteLine("&8Opened your browser waiting for panel delivery…&r");
         else
-            ColoredConsole.WriteLine("&8Open the URL above in your browser — waiting for panel delivery…&r");
+            ColoredConsole.WriteLine("&8Open the URL above in your browser waiting for panel delivery…&r");
         AnsiConsole.WriteLine();
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -295,14 +295,14 @@ public static class ConfigureOAuth
         {
             if (candidates.Count == 0)
                 throw new InvalidOperationException(
-                    "Could not detect this machine's public IP — set --callback-host to this node's IP address.");
+                    "Could not detect this machine's public IP set --callback-host to this node's IP address.");
             if (candidates.Count == 1)
                 return candidates[0].Host;
             var outbound = candidates.FirstOrDefault(c => c.Source == "outbound");
             if (!string.IsNullOrEmpty(outbound.Host))
                 return outbound.Host;
             throw new InvalidOperationException(
-                $"Multiple public IPs detected — set --callback-host to this node's IP address.");
+                $"Multiple public IPs detected set --callback-host to this node's IP address.");
         }
 
         return ConfigurePrompts.PromptCallbackHost(candidates.Select(c => (c.Host, c.Source)).ToList());

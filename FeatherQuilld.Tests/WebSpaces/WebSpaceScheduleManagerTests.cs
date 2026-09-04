@@ -92,6 +92,9 @@ public sealed class WebSpaceScheduleManagerTests
         public Task<AppConfig> FetchRuntimeConfigAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(new AppConfig());
 
+        public Task<string> FetchRuntimeConfigYamlAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(string.Empty);
+
         public Task<PanelHealthResponse> FetchHealthAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(new PanelHealthResponse { Success = true });
 

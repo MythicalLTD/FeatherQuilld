@@ -1,5 +1,6 @@
 using FeatherQuilld.Utils.Remote;
 using FeatherQuilld.Utils.Sftp;
+using AppLogger = FeatherQuilld.Utils.Logger.Logger;
 
 namespace FeatherQuilld.Utils.WebSpaces;
 
@@ -12,7 +13,8 @@ public static class WebSpaceAccessRoot
         string authMethod,
         string username,
         string password,
-        string? publicKey = null)
+        string? publicKey = null,
+        AppLogger? logger = null)
     {
         var result = panel.AuthenticateSftpAsync(authMethod, username, password, publicKey)
             .GetAwaiter().GetResult();
@@ -23,7 +25,7 @@ public static class WebSpaceAccessRoot
         if (!Guid.TryParse(result.Server, out var uuid) || spaces.Get(uuid) is null)
             return null;
 
-        var basePath = spaces.EffectiveFsPath(uuid);
+        var basePath = spaces.ResolveAccessFsPath(uuid, logger);
         var relative = WebSpaceStore.NormalizeDocumentRoot(result.RelativeRoot);
         result.RootPath = string.IsNullOrEmpty(relative)
             ? basePath

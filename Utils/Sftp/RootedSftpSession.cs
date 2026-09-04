@@ -441,7 +441,7 @@ public sealed class RootedSftpSession : IDisposable
         var id = r.ReadUInt32();
         var path = r.ReadString();
         var pflags = r.ReadUInt32();
-        _ = r.ReadAttrs(); // desired attrs — ignored on open
+        _ = r.ReadAttrs(); // desired attrs ignored on open
 
         var wantsWrite = (pflags & (FxfWrite | FxfAppend | FxfCreat | FxfTrunc | FxfExcl)) != 0;
         if (_readOnly && wantsWrite)
@@ -898,7 +898,7 @@ public sealed class RootedSftpSession : IDisposable
                 }
             }
 
-            // Permissions / uid/gid: best-effort no-op on platforms without chmod — still OK (partial).
+            // Permissions / uid/gid: best-effort no-op on platforms without chmod still OK (partial).
             if ((attrs.Flags & AttrPermissions) != 0 && OperatingSystem.IsLinux())
             {
                 try

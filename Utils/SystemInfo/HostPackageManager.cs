@@ -476,7 +476,7 @@ public sealed class HostPackageManager
         }
 
         return PowerDnsProbe.ResolveBinary() is not null
-            ? HostPackageOperationResult.Ok("powerdns installed — open port 53/tcp+udp on this host for authoritative DNS")
+            ? HostPackageOperationResult.Ok("powerdns installed open port 53/tcp+udp on this host for authoritative DNS")
             : HostPackageOperationResult.Fail("powerdns package installed but pdns_server not found on PATH");
     }
 
@@ -498,7 +498,7 @@ public sealed class HostPackageManager
         _ = RunShellAsync(packageId, "freshclam 2>/dev/null || true", logger, ct);
 
         return ClamAvProbe.IsAvailable()
-            ? HostPackageOperationResult.Ok("clamav installed — run freshclam if virus definitions are outdated")
+            ? HostPackageOperationResult.Ok("clamav installed run freshclam if virus definitions are outdated")
             : HostPackageOperationResult.Fail("clamav packages installed but clamscan was not found on PATH");
     }
 
@@ -515,31 +515,43 @@ public sealed class HostPackageManager
         if (!apt.Success)
             return apt;
 
+        if (!ModSecuritySetup.TryPrepare(out var modSecConf, out var crsSetup, out var rulesInclude, out var prepareError))
+        {
+            logger?.Warning(LoggerTypes.Application, $"ModSecurity post-install incomplete: {prepareError}");
+            return HostPackageOperationResult.Fail(
+                $"modsecurity packages installed but configuration is incomplete: {prepareError}");
+        }
+
         try
         {
-            Directory.CreateDirectory("/etc/nginx/modsec");
-            var mainConf = """
-                Include /etc/modsecurity/modsecurity.conf
-                Include /usr/share/modsecurity-crs/crs-setup.conf
-                Include /usr/share/modsecurity-crs/rules/*.conf
-                """;
-            await File.WriteAllTextAsync("/etc/nginx/modsec/main.conf", mainConf, ct).ConfigureAwait(false);
-            if (!File.Exists("/etc/nginx/modsecurity.conf"))
+            Directory.CreateDirectory(Path.GetDirectoryName(ModSecuritySetup.MainConfPath)!);
+            var mainConf = ModSecuritySetup.BuildMainConf(modSecConf, crsSetup, rulesInclude);
+            await File.WriteAllTextAsync(ModSecuritySetup.MainConfPath, mainConf, ct).ConfigureAwait(false);
+
+            if (!File.Exists(ModSecuritySetup.NginxModSecurityConfPath))
             {
                 await File.WriteAllTextAsync(
-                    "/etc/nginx/modsecurity.conf",
-                    "Include /etc/nginx/modsec/main.conf\n",
+                    ModSecuritySetup.NginxModSecurityConfPath,
+                    $"Include {ModSecuritySetup.MainConfPath}\n",
                     ct).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
         {
             logger?.Warning(LoggerTypes.Application, $"ModSecurity post-install config failed: {ex.Message}");
+            return HostPackageOperationResult.Fail($"modsecurity packages installed but config write failed: {ex.Message}");
+        }
+
+        if (!ModSecuritySetup.IsValidRulesFile(ModSecuritySetup.MainConfPath))
+        {
+            return HostPackageOperationResult.Fail(
+                "modsecurity packages installed but /etc/nginx/modsec/main.conf Includes are not valid");
         }
 
         return ModSecurityProbe.IsAvailable()
             ? HostPackageOperationResult.Ok("modsecurity installed for nginx — reload nginx after enabling WAF on WebSpaces")
-            : HostPackageOperationResult.Fail("modsecurity packages installed but CRS/module paths were not detected");
+            : HostPackageOperationResult.Fail(
+                "modsecurity packages and rules installed but the nginx modsecurity module was not detected");
     }
 
     private async Task<HostPackageOperationResult> RemoveModSecurityAsync(
@@ -642,7 +654,7 @@ public sealed class HostPackageManager
             return up;
 
         return MailProbe.ContainerRunning(_config)
-            ? HostPackageOperationResult.Ok("mailserver installed — open ports 25/587/993/tcp on this host")
+            ? HostPackageOperationResult.Ok("mailserver installed open ports 25/587/993/tcp on this host")
             : HostPackageOperationResult.Fail("mailserver compose finished but container is not running");
     }
 
@@ -698,7 +710,7 @@ public sealed class HostPackageManager
             return up;
 
         return WebmailProbe.ContainerRunning(_config)
-            ? HostPackageOperationResult.Ok($"webmail installed — http://127.0.0.1:{WebmailPaths.DefaultPort}")
+            ? HostPackageOperationResult.Ok($"webmail installed http://127.0.0.1:{WebmailPaths.DefaultPort}")
             : HostPackageOperationResult.Fail("webmail compose finished but container is not running");
     }
 

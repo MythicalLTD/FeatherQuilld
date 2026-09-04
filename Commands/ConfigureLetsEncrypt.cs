@@ -133,7 +133,7 @@ public static class ConfigureLetsEncrypt
         if (!generate)
         {
             throw new InvalidOperationException(
-                $"A TLS certificate is required for {domain} — generate one with certbot or place certificates under {LiveDir}/{domain}/.");
+                $"A TLS certificate is required for {domain} generate one with certbot or place certificates under {LiveDir}/{domain}/.");
         }
 
         var email = ResolveEmail(contactEmail);
@@ -236,8 +236,8 @@ public static class ConfigureLetsEncrypt
             AnsiConsole.WriteLine();
 
             var httpLabel = report.PointsToServer
-                ? "HTTP verification (port 80) — recommended"
-                : "HTTP verification (port 80) — requires DNS pointing here first";
+                ? "HTTP verification (port 80) recommended"
+                : "HTTP verification (port 80) requires DNS pointing here first";
 
             var choices = new List<VerificationChoice>
             {
@@ -945,7 +945,7 @@ public static class ConfigureLetsEncrypt
             var status = reporter.Status;
             var activeLabel = string.IsNullOrWhiteSpace(status)
                 ? label + new string('.', frame % 3 + 1)
-                : $"{label} — {status}";
+                : $"{label} {status}";
             ctx.UpdateTarget(BuildCertChecklist(completed, activeIndex, activeLabel));
             ctx.Refresh();
             Thread.Sleep(160);
@@ -1016,7 +1016,7 @@ public static class ConfigureLetsEncrypt
             choices.Add(new(RecoveryAction.Nginx, "Try again using the nginx plugin"));
         if (config.Method != IssuanceMethod.Webroot)
             choices.Add(new(RecoveryAction.Webroot, "Try again using webroot mode"));
-        choices.Add(new(RecoveryAction.Recheck, "I already installed the certificate — check again"));
+        choices.Add(new(RecoveryAction.Recheck, "I already installed the certificate check again"));
         choices.Add(new(RecoveryAction.ChangeDomain, "Use a different domain"));
         choices.Add(new(RecoveryAction.Cancel, "Cancel setup"));
 
@@ -1096,7 +1096,7 @@ public static class ConfigureLetsEncrypt
         }
 
         if (!BinaryOnPath("apt-get"))
-            throw new InvalidOperationException("certbot is not installed — install certbot on this machine and try again.");
+            throw new InvalidOperationException("certbot is not installed install certbot on this machine and try again.");
 
         reporter.Progress("Installing Certbot and plugins…");
         RunShell(ct, "apt-get", "update");
@@ -1198,7 +1198,7 @@ public static class ConfigureLetsEncrypt
         var (exit, output) = RunCertbot(ct, "renew", "--dry-run");
         if (exit != 0)
         {
-            reporter.Detail("&eRenewal dry-run failed — check certbot timer manually&r");
+            reporter.Detail("&eRenewal dry-run failed check certbot timer manually&r");
             var summary = ExtractCertbotDetail(output) ?? LastMeaningfulLine(output);
             if (!string.IsNullOrWhiteSpace(summary))
                 reporter.Detail("&8" + summary + "&r");
@@ -1237,13 +1237,13 @@ public static class ConfigureLetsEncrypt
         {
             var lower = detail.ToLowerInvariant();
             if (lower.Contains("nxdomain") || lower.Contains("dns problem"))
-                return detail + " — create an A/AAAA record for this hostname pointing at this machine, then retry";
+                return detail + " create an A/AAAA record for this hostname pointing at this machine, then retry";
             if (lower.Contains("connection") || lower.Contains("timeout") || lower.Contains("unreachable"))
-                return detail + " — check firewall / that port 80 is reachable from the internet";
+                return detail + " check firewall / that port 80 is reachable from the internet";
             if (lower.Contains("unauthorized") || lower.Contains("invalid response"))
-                return detail + " — HTTP-01 failed; stop whatever answers on port 80 for this hostname, then retry";
+                return detail + " HTTP-01 failed; stop whatever answers on port 80 for this hostname, then retry";
             if (lower.Contains("rate limit"))
-                return detail + " — wait for the Let's Encrypt rate limit window or use another domain";
+                return detail + " wait for the Let's Encrypt rate limit window or use another domain";
             return detail;
         }
 
@@ -1255,7 +1255,7 @@ public static class ConfigureLetsEncrypt
         if (string.IsNullOrWhiteSpace(line)
             || line.Contains("community.letsencrypt.org", StringComparison.OrdinalIgnoreCase)
             || line.Contains("See the logfile", StringComparison.OrdinalIgnoreCase))
-            return $"certbot failed (exit {exitCode}) — check /var/log/letsencrypt/letsencrypt.log";
+            return $"certbot failed (exit {exitCode}) check /var/log/letsencrypt/letsencrypt.log";
 
         return line;
     }
@@ -1375,7 +1375,7 @@ public static class ConfigureLetsEncrypt
                 }
                 catch (Exception ex)
                 {
-                    reporter.Detail($"&eWarning: failed to restart {unit} — run: systemctl start {unit} ({ex.Message})&r");
+                    reporter.Detail($"&eWarning: failed to restart {unit} run: systemctl start {unit} ({ex.Message})&r");
                 }
             }
         }

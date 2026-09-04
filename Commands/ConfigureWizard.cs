@@ -20,7 +20,7 @@ public sealed record ConfigureWizardResult
 }
 
 /// <summary>
-/// Interactive setup wizard — OAuth, join-data paste, or manual credentials.
+/// Interactive setup wizard OAuth, join-data paste, or manual credentials.
 /// </summary>
 public static class ConfigureWizard
 {

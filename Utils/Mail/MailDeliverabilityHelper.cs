@@ -19,7 +19,7 @@ public static class MailDeliverabilityHelper
 
         if (publicIp.Length == 0 || !IPAddress.TryParse(publicIp, out _))
         {
-            return new PtrCheck("warn", expectedHost, publicIp, null, "Public IP is unknown — PTR cannot be verified.");
+            return new PtrCheck("warn", expectedHost, publicIp, null, "Public IP is unknown PTR cannot be verified.");
         }
 
         try

@@ -42,7 +42,7 @@ public sealed class MicrosoftLoggerProvider(Logger logger) : ILoggerProvider
             if (exception is not null)
             {
                 var text = string.IsNullOrEmpty(message) ? exception.Message : message;
-                // Cancellation during soft shutdown is expected — never escalate to ERROR.
+                // Cancellation during soft shutdown is expected never escalate to ERROR.
                 if (exception is OperationCanceledException or TaskCanceledException &&
                     level < LoggerLevel.Error)
                 {

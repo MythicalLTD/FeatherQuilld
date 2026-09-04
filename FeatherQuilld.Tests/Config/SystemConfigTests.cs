@@ -27,9 +27,18 @@ public class SystemConfigTests
     }
 
     [Fact]
-    public void EffectiveDiskLimiter_FuseWhenQuotasEnabled()
+    public void EffectiveDiskLimiter_NoneIgnoresQuotasEnabled()
     {
         var sys = new SystemConfig { DiskLimiterMode = "none", Quotas = { Enabled = true } };
-        Assert.Equal(DiskLimiterModeKind.FuseQuota, sys.EffectiveDiskLimiterMode);
+        Assert.Equal(DiskLimiterModeKind.None, sys.EffectiveDiskLimiterMode);
+    }
+
+    [Theory]
+    [InlineData("off")]
+    [InlineData("disabled")]
+    public void EffectiveDiskLimiter_NoneAliases(string mode)
+    {
+        var sys = new SystemConfig { DiskLimiterMode = mode, Quotas = { Enabled = true } };
+        Assert.Equal(DiskLimiterModeKind.None, sys.EffectiveDiskLimiterMode);
     }
 }

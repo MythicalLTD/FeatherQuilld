@@ -1,6 +1,6 @@
 namespace FeatherQuilld.Plugins.Events;
 
-/// <summary>Event bus that never invokes handlers — safe default when plugins are disabled.</summary>
+/// <summary>Event bus that never invokes handlers safe default when plugins are disabled.</summary>
 public sealed class NoOpEventBus : IEventBus
 {
     public static NoOpEventBus Instance { get; } = new();

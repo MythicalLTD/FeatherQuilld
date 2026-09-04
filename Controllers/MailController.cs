@@ -47,7 +47,7 @@ public sealed class MailController : ControllerBase
             imap_open = MailProbe.ImapReachable(config),
             deliverability_hint = MailProbe.PortOpen(25)
                 ? null
-                : "SMTP port 25 is not listening — inbound MX and many providers require it; also set PTR/rDNS for outbound.",
+                : "SMTP port 25 is not listening inbound MX and many providers require it; also set PTR/rDNS for outbound.",
         });
     }
 

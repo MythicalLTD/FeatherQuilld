@@ -6,7 +6,7 @@ namespace FeatherQuilld.Utils.Startup;
 /// <summary>
 /// Boot checklist with a framed ready summary.
 /// Falls back to silent execution when quiet or stdout is not a TTY.
-/// Step work always runs outside Spectre Live — ASP.NET and our logger write to stdout.
+/// Step work always runs outside Spectre Live ASP.NET and our logger write to stdout.
 /// </summary>
 public sealed class BootSequence
 {

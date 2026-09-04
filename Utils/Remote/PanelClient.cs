@@ -42,14 +42,16 @@ public sealed class PanelClient : IPanelClient
 
     public async Task<AppConfig> FetchRuntimeConfigAsync(CancellationToken cancellationToken = default)
     {
-        var yaml = await SendWithRetryAsync(
+        var yaml = await FetchRuntimeConfigYamlAsync(cancellationToken);
+        return AppConfig.DeserializeYaml(yaml);
+    }
+
+    public Task<string> FetchRuntimeConfigYamlAsync(CancellationToken cancellationToken = default) =>
+        SendWithRetryAsync(
             HttpMethod.Get,
             _config.Remote.ConfigPath,
             acceptYaml: true,
             cancellationToken);
-
-        return AppConfig.DeserializeYaml(yaml);
-    }
 
     public async Task<PanelHealthResponse> FetchHealthAsync(CancellationToken cancellationToken = default)
     {
@@ -68,7 +70,7 @@ public sealed class PanelClient : IPanelClient
         return response;
     }
 
-    /// <summary>GET /api/quilld-remote/webspaces/{uuid} — full WebSpace settings from the panel.</summary>
+    /// <summary>GET /api/quilld-remote/webspaces/{uuid} full WebSpace settings from the panel.</summary>
     public async Task<PanelWebSpaceConfig> FetchWebSpaceAsync(
         Guid uuid,
         CancellationToken cancellationToken = default)
@@ -82,7 +84,7 @@ public sealed class PanelClient : IPanelClient
         return UnwrapData<PanelWebSpaceConfig>(json, $"webspace {uuid}");
     }
 
-    /// <summary>GET /api/quilld-remote/webspaces/{uuid}/install — egg install script from the panel.</summary>
+    /// <summary>GET /api/quilld-remote/webspaces/{uuid}/install egg install script from the panel.</summary>
     public async Task<PanelInstallScript> FetchWebSpaceInstallAsync(
         Guid uuid,
         CancellationToken cancellationToken = default)
@@ -96,7 +98,7 @@ public sealed class PanelClient : IPanelClient
         return UnwrapData<PanelInstallScript>(json, $"webspace install {uuid}");
     }
 
-    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/install — report install completion.</summary>
+    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/install report install completion.</summary>
     public async Task ReportWebSpaceInstallAsync(
         Guid uuid,
         bool successful,
@@ -116,7 +118,7 @@ public sealed class PanelClient : IPanelClient
             throw BuildHttpError(response.StatusCode, $"/api/quilld-remote/webspaces/{uuid}/install", body);
     }
 
-    /// <summary>PATCH /api/quilld-remote/webspaces/{uuid} — sync backend_port + runtime state.</summary>
+    /// <summary>PATCH /api/quilld-remote/webspaces/{uuid} sync backend_port + runtime state.</summary>
     public async Task SyncWebSpaceStateAsync(
         Guid uuid,
         int backendPort,
@@ -140,7 +142,7 @@ public sealed class PanelClient : IPanelClient
             throw BuildHttpError(response.StatusCode, $"/api/quilld-remote/webspaces/{uuid}", body);
     }
 
-    /// <summary>POST /api/quilld-remote/transfers/{uuid} — report transfer outcome.</summary>
+    /// <summary>POST /api/quilld-remote/transfers/{uuid} report transfer outcome.</summary>
     public async Task ReportTransferAsync(
         Guid uuid,
         bool successful,
@@ -159,7 +161,7 @@ public sealed class PanelClient : IPanelClient
             throw BuildHttpError(response.StatusCode, $"/api/quilld-remote/transfers/{uuid}", body);
     }
 
-    /// <summary>POST /api/quilld-remote/activity — batch activity ingest.</summary>
+    /// <summary>POST /api/quilld-remote/activity batch activity ingest.</summary>
     public async Task ReportActivitiesAsync(
         IReadOnlyList<PanelActivityEntry> entries,
         CancellationToken cancellationToken = default)
@@ -191,7 +193,7 @@ public sealed class PanelClient : IPanelClient
             throw BuildHttpError(response.StatusCode, "/api/quilld-remote/activity", body);
     }
 
-    /// <summary>POST /api/quilld-remote/sftp/auth — authenticate SFTP user for a WebSpace.</summary>
+    /// <summary>POST /api/quilld-remote/sftp/auth authenticate SFTP user for a WebSpace.</summary>
     public async Task<Utils.Sftp.SftpAuthResult?> AuthenticateSftpAsync(
         string type,
         string username,
@@ -227,7 +229,7 @@ public sealed class PanelClient : IPanelClient
         }
     }
 
-    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/acme-dns — set/clear ACME DNS-01 TXT via panel.</summary>
+    /// <summary>POST /api/quilld-remote/webspaces/{uuid}/acme-dns set/clear ACME DNS-01 TXT via panel.</summary>
     public async Task AcmeDnsAsync(
         Guid uuid,
         string action,
@@ -339,7 +341,7 @@ public sealed class PanelClient : IPanelClient
             if (attempt < attempts)
             {
                 var delaySeconds = RetryDelaySeconds(attempt);
-                Report(attempt, attempts, path, $"Failed — retry in {delaySeconds:0}s");
+                Report(attempt, attempts, path, $"Failed retry in {delaySeconds:0}s");
                 await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
             }
         }

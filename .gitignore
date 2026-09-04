@@ -17,7 +17,7 @@ config.cfg
 *.user
 *.DotSettings.user
 
-# Reference clones only — not part of FeatherQuilld
+# Reference clones only not part of FeatherQuilld
 /wings/
 /fusequota/
 /featherpanel/

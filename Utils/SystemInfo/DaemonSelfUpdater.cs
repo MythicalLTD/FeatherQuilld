@@ -96,8 +96,8 @@ public sealed class DaemonSelfUpdater
                 var restarted = ScheduleReplaceAndRestart(target, stagingPath, logger);
                 return SelfUpdateResult.Ok(
                     restarted
-                        ? "Update staged — FeatherQuilld will restart shortly."
-                        : "Update staged — restart featherquilld manually to apply.",
+                        ? "Update staged FeatherQuilld will restart shortly."
+                        : "Update staged restart featherquilld manually to apply.",
                     restarted);
             }
             finally

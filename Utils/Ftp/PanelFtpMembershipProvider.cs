@@ -32,7 +32,7 @@ internal sealed class PanelFtpMembershipProvider : IMembershipProvider
         if (_config.DisablePasswordAuth)
             return Task.FromResult(new MemberValidationResult(MemberValidationStatus.InvalidLogin));
 
-        var auth = WebSpaceAccessRoot.Resolve(_panel, _spaces, "password", username, password);
+        var auth = WebSpaceAccessRoot.Resolve(_panel, _spaces, "password", username, password, logger: _logger);
         if (auth is null || string.IsNullOrWhiteSpace(auth.RootPath))
         {
             _logger?.Debug(LoggerTypes.Application, $"FTP auth failed for user={username}");

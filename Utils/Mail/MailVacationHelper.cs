@@ -66,7 +66,7 @@ public static class MailVacationHelper
             }
             catch
             {
-                // Maildir may not exist until first delivery — config copy covers next setup.
+                // Maildir may not exist until first delivery config copy covers next setup.
             }
         }
     }

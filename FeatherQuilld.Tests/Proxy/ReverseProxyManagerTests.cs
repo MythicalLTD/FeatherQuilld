@@ -282,6 +282,7 @@ public class ReverseProxyManagerTests
             Assert.Contains("X-Frame-Options SAMEORIGIN", nginx);
             Assert.Contains("Referrer-Policy", nginx);
             Assert.Contains("client_max_body_size 10m", nginx);
+            Assert.DoesNotContain("modsecurity_rules_file", nginx);
         }
         finally
         {

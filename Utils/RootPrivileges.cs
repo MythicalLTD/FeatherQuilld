@@ -4,7 +4,7 @@ namespace FeatherQuilld.Utils;
 
 /// <summary>
 /// FeatherWings-style privilege check. Production uses Docker, bind-mounts,
-/// fusequota, and system paths under /etc and /var — that requires root.
+/// fusequota, and system paths under /etc and /var that requires root.
 /// </summary>
 public static class RootPrivileges
 {

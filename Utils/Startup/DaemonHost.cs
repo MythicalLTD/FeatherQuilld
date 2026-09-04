@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi;
 using Prometheus;
 using Scalar.AspNetCore;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading.RateLimiting;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 using AppLogger = FeatherQuilld.Utils.Logger.Logger;
@@ -310,9 +311,23 @@ public sealed class DaemonHost
 
     private static void ConfigureKestrel(WebApplicationBuilder builder, AppConfig config)
     {
+        X509Certificate2? certificate = null;
+        if (config.Api.Ssl.Enabled)
+        {
+            var configDir = Path.GetDirectoryName(Path.GetFullPath(config.FilePath));
+            certificate = ApiSslCertificate.Load(config.Api.Ssl, configDir);
+        }
+
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.Limits.MaxRequestBodySize = config.Api.UploadLimitBytes;
+            if (certificate is not null)
+            {
+                options.ConfigureHttpsDefaults(https =>
+                {
+                    https.ServerCertificate = certificate;
+                });
+            }
         });
 
         var url = config.Api.Ssl.Enabled
@@ -349,18 +364,7 @@ public sealed class DaemonHost
         builder.Services.AddCors(options =>
         {
             options.AddDefaultPolicy(policy =>
-            {
-                var origins = config.Api.AllowedOrigins;
-                if (origins.Count == 0)
-                {
-                    policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
-                    return;
-                }
-
-                policy.WithOrigins(origins.ToArray())
-                    .AllowAnyHeader()
-                    .AllowAnyMethod();
-            });
+                CorsPolicyConfigurator.Apply(policy, config.Api.AllowedOrigins));
         });
     }
 
@@ -447,7 +451,7 @@ public sealed class DaemonHost
             }
             catch
             {
-                // best-effort — sockets may already be closing
+                // best-effort sockets may already be closing
             }
 
             try
@@ -457,7 +461,7 @@ public sealed class DaemonHost
             }
             catch (OperationCanceledException)
             {
-                // Soft shutdown — plugins may observe the stopping token.
+                // Soft shutdown plugins may observe the stopping token.
             }
         });
     }

@@ -185,8 +185,8 @@ public static class StartupSelfTest
 
         if (mode == DiskLimiterModeKind.FuseQuota && OperatingSystem.IsLinux() && !File.Exists("/dev/fuse"))
         {
-            Warn("/dev/fuse missing — install fuse3", logger, reporter);
-            yield return new DiagnosticCheck("fuse_device", "warn", "/dev/fuse missing — install fuse3", null);
+            Warn("/dev/fuse missing install fuse3", logger, reporter);
+            yield return new DiagnosticCheck("fuse_device", "warn", "/dev/fuse missing install fuse3", null);
         }
         else if (OperatingSystem.IsLinux())
         {
@@ -229,7 +229,7 @@ public static class StartupSelfTest
         if (!DockerNetworkEnsurer.ShouldEnsure(config.Docker))
         {
             logger.Debug(LoggerTypes.Application,
-                $"Docker network mode={config.Docker.Network.NetworkMode} (built-in — skip ensure)");
+                $"Docker network mode={config.Docker.Network.NetworkMode} (built-in skip ensure)");
             return new DiagnosticCheck("docker_network", "ok", "Docker network ensure not required", null);
         }
 
@@ -284,7 +284,7 @@ public static class StartupSelfTest
 
             if (!staticConfig)
             {
-                Warn("Traefik static config missing at /etc/traefik/traefik.yml — reinstall traefik from package manager", logger, reporter);
+                Warn("Traefik static config missing at /etc/traefik/traefik.yml reinstall traefik from package manager", logger, reporter);
                 yield return new DiagnosticCheck(
                     "proxy.traefik_static",
                     "warn",
@@ -301,7 +301,7 @@ public static class StartupSelfTest
             var binary = ProxyProbe.ResolveBinary(provider);
             if (binary is null)
             {
-                Warn($"{provider} is not installed or not on PATH — domains will not be served until it is installed", logger, reporter);
+                Warn($"{provider} is not installed or not on PATH domains will not be served until it is installed", logger, reporter);
                 yield return new DiagnosticCheck(
                     "proxy.binary",
                     "fail",
@@ -318,7 +318,7 @@ public static class StartupSelfTest
         var acmeEmail = (config.System.Proxy.AcmeEmail ?? "").Trim();
         if (string.IsNullOrWhiteSpace(acmeEmail))
         {
-            Warn("No node acme_email — HTTPS uses each WebSpace owner's account email; Traefik still needs a node fallback", logger, reporter);
+            Warn("No node acme_email HTTPS uses each WebSpace owner's account email; Traefik still needs a node fallback", logger, reporter);
             yield return new DiagnosticCheck(
                 "proxy.acme_email",
                 "warn",
@@ -338,7 +338,7 @@ public static class StartupSelfTest
             var binary = PowerDnsProbe.ResolveBinary();
             if (binary is null)
             {
-                Warn("PowerDNS not installed — install the powerdns package for node DNS hosting", logger, reporter);
+                Warn("PowerDNS not installed install the powerdns package for node DNS hosting", logger, reporter);
                 return new DiagnosticCheck(
                     "dns.powerdns",
                     "warn",
@@ -396,7 +396,7 @@ public static class StartupSelfTest
         }
         else
         {
-            Warn("Mail server not installed — install the mailserver package for SMTP/IMAP", logger, reporter);
+            Warn("Mail server not installed install the mailserver package for SMTP/IMAP", logger, reporter);
             yield return new DiagnosticCheck(
                 "mail.stack",
                 "warn",
@@ -417,7 +417,7 @@ public static class StartupSelfTest
             else
             {
                 anyPortWarn = true;
-                Warn($"Mail {label} port {port} is not listening — open firewall if needed", logger, reporter);
+                Warn($"Mail {label} port {port} is not listening open firewall if needed", logger, reporter);
                 yield return new DiagnosticCheck($"mail.port.{port}", "warn", $"{label} port {port} not listening", null);
             }
         }
@@ -435,7 +435,7 @@ public static class StartupSelfTest
             yield return new DiagnosticCheck(
                 "mail.deliverability",
                 "ok",
-                "Mail ports listening — verify PTR/rDNS and SPF at the provider",
+                "Mail ports listening verify PTR/rDNS and SPF at the provider",
                 "Outbound deliverability still depends on PTR matching the mail hostname and clean IP reputation.");
         }
     }
@@ -445,7 +445,7 @@ public static class StartupSelfTest
         if (ClamAvProbe.IsAvailable())
             return new DiagnosticCheck("malware.clamav", "ok", "ClamAV available", ClamAvProbe.ResolveBinary());
 
-        Warn("ClamAV not installed — install the clamav package for malware scans", logger, reporter);
+        Warn("ClamAV not installed install the clamav package for malware scans", logger, reporter);
         return new DiagnosticCheck(
             "malware.clamav",
             "warn",
@@ -468,7 +468,7 @@ public static class StartupSelfTest
                 "proxy.modsecurity",
                 "ok",
                 wafSpaces > 0
-                    ? "ModSecurity applies to nginx only — WAF headers/denylist still active"
+                    ? "ModSecurity applies to nginx only WAF headers/denylist still active"
                     : "ModSecurity is nginx-only",
                 $"provider={provider}");
             yield break;
@@ -499,7 +499,7 @@ public static class StartupSelfTest
                 "proxy.modsecurity",
                 "warn",
                 "ModSecurity not installed",
-                "Optional — install modsecurity for nginx OWASP CRS WAF.");
+                "Optional install modsecurity for nginx OWASP CRS WAF.");
         }
     }
 
@@ -518,7 +518,7 @@ public static class StartupSelfTest
             using var proc = System.Diagnostics.Process.Start(psi);
             if (proc is null)
             {
-                Warn("docker CLI not found — Docker WebPlates cannot be installed", logger, reporter);
+                Warn("docker CLI not found Docker WebPlates cannot be installed", logger, reporter);
                 return new DiagnosticCheck("docker.cli", "fail", "Docker CLI not found", "Install Docker on the web node");
             }
 
@@ -551,7 +551,7 @@ public static class StartupSelfTest
     {
         if (!config.HasPanelCredentials())
         {
-            Warn("No panel credentials — WebSpace create (pull from panel) will fail until configured", logger, reporter);
+            Warn("No panel credentials WebSpace create (pull from panel) will fail until configured", logger, reporter);
             return new DiagnosticCheck("panel", "warn", "No panel credentials configured", null);
         }
 

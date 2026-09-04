@@ -16,7 +16,7 @@ public sealed class WebSpaceScheduleHostedService(WebSpaceScheduleManager schedu
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Soft shutdown — BackgroundService treats this as a clean stop.
+            // Soft shutdown BackgroundService treats this as a clean stop.
         }
     }
 }

@@ -146,11 +146,11 @@ public static class ConfigureCommand
                     var panelClient = new PanelClient(joinConfig!, onProgress: progress =>
                     {
                         reporter.Progress(
-                            $"attempt {progress.Attempt}/{progress.MaxAttempts} — {progress.Message}");
+                            $"attempt {progress.Attempt}/{progress.MaxAttempts} {progress.Message}");
                     });
 
-                    var runtime = panelClient.FetchRuntimeConfigAsync().GetAwaiter().GetResult();
-                    joinConfig!.MergeRuntime(runtime);
+                    var runtimeYaml = panelClient.FetchRuntimeConfigYamlAsync().GetAwaiter().GetResult();
+                    joinConfig!.MergeRuntimeYaml(runtimeYaml);
                     if (tls is not null)
                     {
                         joinConfig.Api.Ssl.Enabled = true;

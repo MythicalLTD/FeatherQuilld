@@ -505,7 +505,7 @@ public sealed class WebSpacesController : ControllerBase
         return Encoding.UTF8.GetString(ms.ToArray());
     }
 
-    /// <summary>Panel create — body: <c>{ "uuid": "...", "start_on_completion": false, "skip_scripts": false }</c>.</summary>
+    /// <summary>Panel create body: <c>{ "uuid": "...", "start_on_completion": false, "skip_scripts": false }</c>.</summary>
     [HttpPost]
     [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(WebSpaceResponse), StatusCodes.Status202Accepted)]
@@ -1097,7 +1097,7 @@ public sealed class WebSpacesController : ControllerBase
                     await SendWsEventAsync(socket, "console output", [line], ct);
                 }
 
-                // Container stopped or log stream ended — stay connected and retry.
+                // Container stopped or log stream ended stay connected and retry.
                 await TrySendStatusAsync(socket, uuid, ct);
                 await Task.Delay(1500, ct);
             }

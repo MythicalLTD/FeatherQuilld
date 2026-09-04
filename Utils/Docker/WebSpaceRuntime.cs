@@ -165,7 +165,7 @@ public sealed class WebSpaceRuntime : IDisposable
                 !existingImage.StartsWith(image + "@", StringComparison.OrdinalIgnoreCase))
             {
                 _logger?.Info(LoggerTypes.WebSpaces,
-                    $"Runtime {name} image drift ({existingImage} → {image}) — recreating container");
+                    $"Runtime {name} image drift ({existingImage} → {image}) recreating container");
                 ReleaseStdin(space.Uuid);
                 try
                 {

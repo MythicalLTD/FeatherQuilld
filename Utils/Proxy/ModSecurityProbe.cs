@@ -7,12 +7,9 @@ public static class ModSecurityProbe
 {
     private static readonly string[] RulesCandidates =
     [
-        "/etc/nginx/modsec/main.conf",
-        "/etc/nginx/modsecurity.conf",
+        ModSecuritySetup.MainConfPath,
+        ModSecuritySetup.NginxModSecurityConfPath,
         "/etc/modsecurity/modsecurity.conf",
-        "/usr/share/modsecurity-crs/owsap-crs/crs-setup.conf",
-        "/usr/share/modsecurity-crs/crs-setup.conf",
-        "/etc/modsecurity/crs/crs-setup.conf",
     ];
 
     private static readonly string[] ModuleHintPaths =
@@ -31,11 +28,15 @@ public static class ModSecurityProbe
         return ModuleLikelyPresent();
     }
 
+    /// <summary>
+    /// Returns a validated rules file path (Includes resolve), or null.
+    /// Broken aggregate configs are ignored so nginx is never pointed at them.
+    /// </summary>
     public static string? ResolveRulesFile()
     {
         foreach (var path in RulesCandidates)
         {
-            if (File.Exists(path))
+            if (ModSecuritySetup.IsValidRulesFile(path))
                 return path;
         }
 

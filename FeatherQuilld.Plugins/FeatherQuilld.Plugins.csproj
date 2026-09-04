@@ -7,7 +7,7 @@
         <RootNamespace>FeatherQuilld.Plugins</RootNamespace>
         <AssemblyName>FeatherQuilld.Plugins</AssemblyName>
         <Version>0.2.0</Version>
-        <Description>SDK for FeatherQuilld plugins — lifecycle, domain events, and routes.</Description>
+        <Description>SDK for FeatherQuilld plugins lifecycle, domain events, and routes.</Description>
     </PropertyGroup>
 
     <ItemGroup>

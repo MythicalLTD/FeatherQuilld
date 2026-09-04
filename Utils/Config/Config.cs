@@ -44,7 +44,7 @@ public class Config
         IoPath.Combine("/etc/featherquilld", DefaultFileName);
 
     /// <summary>
-    /// Loads config from disk. The system path is never auto-created — a missing
+    /// Loads config from disk. The system path is never auto-created a missing
     /// <c>/etc/featherquilld/config.yml</c> means the node is not joined yet.
     /// An explicit <c>--config</c> path outside /etc may still be created for local/dev.
     /// </summary>
@@ -122,9 +122,21 @@ public class Config
     }
 
     /// <summary>
-    /// Merges runtime config from the panel. Runtime values win except auth credentials.
+    /// Merges a deserialized runtime config. Prefer <see cref="MergeRuntimeYaml"/> when
+    /// the panel payload may omit keys (object defaults would otherwise clobber locals).
     /// </summary>
-    public void MergeRuntime(Config runtime)
+    public void MergeRuntime(Config runtime) =>
+        MergeRuntimeYaml(SerializeYaml(runtime));
+
+    /// <summary>
+    /// Deep-merges panel runtime YAML into this config. Only keys present in
+    /// <paramref name="runtimeYaml"/> overwrite local values; omitted keys
+    /// (e.g. <c>api.port</c>, <c>system.disk_limiter_mode</c>) are preserved.
+    /// Auth credentials and local remote panel/paths are always kept when set.
+    /// 
+    /// 
+    /// </summary>
+    public void MergeRuntimeYaml(string runtimeYaml)
     {
         var uuid = Uuid;
         var tokenId = TokenId;
@@ -135,16 +147,22 @@ public class Config
         var localConfigPath = Remote.ConfigPath;
         var localHealthPath = Remote.HealthPath;
 
-        Debug = runtime.Debug;
-        Quiet = runtime.Quiet;
-        AppName = runtime.AppName;
-        Api = runtime.Api;
-        System = runtime.System;
-        Plugins = runtime.Plugins;
-        Remote = runtime.Remote;
-        Sftp = runtime.Sftp;
-        Ftp = runtime.Ftp;
-        Docker = runtime.Docker;
+        var localMap = ParseYamlMap(SerializeYaml(this));
+        var runtimeMap = ParseYamlMap(runtimeYaml);
+        if (runtimeMap.Count > 0)
+            DeepMergeMaps(localMap, runtimeMap);
+
+        var merged = DeserializeYaml(CreateSerializer().Serialize(localMap));
+        Debug = merged.Debug;
+        Quiet = merged.Quiet;
+        AppName = merged.AppName;
+        Api = merged.Api;
+        System = merged.System;
+        Plugins = merged.Plugins;
+        Remote = merged.Remote;
+        Sftp = merged.Sftp;
+        Ftp = merged.Ftp;
+        Docker = merged.Docker;
 
         Uuid = uuid;
         TokenId = tokenId;
@@ -158,6 +176,91 @@ public class Config
         if (!string.IsNullOrWhiteSpace(localHealthPath))
             Remote.HealthPath = localHealthPath;
     }
+
+    /// <summary>
+    /// Parses YAML into a mutable string-keyed map (nested maps and sequences preserved).
+    /// Empty or null documents yield an empty map.
+    /// </summary>
+    internal static Dictionary<string, object?> ParseYamlMap(string yaml)
+    {
+        if (string.IsNullOrWhiteSpace(yaml))
+            return new Dictionary<string, object?>(StringComparer.Ordinal);
+
+        var raw = CreateMapDeserializer().Deserialize<object>(yaml);
+        return ToStringKeyedMap(raw) ?? new Dictionary<string, object?>(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Deep-merges <paramref name="source"/> into <paramref name="target"/>. Nested maps
+    /// recurse; scalars and sequences are replaced wholesale.
+    /// </summary>
+    internal static void DeepMergeMaps(
+        IDictionary<string, object?> target,
+        IDictionary<string, object?> source)
+    {
+        foreach (var (key, sourceValue) in source)
+        {
+            if (sourceValue is IDictionary<string, object?> sourceMap
+                && target.TryGetValue(key, out var existing)
+                && existing is IDictionary<string, object?> targetMap)
+            {
+                DeepMergeMaps(targetMap, sourceMap);
+                continue;
+            }
+
+            target[key] = sourceValue;
+        }
+    }
+
+    private static Dictionary<string, object?>? ToStringKeyedMap(object? value)
+    {
+        if (value is null)
+            return null;
+
+        if (value is IDictionary<object, object> objectKeyed)
+        {
+            var map = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var (key, nested) in objectKeyed)
+                map[Convert.ToString(key) ?? ""] = NormalizeYamlNode(nested);
+            return map;
+        }
+
+        if (value is IDictionary<string, object> stringKeyed)
+        {
+            var map = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var (key, nested) in stringKeyed)
+                map[key] = NormalizeYamlNode(nested);
+            return map;
+        }
+
+        return null;
+    }
+
+    private static object? NormalizeYamlNode(object? value)
+    {
+        if (value is null)
+            return null;
+
+        var asMap = ToStringKeyedMap(value);
+        if (asMap is not null)
+            return asMap;
+
+        if (value is IList<object> list)
+        {
+            var normalized = new List<object?>(list.Count);
+            foreach (var item in list)
+                normalized.Add(NormalizeYamlNode(item));
+            return normalized;
+        }
+
+        return value;
+    }
+
+    private static IDeserializer CreateMapDeserializer() =>
+        new DeserializerBuilder()
+            .WithNamingConvention(UnderscoredNamingConvention.Instance)
+            .IgnoreUnmatchedProperties()
+            .Build();
 
     /// <summary>
     /// Applies canonical default paths for a fresh local install.

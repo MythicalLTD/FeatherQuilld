@@ -119,7 +119,7 @@ public static partial class ColoredConsole
             case 'o': italic = true; break;
             case 'n': underline = true; break;
             case 'm': strikethrough = true; break;
-            case 'k': break; // obfuscated — not supported in Spectre
+            case 'k': break; // obfuscated not supported in Spectre
             case 'r':
                 color = null;
                 bold = false;

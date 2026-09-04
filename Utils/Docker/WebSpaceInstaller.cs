@@ -33,7 +33,7 @@ public sealed class WebSpaceInstaller
         if (script.Length == 0)
         {
             _logger?.Info(LoggerTypes.WebSpaces,
-                $"Install script empty for {space.Uuid} — skip installer container");
+                $"Install script empty for {space.Uuid} skip installer container");
             return;
         }
 
