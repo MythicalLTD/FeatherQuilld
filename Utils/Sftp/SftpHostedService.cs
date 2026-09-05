@@ -157,7 +157,50 @@ public sealed class SftpHostedService : IHostedService, IDisposable
     {
         try
         {
-            HookSubsystemRequests(connection);
+            // IMPORTANT: this handler is started (via Task.Run) from the ConnectionAccepted
+            // event, which SshServer raises *before* it calls connection.RunAsync(). RunAsync
+            // performs the SSH handshake and authentication and only *afterwards* constructs
+            // the connection's internal connection layer, and it starts consuming/dispatching
+            // subsequent SSH messages (channel-open, channel-request "subsystem", ...)
+            // synchronously right after, with no yield point in between. Until the connection
+            // layer exists, HookSubsystemRequests has nothing to attach to (it used to
+            // silently no-op) and AcceptChannelAsync throws InvalidOperationException
+            // immediately (it used to be swallowed by a bare `catch { break; }`). That
+            // combination — both failures were completely silent — is why SFTP died right
+            // after "auth ok" with no log line and no exception at all: "subsystem request
+            // failed on channel 0" on the client side.
+            //
+            // We deliberately poll for the *same* private "_connectionLayer" field that
+            // HookSubsystemRequests needs (via WaitForConnectionLayerAndHook below), rather
+            // than polling the public SshConnection.Channels property (which reads a
+            // different field, _channelManager) and only then doing a second, separate
+            // reflection lookup for _connectionLayer. Both fields are assigned back-to-back
+            // with no memory barrier in between, so on relaxed/weak read orderings a second
+            // reader thread is not guaranteed to observe them becoming visible in the same
+            // order — polling Channels can flip true while _connectionLayer is still not
+            // observably non-null yet, causing a spurious "connection layer not available"
+            // failure right after the wait supposedly succeeded. Waiting on the exact field we
+            // are about to use removes that gap entirely.
+            //
+            // A real SSH/SFTP client pipelines its post-auth channel-open + "subsystem"
+            // request essentially immediately, so this must be closed with a tight,
+            // low-latency wait rather than Task.Delay-based polling (which only checks every
+            // N milliseconds and can still lose the race against a fast client). SpinWait
+            // busy-spins for the first iterations (sub-microsecond reaction time) and only
+            // backs off to Thread.Sleep once the wait drags on, so it stays cheap even for a
+            // slow panel-auth round trip while reliably winning the race against real clients.
+            if (!WaitForConnectionLayerAndHook(connection, TimeSpan.FromSeconds(10), out var hooked))
+            {
+                _logger?.Warning(LoggerTypes.Application,
+                    "SFTP ed25519 connection: connection layer never became ready (handshake/auth did not complete in time); closing.");
+                return;
+            }
+
+            if (!hooked)
+            {
+                _logger?.Warning(LoggerTypes.Application,
+                    "SFTP ed25519 connection: could not hook subsystem requests; SFTP subsystem will fail for this connection.");
+            }
 
             // Bind pending username auth onto this connection once authenticated.
             if (connection.User is { Username: { Length: > 0 } username }
@@ -177,8 +220,9 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                 {
                     break;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    _logger?.Warning(LoggerTypes.Application, $"SFTP ed25519 accept channel failed: {ex}");
                     break;
                 }
 
@@ -187,7 +231,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.Debug(LoggerTypes.Application, $"SFTP ed25519 connection ended: {ex.Message}");
+            _logger?.Warning(LoggerTypes.Application, $"SFTP ed25519 connection ended: {ex}");
         }
         finally
         {
@@ -199,15 +243,51 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         }
     }
 
-    private void HookSubsystemRequests(SshConnection connection)
+    /// <summary>
+    /// Blocks (via a SpinWait, not an async delay) until the connection's private
+    /// "_connectionLayer" field becomes non-null — i.e. until <c>SshConnection.RunAsync</c>
+    /// has finished the handshake/authentication phases and constructed it — then hooks the
+    /// "sftp" subsystem channel request on it in the very same reflection round-trip, so there
+    /// is no gap between "field observed non-null" and "field read for hooking" in which a
+    /// second connection-layer swap (there isn't one today, but defensively) or a stale read
+    /// could reintroduce the race. Returns false only on timeout (field never became non-null);
+    /// <paramref name="hooked"/> reports whether the hook attach itself succeeded.
+    /// Runs on the calling (Task.Run-dispatched) thread, so blocking here does not block the
+    /// connection's own processing loop.
+    /// </summary>
+    private bool WaitForConnectionLayerAndHook(SshConnection connection, TimeSpan timeout, out bool hooked)
+    {
+        var field = typeof(SshConnection).GetField(
+            "_connectionLayer", BindingFlags.Instance | BindingFlags.NonPublic);
+        if (field is null)
+        {
+            _logger?.Warning(LoggerTypes.Application,
+                "SFTP subsystem hook failed: _connectionLayer field not found via reflection (library layout changed?).");
+            hooked = false;
+            return true; // not a timeout — no point waiting for a field that doesn't exist.
+        }
+
+        var sw = new SpinWait();
+        var deadline = DateTime.UtcNow + timeout;
+        ConnectionLayer? layer;
+        while ((layer = field.GetValue(connection) as ConnectionLayer) is null)
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                hooked = false;
+                return false;
+            }
+            sw.SpinOnce();
+        }
+
+        hooked = HookSubsystemRequests(layer);
+        return true;
+    }
+
+    private bool HookSubsystemRequests(ConnectionLayer layer)
     {
         try
         {
-            var field = typeof(SshConnection).GetField(
-                "_connectionLayer", BindingFlags.Instance | BindingFlags.NonPublic);
-            if (field?.GetValue(connection) is not ConnectionLayer layer)
-                return;
-
             layer.ChannelRequestReceived += (channel, request, _) =>
             {
                 if (!string.Equals(request.RequestType, "subsystem", StringComparison.OrdinalIgnoreCase))
@@ -222,10 +302,12 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                     channel.Environment["featherquilld.subsystem"] = "sftp";
                 return ValueTask.FromResult(true);
             };
+            return true;
         }
         catch (Exception ex)
         {
-            _logger?.Warning(LoggerTypes.Application, $"SFTP subsystem hook failed: {ex.Message}");
+            _logger?.Warning(LoggerTypes.Application, $"SFTP subsystem hook failed: {ex}");
+            return false;
         }
     }
 
@@ -269,7 +351,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.Warning(LoggerTypes.Application, $"SFTP ed25519 channel failed: {ex.Message}");
+            _logger?.Warning(LoggerTypes.Application, $"SFTP ed25519 channel failed: {ex}");
             try { await channel.CloseAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* ignore */ }
         }
     }
@@ -417,7 +499,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         }
         catch (Exception ex)
         {
-            _logger?.Warning(LoggerTypes.Application, $"Failed to attach rooted SFTP: {ex.Message}");
+            _logger?.Warning(LoggerTypes.Application, $"Failed to attach rooted SFTP: {ex}");
             try { e.Channel.SendClose(); } catch { /* ignore */ }
         }
     }
