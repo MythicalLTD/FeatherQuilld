@@ -31,7 +31,60 @@ public sealed class WebSpaceFileService
 
     private static HttpClient CreateDefaultHttpClient()
     {
-        var client = new HttpClient { Timeout = DefaultPullTimeout };
+        var handler = new SocketsHttpHandler
+        {
+            // Never follow redirects automatically: a URL that passes
+            // ValidatePullUrl() could still redirect to an internal address
+            // (e.g. http://169.254.169.254/...). Redirects are handled
+            // manually in PullCoreAsync so each hop is re-validated.
+            AllowAutoRedirect = false,
+            ConnectCallback = async (context, cancellationToken) =>
+            {
+                // Resolve DNS ourselves and validate every resolved address
+                // before connecting, instead of letting HttpClient connect
+                // to whatever the OS resolver returns. ValidatePullUrl()
+                // only rejects the URL if the *hostname itself* is a literal
+                // blocked IP; a hostname that resolves to a private/loopback
+                // address at request time (DNS rebinding) previously sailed
+                // straight through.
+                var host = context.DnsEndPoint.Host;
+                IPAddress[] addresses;
+                if (IPAddress.TryParse(host, out var literal))
+                {
+                    addresses = [literal];
+                }
+                else
+                {
+                    addresses = await System.Net.Dns.GetHostAddressesAsync(host, cancellationToken);
+                }
+
+                if (addresses.Length == 0)
+                    throw new InvalidOperationException($"Could not resolve host '{host}'.");
+
+                foreach (var addr in addresses)
+                {
+                    if (IsBlockedIp(addr))
+                        throw new InvalidOperationException($"Resolved address for '{host}' is not allowed.");
+                }
+
+                var socket = new System.Net.Sockets.Socket(System.Net.Sockets.SocketType.Stream, System.Net.Sockets.ProtocolType.Tcp)
+                {
+                    NoDelay = true,
+                };
+                try
+                {
+                    await socket.ConnectAsync(addresses, context.DnsEndPoint.Port, cancellationToken);
+                    return new System.Net.Sockets.NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+            },
+        };
+
+        var client = new HttpClient(handler) { Timeout = DefaultPullTimeout };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("FeatherQuilld/1.0");
         return client;
     }
@@ -994,7 +1047,7 @@ public sealed class WebSpaceFileService
         var destVirtual = CombineVirtual(dirVirtual, safeName);
         var dest = ResolveWritable(root, destVirtual);
 
-        using var response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var response = await GetWithValidatedRedirectsAsync(uri, cancellationToken);
         if (!response.IsSuccessStatusCode)
             throw new InvalidOperationException($"Remote returned HTTP {(int)response.StatusCode}.");
 
@@ -1026,6 +1079,42 @@ public sealed class WebSpaceFileService
     
     }
 
+    /// <summary>
+    /// GETs a URL, manually following up to 5 redirects and re-validating
+    /// each target with <see cref="ValidatePullUrl"/> before following it.
+    /// The HttpClient itself has AllowAutoRedirect disabled specifically so
+    /// this re-validation can't be bypassed by a redirect response.
+    /// </summary>
+    private async Task<HttpResponseMessage> GetWithValidatedRedirectsAsync(Uri uri, CancellationToken cancellationToken)
+    {
+        const int maxRedirects = 5;
+        var current = uri;
+        for (var i = 0; ; i++)
+        {
+            var response = await _http.GetAsync(current, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            if (!IsRedirect(response.StatusCode))
+                return response;
+
+            var location = response.Headers.Location;
+            response.Dispose();
+
+            if (location is null)
+                throw new InvalidOperationException("Remote returned a redirect with no Location header.");
+            if (i >= maxRedirects)
+                throw new InvalidOperationException("Too many redirects.");
+
+            var next = location.IsAbsoluteUri ? location : new Uri(current, location);
+            current = ValidatePullUrl(next.ToString());
+        }
+    }
+
+    private static bool IsRedirect(System.Net.HttpStatusCode status) =>
+        status is System.Net.HttpStatusCode.MovedPermanently
+            or System.Net.HttpStatusCode.Found
+            or System.Net.HttpStatusCode.SeeOther
+            or System.Net.HttpStatusCode.TemporaryRedirect
+            or System.Net.HttpStatusCode.PermanentRedirect;
+
     /// <summary>Validate pull URL (http/https only; block obvious private/link-local targets).</summary>
     internal static Uri ValidatePullUrl(string url)
     {
@@ -1053,6 +1142,12 @@ public sealed class WebSpaceFileService
 
     private static bool IsBlockedIp(IPAddress ip)
     {
+        // Normalize IPv4-mapped IPv6 addresses (::ffff:127.0.0.1) to their
+        // IPv4 form so the checks below apply uniformly instead of only
+        // matching bare IPv4 addresses.
+        if (ip.IsIPv4MappedToIPv6)
+            ip = ip.MapToIPv4();
+
         if (IPAddress.IsLoopback(ip))
             return true;
         if (ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6UniqueLocal)
@@ -1072,6 +1167,9 @@ public sealed class WebSpaceFileService
             if (bytes[0] == 192 && bytes[1] == 168)
                 return true;
             if (bytes[0] == 0)
+                return true;
+            // CGNAT range (RFC 6598), 100.64.0.0/10
+            if (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127)
                 return true;
         }
 

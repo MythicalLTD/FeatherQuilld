@@ -61,7 +61,9 @@ public static class WebSpaceUploadToken
         string raw;
         try { raw = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0])); }
         catch { return false; }
-        return string.Equals(Sign(config.BearerToken, raw), parts[1], StringComparison.Ordinal);
+        return CryptographicOperations.FixedTimeEquals(
+            Encoding.UTF8.GetBytes(Sign(config.BearerToken, raw)),
+            Encoding.UTF8.GetBytes(parts[1]));
     }
 
     private static string BuildPayload(Guid uuid, string directory, string? fileName, long exp) =>

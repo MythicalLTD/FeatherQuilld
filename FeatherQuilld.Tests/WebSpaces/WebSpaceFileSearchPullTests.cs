@@ -54,6 +54,47 @@ public class WebSpaceFileSearchPullTests : IDisposable
         Assert.Equal("example.com", ok.Host);
     }
 
+    [Theory]
+    [InlineData("100.64.0.1")] // CGNAT (RFC 6598)
+    [InlineData("100.100.100.100")]
+    [InlineData("::ffff:127.0.0.1")] // IPv4-mapped IPv6 loopback
+    [InlineData("::ffff:169.254.169.254")] // IPv4-mapped IPv6 link-local (cloud metadata)
+    public void IsBlockedIp_CoversMappedAndCgnatAddresses(string address)
+    {
+        var method = typeof(WebSpaceFileService).GetMethod("IsBlockedIp",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Assert.NotNull(method);
+        var ip = System.Net.IPAddress.Parse(address);
+        var blocked = (bool)method!.Invoke(null, [ip])!;
+        Assert.True(blocked, $"{address} should be blocked");
+    }
+
+    [Fact]
+    public async Task PullAsync_DoesNotFollowRedirectToBlockedAddress()
+    {
+        var handler = new StubHandler(req =>
+        {
+            if (req.RequestUri!.Host == "example.com")
+            {
+                var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                redirect.Headers.Location = new Uri("http://169.254.169.254/latest/meta-data/");
+                return redirect;
+            }
+
+            // Should never be reached: the redirect target must be rejected
+            // by ValidatePullUrl before a second request is ever sent.
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes("should-not-be-fetched")),
+            };
+        });
+        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        var files = new WebSpaceFileService(new FakeFsAccess(_uuid, _root), http);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            files.PullAsync(_uuid, "/public", "https://example.com/redirect-me", fileName: "got.txt"));
+    }
+
     [Fact]
     public async Task PullAsync_WritesFileFromHttp()
     {

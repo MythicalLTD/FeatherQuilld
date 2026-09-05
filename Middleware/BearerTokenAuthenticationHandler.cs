@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Encodings.Web;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 using Microsoft.AspNetCore.Authentication;
@@ -30,7 +32,9 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
         if (string.IsNullOrEmpty(token))
             return Task.FromResult(AuthenticateResult.Fail("Missing Authorization header or token query."));
 
-        if (!string.Equals(token, _config.BearerToken, StringComparison.Ordinal))
+        // Constant-time comparison to avoid a timing side-channel on the
+        // node-wide bearer token, which grants full API access to this daemon.
+        if (!FixedTimeStringEquals(token, _config.BearerToken))
             return Task.FromResult(AuthenticateResult.Fail("Invalid bearer token."));
 
         var identity = new ClaimsIdentity([new Claim(ClaimTypes.Name, _config.TokenId)], Scheme.Name);
@@ -58,5 +62,19 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Constant-time string comparison (UTF-8 byte-wise) to prevent timing
+    /// side-channels when comparing against a secret token.
+    /// </summary>
+    private static bool FixedTimeStringEquals(string a, string b)
+    {
+        var bytesA = Encoding.UTF8.GetBytes(a);
+        var bytesB = Encoding.UTF8.GetBytes(b);
+        // FixedTimeEquals itself short-circuits on length mismatch only after
+        // comparing lengths (not attacker-observable content), which is
+        // standard practice and not a meaningful side-channel here.
+        return CryptographicOperations.FixedTimeEquals(bytesA, bytesB);
     }
 }

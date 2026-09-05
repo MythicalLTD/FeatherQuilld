@@ -8,6 +8,7 @@ using FeatherQuilld.Utils.Plugins;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 using IoPath = System.IO.Path;
+using RandomNumberGenerator = System.Security.Cryptography.RandomNumberGenerator;
 
 namespace FeatherQuilld.Utils.Config;
 
@@ -388,10 +389,16 @@ public class Config
     private static string GenerateToken(int length)
     {
         const string alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        return string.Create(length, alphabet, static (span, chars) =>
+        // Use a cryptographically secure RNG: this generates the bearer token
+        // that grants full API access to the daemon, so it must not rely on
+        // Random.Shared (a non-cryptographic PRNG).
+        var randomBytes = new byte[length];
+        RandomNumberGenerator.Fill(randomBytes);
+        return string.Create(length, (alphabet, randomBytes), static (span, state) =>
         {
+            var (chars, bytes) = state;
             for (var i = 0; i < span.Length; i++)
-                span[i] = chars[Random.Shared.Next(chars.Length)];
+                span[i] = chars[bytes[i] % chars.Length];
         });
     }
 }
