@@ -373,8 +373,20 @@ public sealed class DaemonHost
         builder.Services.Configure<ForwardedHeadersOptions>(options =>
         {
             options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+            // Only trust X-Forwarded-For/-Proto from the local reverse proxy
+            // (nginx binds to 127.0.0.1 and proxies to Kestrel on loopback).
+            // Clearing these lists (the previous behavior) made ASP.NET Core
+            // accept forwarded headers from ANY client, letting a remote
+            // attacker spoof their own X-Forwarded-For value. Since
+            // Connection.RemoteIpAddress feeds both the rate limiter
+            // partition key and request logging, that spoofing let an
+            // attacker bypass per-IP rate limiting on expensive endpoints
+            // (exec, pull, compress, upload, ...) and forge audit logs.
             options.KnownIPNetworks.Clear();
             options.KnownProxies.Clear();
+            options.KnownProxies.Add(System.Net.IPAddress.Loopback);
+            options.KnownProxies.Add(System.Net.IPAddress.IPv6Loopback);
         });
     }
 
