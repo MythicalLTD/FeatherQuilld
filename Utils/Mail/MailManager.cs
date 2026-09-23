@@ -56,7 +56,15 @@ public sealed class MailManager
             err => new MailDomainAddAfterEvent { Domain = domain, Error = err },
             () =>
             {
-                RunSetup("domain", "add", domain);
+                // docker-mailserver has no top-level "domain" management command as
+                // of v13+ (ACCOUNT_PROVISIONER=FILE, the default here): domains
+                // exist implicitly from mailbox addresses in postfix-accounts.cf,
+                // there is nothing to "add" separately. Calling
+                // "setup domain add <domain>" against a current image fails with
+                // "invalid command" and previously aborted mailbox creation before
+                // "setup email add" ever ran. Domain tracking for our own
+                // /api/mail/domains listing and DKIM key generation is handled
+                // locally/via "config dkim domain" (EnsureDkim) below.
                 PersistDomain(domain, add: true);
                 EnsureDkim(domain);
             });
@@ -70,7 +78,10 @@ public sealed class MailManager
             err => new MailDomainRemoveAfterEvent { Domain = domain, Error = err },
             () =>
             {
-                RunSetup("domain", "del", domain);
+                // See AddDomain: no "setup domain del" command exists on current
+                // docker-mailserver images. Removing the last mailbox on a domain
+                // is what actually removes it from the container's own view; this
+                // only drops it from our local tracking file.
                 PersistDomain(domain, add: false);
             });
     }
