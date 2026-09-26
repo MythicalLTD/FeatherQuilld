@@ -100,6 +100,38 @@ public static class MailProbe
     public static bool ImapReachable(AppConfig? config) =>
         PortOpen(config?.System.Mail.ImapPort ?? 993);
 
+    /// <summary>
+    /// True when the mail stack selected in config is running: mailcow resolves its
+    /// containers through compose labels, docker-mailserver through its container name.
+    /// </summary>
+    public static bool StackRunning(AppConfig? config)
+    {
+        if (config is null)
+            return ContainerRunning(null);
+
+        return MailBackendKind.IsMailcow(config.System.Mail.Backend)
+            ? MailcowDocker.StackRunning(config)
+            : ContainerRunning(config);
+    }
+
+    /// <summary>Container/project identifier of the configured stack, for diagnostics.</summary>
+    public static string StackIdentifier(AppConfig? config)
+    {
+        if (config is not null && MailBackendKind.IsMailcow(config.System.Mail.Backend))
+        {
+            var dovecot = MailcowDocker.FindContainer("dovecot-mailcow");
+            return dovecot ?? MailcowPaths.ProjectName;
+        }
+
+        return MailPaths.ContainerName;
+    }
+
+    /// <summary>Compose file of the configured stack, for diagnostics.</summary>
+    public static string ComposePath(AppConfig config) =>
+        MailBackendKind.IsMailcow(config.System.Mail.Backend)
+            ? MailcowPaths.ComposeFile(config)
+            : MailPaths.ComposeFile(config);
+
     public static bool MxPortOpen(AppConfig? config) =>
         PortOpen(config?.System.Mail.SmtpPort ?? 25, "127.0.0.1")
         || PortOpen(25, "127.0.0.1");

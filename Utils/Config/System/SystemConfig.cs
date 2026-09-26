@@ -114,6 +114,13 @@ public class MailConfig
 {
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// Mail stack backend: <c>docker-mailserver</c> (default) or <c>mailcow</c>.
+    /// Unknown values are reported by the mail API instead of silently switching.
+    /// </summary>
+    [YamlMember(Alias = "backend")]
+    public string Backend { get; set; } = "docker-mailserver";
+
     /// <summary>Public mail hostname for MX records (defaults to mail.{domain}).</summary>
     public string Hostname { get; set; } = "";
 
@@ -132,6 +139,53 @@ public class MailConfig
 
     [YamlMember(Alias = "dkim_selector")]
     public string DkimSelector { get; set; } = "mail";
+
+    /// <summary>Settings that only apply when <see cref="Backend"/> is <c>mailcow</c>.</summary>
+    public MailcowConfig Mailcow { get; set; } = new();
+}
+
+public class MailcowConfig
+{
+    /// <summary>Directory that holds mailcow's compose file and its <c>data/</c> tree.</summary>
+    [YamlMember(Alias = "path")]
+    public string Path { get; set; } = "";
+
+    /// <summary>
+    /// Base URL of the mailcow UI used for API calls, e.g. <c>https://mail.example.com</c>.
+    /// When empty the panel derives it from <c>mail.hostname</c> plus the HTTPS port.
+    /// </summary>
+    [YamlMember(Alias = "url")]
+    public string Url { get; set; } = "";
+
+    /// <summary>API key with write access. When empty the panel reads <c>feather-api-key</c> next to the compose file.</summary>
+    [YamlMember(Alias = "api_key")]
+    public string ApiKey { get; set; } = "";
+
+    /// <summary>Host port of the mailcow UI/HTTP endpoint (default avoids clashing with the panel's Traefik).</summary>
+    [YamlMember(Alias = "http_port")]
+    public int HttpPort { get; set; } = 8080;
+
+    /// <summary>Host port of the mailcow UI/HTTPS endpoint.</summary>
+    [YamlMember(Alias = "https_port")]
+    public int HttpsPort { get; set; } = 8443;
+
+    /// <summary>
+    /// Skip mailcow's own ACME client (default true): certificates are expected to
+    /// come from the panel's reverse proxy instead of mailcow binding port 80.
+    /// </summary>
+    [YamlMember(Alias = "skip_acme")]
+    public bool SkipAcme { get; set; } = true;
+
+    /// <summary>IMAP/SMTP host used for probes; falls back to <c>mail.hostname</c>.</summary>
+    [YamlMember(Alias = "mail_host")]
+    public string MailHost { get; set; } = "";
+
+    /// <summary>
+    /// Accept mailcow's certificate even when it is self-signed (typical when the
+    /// panel's reverse proxy terminates ACME and mailcow serves its default cert).
+    /// </summary>
+    [YamlMember(Alias = "insecure_tls")]
+    public bool InsecureTls { get; set; }
 }
 
 public class SystemUserConfig

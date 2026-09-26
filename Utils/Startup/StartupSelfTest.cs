@@ -419,14 +419,29 @@ public static class StartupSelfTest
             yield break;
         }
 
-        if (MailProbe.ContainerRunning(config))
+        var backend = MailBackendKind.Normalize(config.System.Mail.Backend);
+        var stackLabel = MailBackendKind.IsMailcow(backend) ? "mailcow" : "docker-mailserver";
+        var running = MailProbe.StackRunning(config);
+
+        if (running)
         {
-            yield return new DiagnosticCheck("mail.stack", "ok", "Mail server container running", MailPaths.ContainerName);
+            yield return new DiagnosticCheck("mail.stack", "ok",
+                $"Mail server running ({stackLabel})", MailProbe.StackIdentifier(config));
         }
-        else if (MailProbe.DockerOnPath() && File.Exists(MailPaths.ComposeFile(config)))
+        else if (!MailBackendKind.IsKnown(config.System.Mail.Backend))
         {
-            Warn("Mail server compose exists but container is not running", logger, reporter);
-            yield return new DiagnosticCheck("mail.stack", "warn", "Mail server container not running", MailPaths.ComposeFile(config));
+            Warn("Mail backend in config is unknown, falling back to docker-mailserver", logger, reporter);
+            yield return new DiagnosticCheck(
+                "mail.stack",
+                "warn",
+                $"Unknown mail backend '{config.System.Mail.Backend}'",
+                $"Supported: {MailBackendKind.DockerMailserver}, {MailBackendKind.Mailcow}. Install the matching package from the host package manager.");
+        }
+        else if (MailProbe.DockerOnPath() && File.Exists(MailProbe.ComposePath(config)))
+        {
+            Warn("Mail stack compose exists but containers are not running", logger, reporter);
+            yield return new DiagnosticCheck("mail.stack", "warn",
+                $"Mail server not running ({stackLabel})", MailProbe.ComposePath(config));
         }
         else
         {
@@ -435,10 +450,10 @@ public static class StartupSelfTest
                 "mail.stack",
                 "warn",
                 "Mail server not installed",
-                "Install the mailserver package from the host package manager.");
+                $"Install the {stackLabel} package from the host package manager.");
         }
 
-        if (!MailProbe.ContainerRunning(config))
+        if (!running)
             yield break;
 
         var anyPortWarn = false;

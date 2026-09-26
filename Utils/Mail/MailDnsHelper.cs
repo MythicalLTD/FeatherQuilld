@@ -92,6 +92,10 @@ public static class MailDnsHelper
             Path.Combine(MailPaths.MailStateDir(config), "opendkim", "keys", domain, $"{selector}.txt"),
             Path.Combine(MailPaths.MailStateDir(config), "opendkim", "keys", domain, "mail.txt"),
             Path.Combine(MailPaths.ConfigDir(config), "opendkim", "keys", domain, $"{selector}.txt"),
+            // mailcow keeps generated keys under data/dkim/<domain>/<selector>.txt
+            MailcowPaths.DkimKeyFile(config, domain, selector),
+            MailcowPaths.DkimKeyFile(config, domain, "dkim"),
+            MailcowPaths.DkimKeyFile(config, domain, "mail"),
         };
 
         foreach (var path in candidates)
