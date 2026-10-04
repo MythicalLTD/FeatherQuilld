@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Config.System;
+using FeatherQuilld.Utils.Mail;
 using FeatherQuilld.Utils.WebSpaces;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 using AppLogger = FeatherQuilld.Utils.Logger.Logger;
@@ -118,6 +119,8 @@ public sealed class ReverseProxyManager
                             _logger?.Warning(LoggerTypes.Proxy, $"ACME ensure: {ex.Message}");
                         }
                     }
+
+                    EnsureWebmailAcmeCert();
                 }
             }
 
@@ -350,8 +353,10 @@ public sealed class ReverseProxyManager
             }
         }
 
-        if (!any)
+        if (!any && !TryGetWebmailHostname(out _))
             sb.AppendLine("# No WebSpaces with domains yet");
+
+        AppendCaddyWebmail(sb);
 
         return sb.ToString();
     }
@@ -492,6 +497,8 @@ public sealed class ReverseProxyManager
             }
         }
 
+        AppendNginxWebmail(sb, challengeRoot);
+
         return sb.ToString();
     }
 
@@ -588,24 +595,28 @@ public sealed class ReverseProxyManager
 
                     if (space.WafEnabled)
                     {
-                        var wafMwId = $"{id}-waf";
+                        // Traefik allows one middleware type per id — split headers vs buffering.
+                        var wafHeadersId = $"{id}-waf-headers";
+                        var wafBufferId = $"{id}-waf-buffer";
                         if (!wroteMiddlewareHeader)
                         {
                             middlewares.AppendLine("  middlewares:");
                             wroteMiddlewareHeader = true;
                         }
 
-                        middlewares.AppendLine($"    {wafMwId}:");
+                        middlewares.AppendLine($"    {wafHeadersId}:");
                         middlewares.AppendLine("      headers:");
                         middlewares.AppendLine("        stsSeconds: 31536000");
                         middlewares.AppendLine("        forceSTSHeader: true");
                         middlewares.AppendLine("        contentTypeNosniff: true");
                         middlewares.AppendLine("        customFrameOptionsValue: SAMEORIGIN");
                         middlewares.AppendLine("        referrerPolicy: strict-origin-when-cross-origin");
+                        middlewares.AppendLine($"    {wafBufferId}:");
                         middlewares.AppendLine("      buffering:");
                         middlewares.AppendLine("        maxRequestBodyBytes: 10485760");
                         sb.AppendLine("      middlewares:");
-                        sb.AppendLine($"        - {wafMwId}");
+                        sb.AppendLine($"        - {wafHeadersId}");
+                        sb.AppendLine($"        - {wafBufferId}");
                     }
 
                     if (space.WafEnabled && space.WafDenyIps.Count > 0)
@@ -719,6 +730,28 @@ public sealed class ReverseProxyManager
                 middlewares.AppendLine($"        replacement: \"{EscapeYamlScalar(replacement)}\"");
                 middlewares.AppendLine("        permanent: true");
             }
+        }
+
+        var hasWebmail = TryGetWebmailHostname(out var webmailHost);
+        if (hasWebmail)
+        {
+            anyRouter = true;
+            sb.AppendLine("    featherquilld-webmail:");
+            sb.AppendLine($"      rule: \"Host(`{EscapeYamlScalar(webmailHost)}`)\"");
+            sb.AppendLine("      entryPoints:");
+            sb.AppendLine("        - websecure");
+            sb.AppendLine("      tls:");
+            sb.AppendLine("        certResolver: featherquilld");
+            sb.AppendLine("      service: featherquilld-webmail");
+            sb.AppendLine("    featherquilld-webmail-http:");
+            sb.AppendLine($"      rule: \"Host(`{EscapeYamlScalar(webmailHost)}`)\"");
+            sb.AppendLine("      entryPoints:");
+            sb.AppendLine("        - web");
+            sb.AppendLine("      service: featherquilld-webmail");
+            services.AppendLine("    featherquilld-webmail:");
+            services.AppendLine("      loadBalancer:");
+            services.AppendLine("        servers:");
+            services.AppendLine($"          - url: \"http://127.0.0.1:{WebmailPaths.DefaultPort}\"");
         }
 
         if (!anyRouter)
@@ -856,6 +889,101 @@ public sealed class ReverseProxyManager
         _config.System.EffectiveDiskLimiterMode == DiskLimiterModeKind.FuseQuota
             ? FeatherQuilld.Utils.WebSpaces.Disk.FuseQuotaLimiter.GetMountPath(_config.System, space.Uuid)
             : Path.Combine(_config.System.Data, space.Uuid.ToString());
+
+    private bool TryGetWebmailHostname(out string hostname)
+    {
+        hostname = WebmailSetup.NormalizeHostname(_config.System.Mail.WebmailHostname ?? "");
+        return WebmailSetup.IsValidHostname(hostname) && WebmailProbe.ContainerRunning(_config);
+    }
+
+    private void EnsureWebmailAcmeCert()
+    {
+        if (_acme is null || !TryGetWebmailHostname(out var hostname))
+            return;
+
+        var email = _config.System.Proxy.AcmeEmail?.Trim();
+        if (string.IsNullOrWhiteSpace(email))
+            return;
+
+        try
+        {
+            _acme.EnsureCertsAsync([hostname], email: email).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(LoggerTypes.Proxy, $"ACME webmail ensure: {ex.Message}");
+        }
+    }
+
+    private void AppendCaddyWebmail(StringBuilder sb)
+    {
+        if (!TryGetWebmailHostname(out var hostname))
+            return;
+
+        sb.AppendLine(hostname);
+        sb.AppendLine("{");
+        var email = _config.System.Proxy.AcmeEmail?.Trim();
+        if (!string.IsNullOrWhiteSpace(email))
+            sb.AppendLine($"\ttls {email}");
+        sb.AppendLine($"\treverse_proxy 127.0.0.1:{WebmailPaths.DefaultPort}");
+        sb.AppendLine("}");
+        sb.AppendLine();
+    }
+
+    private void AppendNginxWebmail(StringBuilder sb, string challengeRoot)
+    {
+        if (!TryGetWebmailHostname(out var hostname))
+            return;
+
+        var crt = NginxAcmeService.CertPath(hostname);
+        var key = NginxAcmeService.KeyPath(hostname);
+        var certReady = File.Exists(crt) && File.Exists(key);
+
+        sb.AppendLine("server {");
+        sb.AppendLine("    listen 80;");
+        sb.AppendLine($"    server_name {hostname};");
+        sb.AppendLine("    location ^~ /.well-known/acme-challenge/ {");
+        sb.AppendLine($"        root {challengeRoot};");
+        sb.AppendLine("        default_type text/plain;");
+        sb.AppendLine("    }");
+        if (certReady)
+            sb.AppendLine("    location / { return 301 https://$host$request_uri; }");
+        else
+        {
+            sb.AppendLine("    location / {");
+            sb.AppendLine($"        proxy_pass http://127.0.0.1:{WebmailPaths.DefaultPort};");
+            sb.AppendLine("        proxy_set_header Host $host;");
+            sb.AppendLine("        proxy_set_header X-Real-IP $remote_addr;");
+            sb.AppendLine("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;");
+            sb.AppendLine("        proxy_set_header X-Forwarded-Proto $scheme;");
+            sb.AppendLine("    }");
+        }
+
+        sb.AppendLine("}");
+        sb.AppendLine();
+
+        if (!certReady)
+        {
+            _logger?.Warning(LoggerTypes.Proxy,
+                $"nginx webmail SSL pending for {hostname}; serving over HTTP until certificate is issued");
+            return;
+        }
+
+        sb.AppendLine("server {");
+        sb.AppendLine("    listen 443 ssl;");
+        sb.AppendLine($"    server_name {hostname};");
+        sb.AppendLine($"    ssl_certificate     {crt};");
+        sb.AppendLine($"    ssl_certificate_key {key};");
+        sb.AppendLine("    location / {");
+        sb.AppendLine($"        proxy_pass http://127.0.0.1:{WebmailPaths.DefaultPort};");
+        sb.AppendLine("        proxy_set_header Host $host;");
+        sb.AppendLine("        proxy_set_header X-Real-IP $remote_addr;");
+        sb.AppendLine("        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;");
+        sb.AppendLine("        proxy_set_header X-Forwarded-Proto $scheme;");
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        sb.AppendLine();
+    }
 
     private static void AppendCaddyBandwidthQuota(StringBuilder sb, WebSpace space)
     {

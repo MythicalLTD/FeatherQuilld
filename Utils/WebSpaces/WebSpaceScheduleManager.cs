@@ -1,3 +1,4 @@
+using System.Net;
 using Cronos;
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Remote;
@@ -66,6 +67,14 @@ public sealed class WebSpaceScheduleManager(
         {
             // Soft shutdown / host stop do not treat as a sync failure.
             throw;
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Wings-style: panel 404 means the space is not assigned to this node (orphaned local data).
+            RemoveSchedules(uuid.ToString("D"));
+            logger.LogInformation(
+                "WebSpace {Uuid} is not registered on this node in the panel; skipping schedule sync",
+                uuid);
         }
         catch (Exception ex)
         {

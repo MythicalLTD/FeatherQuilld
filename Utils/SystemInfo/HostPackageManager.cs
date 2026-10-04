@@ -294,17 +294,24 @@ public sealed class HostPackageManager
     private HostPackageStatus DescribeWebmail()
     {
         var running = _config is not null && WebmailProbe.ContainerRunning(_config);
+        var dockerMissing = FindOnPath("docker") is null;
+        var mailMissing = _config is null || !MailProbe.ContainerRunning(_config);
+        var blocked = dockerMissing || (!running && mailMissing);
         return new HostPackageStatus(
             Id: "webmail",
             DisplayName: "Webmail (Roundcube)",
             Category: "mail",
             Installed: running,
             BinaryPath: _config is not null ? WebmailPaths.ComposeFile(_config) : null,
-            Version: running ? "roundcube" : null,
+            Version: running
+                ? (string.IsNullOrWhiteSpace(_config?.System.Mail.WebmailHostname)
+                    ? "1.6.9"
+                    : _config!.System.Mail.WebmailHostname)
+                : null,
             Managed: true,
-            InstallBlocked: FindOnPath("docker") is null,
-            BlockedBy: FindOnPath("docker") is null ? "docker" : null,
-            BlockedByName: FindOnPath("docker") is null ? "Docker" : null);
+            InstallBlocked: blocked,
+            BlockedBy: dockerMissing ? "docker" : mailMissing ? "mailserver" : null,
+            BlockedByName: dockerMissing ? "Docker" : mailMissing ? "Mail server" : null);
     }
 
     private static string NormalizeId(string packageId) =>
@@ -562,10 +569,53 @@ public sealed class HostPackageManager
                 "modsecurity packages installed but /etc/nginx/modsec/main.conf Includes are not valid");
         }
 
-        return ModSecurityProbe.IsAvailable()
-            ? HostPackageOperationResult.Ok("modsecurity installed for nginx — reload nginx after enabling WAF on WebSpaces")
-            : HostPackageOperationResult.Fail(
+        if (!ModSecurityProbe.IsAvailable())
+        {
+            return HostPackageOperationResult.Fail(
                 "modsecurity packages and rules installed but the nginx modsecurity module was not detected");
+        }
+
+        var provider = (_config?.System.Proxy.Provider ?? "").Trim().ToLowerInvariant();
+        if (provider == "nginx" || ProxyProbe.BinaryOnPath("nginx"))
+            TryReloadNginxAfterModSecurity(logger);
+
+        return HostPackageOperationResult.Ok(
+            "modsecurity installed for nginx with SecRuleEngine On — nginx reloaded when available");
+    }
+
+    private static void TryReloadNginxAfterModSecurity(AppLogger? logger)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "nginx",
+                ArgumentList = { "-t" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            using var test = Process.Start(psi);
+            if (test is null)
+                return;
+            if (!test.WaitForExit(10_000) || test.ExitCode != 0)
+                return;
+
+            var reloadPsi = new ProcessStartInfo
+            {
+                FileName = "nginx",
+                ArgumentList = { "-s", "reload" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            using var reload = Process.Start(reloadPsi);
+            reload?.WaitForExit(10_000);
+        }
+        catch (Exception ex)
+        {
+            logger?.Warning(LoggerTypes.Application, $"nginx reload after ModSecurity install failed: {ex.Message}");
+        }
     }
 
     private async Task<HostPackageOperationResult> RemoveModSecurityAsync(
@@ -680,35 +730,33 @@ public sealed class HostPackageManager
         if (FindOnPath("docker") is null)
             return HostPackageOperationResult.Fail("Install Docker before the webmail package.");
 
-        if (WebmailProbe.ContainerRunning(_config))
-            return HostPackageOperationResult.Ok("webmail is already running");
+        if (!MailProbe.ContainerRunning(_config))
+            return HostPackageOperationResult.Fail("Install and start the mailserver package before webmail.");
 
         var root = WebmailPaths.Root(_config);
         Directory.CreateDirectory(root);
         Directory.CreateDirectory(WebmailPaths.DataDir(_config));
+        WebmailSetup.EnsureCustomFiles(_config);
 
-        var compose = $"""
-            services:
-              webmail:
-                image: roundcube/roundcubemail:latest
-                container_name: {WebmailPaths.ContainerName}
-                ports:
-                  - "127.0.0.1:{WebmailPaths.DefaultPort}:80"
-                volumes:
-                  - ./data:/var/roundcube/db
-                environment:
-                  - ROUNDCUBEMAIL_DEFAULT_HOST=host.docker.internal
-                  - ROUNDCUBEMAIL_SMTP_SERVER=host.docker.internal
-                extra_hosts:
-                  - "host.docker.internal:host-gateway"
-                restart: unless-stopped
-            """;
-        await File.WriteAllTextAsync(WebmailPaths.ComposeFile(_config), compose, ct).ConfigureAwait(false);
+        var compose = WebmailSetup.BuildCompose(_config);
+        var composePath = WebmailPaths.ComposeFile(_config);
+        var previous = File.Exists(composePath) ? await File.ReadAllTextAsync(composePath, ct).ConfigureAwait(false) : "";
+        await File.WriteAllTextAsync(composePath, compose, ct).ConfigureAwait(false);
+        var composeChanged = !string.Equals(previous.Trim(), compose.Trim(), StringComparison.Ordinal);
 
-        await EmitOutputAsync(packageId, "Pulling Roundcube image…\n", ct).ConfigureAwait(false);
+        if (WebmailProbe.ContainerRunning(_config) && !composeChanged)
+        {
+            var existingHost = (_config.System.Mail.WebmailHostname ?? "").Trim();
+            var existingHint = string.IsNullOrEmpty(existingHost)
+                ? $"http://127.0.0.1:{WebmailPaths.DefaultPort}"
+                : WebmailSetup.PublicUrl(existingHost);
+            return HostPackageOperationResult.Ok($"webmail is already running ({existingHint})");
+        }
+
+        await EmitOutputAsync(packageId, $"Pulling Roundcube image ({WebmailPaths.Image})…\n", ct).ConfigureAwait(false);
         var pull = await RunShellAsync(
             packageId,
-            "docker pull roundcube/roundcubemail:latest",
+            $"docker pull {WebmailPaths.Image}",
             logger,
             ct).ConfigureAwait(false);
         if (!pull.Success)
@@ -723,9 +771,17 @@ public sealed class HostPackageManager
         if (!up.Success)
             return up;
 
-        return WebmailProbe.ContainerRunning(_config)
-            ? HostPackageOperationResult.Ok($"webmail installed http://127.0.0.1:{WebmailPaths.DefaultPort}")
-            : HostPackageOperationResult.Fail("webmail compose finished but container is not running");
+        if (!WebmailProbe.ContainerRunning(_config))
+            return HostPackageOperationResult.Fail("webmail compose finished but container is not running");
+
+        var hostname = (_config.System.Mail.WebmailHostname ?? "").Trim();
+        var hint = string.IsNullOrEmpty(hostname)
+            ? $"loopback http://127.0.0.1:{WebmailPaths.DefaultPort} — call POST /api/mail/webmail/configure with hostname"
+            : WebmailSetup.PublicUrl(hostname);
+        return HostPackageOperationResult.Ok(
+            composeChanged
+                ? $"webmail updated ({hint})"
+                : $"webmail installed ({hint})");
     }
 
     private async Task<HostPackageOperationResult> RemoveMailServerAsync(

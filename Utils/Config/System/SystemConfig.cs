@@ -117,6 +117,10 @@ public class MailConfig
     /// <summary>Public mail hostname for MX records (defaults to mail.{domain}).</summary>
     public string Hostname { get; set; } = "";
 
+    /// <summary>Public hostname for node Roundcube (proxied HTTPS), e.g. webmail.node.example.com.</summary>
+    [YamlMember(Alias = "webmail_hostname")]
+    public string WebmailHostname { get; set; } = "";
+
     [YamlMember(Alias = "data_path")]
     public string DataPath { get; set; } = "";
 

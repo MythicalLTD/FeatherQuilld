@@ -1,5 +1,7 @@
 using FeatherQuilld.Plugins.Events;
 using FeatherQuilld.Utils.Mail;
+using FeatherQuilld.Utils.Proxy;
+using FeatherQuilld.Utils.WebSpaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
@@ -198,9 +200,69 @@ public sealed class MailController : ControllerBase
             return BadRequest(new { error = ex.Message });
         }
     }
+
+    [HttpGet("webmail")]
+    public IActionResult WebmailStatus([FromServices] AppConfig config)
+    {
+        var hostname = WebmailSetup.NormalizeHostname(config.System.Mail.WebmailHostname ?? "");
+        var running = WebmailProbe.ContainerRunning(config);
+        var ssoReady = WebmailSetup.HasSsoSecret(config);
+        return Ok(new
+        {
+            available = WebmailProbe.IsAvailable(config),
+            container_running = running,
+            http_reachable = WebmailProbe.HttpReachable(config),
+            hostname,
+            url = WebmailSetup.IsValidHostname(hostname) ? WebmailSetup.PublicUrl(hostname) : null,
+            sso_ready = ssoReady,
+            listen = $"127.0.0.1:{WebmailPaths.DefaultPort}",
+            image = WebmailPaths.Image,
+        });
+    }
+
+    [HttpPost("webmail/configure")]
+    public IActionResult ConfigureWebmail(
+        [FromBody] WebmailConfigureBody? body,
+        [FromServices] AppConfig config,
+        [FromServices] ReverseProxyManager proxy,
+        [FromServices] WebSpaceStore spaces)
+    {
+        var hostname = WebmailSetup.NormalizeHostname(body?.Hostname ?? "");
+        if (!WebmailSetup.IsValidHostname(hostname))
+            return BadRequest(new { error = "hostname must be a valid FQDN (e.g. webmail.node.example.com)." });
+
+        if (!WebmailProbe.ContainerRunning(config))
+            return BadRequest(new { error = "webmail container is not running; install the webmail package first." });
+
+        try
+        {
+            config.System.Mail.WebmailHostname = hostname;
+            WebmailSetup.EnsureCustomFiles(config);
+            var secret = WebmailSetup.EnsureSsoSecret(config);
+            config.Save();
+            proxy.Rebuild(spaces.List());
+
+            return Ok(new
+            {
+                hostname,
+                url = WebmailSetup.PublicUrl(hostname),
+                sso_ready = true,
+                sso_secret = secret,
+            });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
 }
 
 public sealed class MailDomainBody
 {
     public string? Name { get; set; }
+}
+
+public sealed class WebmailConfigureBody
+{
+    public string? Hostname { get; set; }
 }

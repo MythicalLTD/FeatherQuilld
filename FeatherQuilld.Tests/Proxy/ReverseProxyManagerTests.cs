@@ -330,7 +330,65 @@ public class ReverseProxyManagerTests
             Assert.Contains("customFrameOptionsValue: SAMEORIGIN", yaml);
             Assert.Contains("referrerPolicy: strict-origin-when-cross-origin", yaml);
             Assert.Contains("maxRequestBodyBytes: 10485760", yaml);
-            Assert.Contains("-waf", yaml);
+            Assert.Contains("ws-aaaaaaaabbbb-waf-headers", yaml);
+            Assert.Contains("ws-aaaaaaaabbbb-waf-buffer", yaml);
+            // One middleware type per id: headers block must not nest buffering.
+            var headersIdx = yaml.IndexOf("ws-aaaaaaaabbbb-waf-headers:", StringComparison.Ordinal);
+            var bufferIdx = yaml.IndexOf("ws-aaaaaaaabbbb-waf-buffer:", StringComparison.Ordinal);
+            Assert.True(headersIdx >= 0 && bufferIdx > headersIdx);
+            var headersBlock = yaml[headersIdx..bufferIdx];
+            Assert.Contains("headers:", headersBlock);
+            Assert.DoesNotContain("buffering:", headersBlock);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
+    public void BuildConfig_Traefik_WafDenyIpsAndPaths_EmitDenyRouters()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "fq-proxy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var config = new AppConfig
+            {
+                System = new SystemConfig
+                {
+                    RootDirectory = root,
+                    Data = Path.Combine(root, "data"),
+                    Proxy = new ProxyConfig
+                    {
+                        Enabled = true,
+                        Provider = "traefik",
+                    },
+                },
+            };
+
+            var mgr = new ReverseProxyManager(config);
+            var space = new WebSpace
+            {
+                Uuid = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+                Domains = ["app.example.com"],
+                Ssl = true,
+                WafEnabled = true,
+                WafDenyIps = ["203.0.113.10", "198.51.100.0/24"],
+                WafDenyPaths = ["/wp-admin", "/.env"],
+                BackendPort = 20123,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+
+            var yaml = mgr.BuildConfig([space]);
+
+            Assert.Contains("-ipdeny", yaml);
+            Assert.Contains("-pathdeny", yaml);
+            Assert.Contains("ClientIP(`203.0.113.10`)", yaml);
+            Assert.Contains("ClientIP(`198.51.100.0/24`)", yaml);
+            Assert.Contains("PathPrefix(`/wp-admin`)", yaml);
+            Assert.Contains("PathPrefix(`/.env`)", yaml);
+            Assert.Contains("255.255.255.255/32", yaml);
         }
         finally
         {

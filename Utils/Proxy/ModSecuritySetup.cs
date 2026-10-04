@@ -53,6 +53,12 @@ public static partial class ModSecuritySetup
             return false;
         }
 
+        if (!TryForceSecRuleEngineOn(modSecurityConf, out var engineError))
+        {
+            error = engineError;
+            return false;
+        }
+
         if (!TryResolveCrs(out crsSetup, out rulesInclude, out var crsError))
         {
             error = crsError;
@@ -98,6 +104,65 @@ public static partial class ModSecuritySetup
 
         error = "modsecurity.conf not found (and no modsecurity.conf-recommended to copy)";
         return false;
+    }
+
+    /// <summary>
+    /// Distro recommended conf often ships with <c>SecRuleEngine DetectionOnly</c>.
+    /// Production WAF requires blocking mode.
+    /// </summary>
+    public static bool TryForceSecRuleEngineOn(string modSecurityConfPath, out string error)
+    {
+        error = "";
+        if (string.IsNullOrWhiteSpace(modSecurityConfPath) || !File.Exists(modSecurityConfPath))
+        {
+            error = "modsecurity.conf path missing";
+            return false;
+        }
+
+        try
+        {
+            var text = File.ReadAllText(modSecurityConfPath);
+            var updated = SecRuleEngineLineRegex().Replace(text, "SecRuleEngine On");
+            if (ReferenceEquals(updated, text) || updated == text)
+            {
+                if (!SecRuleEngineOnRegex().IsMatch(text))
+                {
+                    if (!text.EndsWith('\n') && text.Length > 0)
+                        text += "\n";
+                    updated = text + "SecRuleEngine On\n";
+                }
+                else
+                {
+                    return true;
+                }
+            }
+
+            File.WriteAllText(modSecurityConfPath, updated);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Failed to set SecRuleEngine On: {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>Applies SecRuleEngine On to an in-memory conf body (for tests).</summary>
+    public static string ForceSecRuleEngineOnText(string confText)
+    {
+        if (string.IsNullOrEmpty(confText))
+            return "SecRuleEngine On\n";
+
+        var updated = SecRuleEngineLineRegex().Replace(confText, "SecRuleEngine On");
+        if (updated != confText)
+            return updated;
+
+        if (SecRuleEngineOnRegex().IsMatch(confText))
+            return confText;
+
+        if (!confText.EndsWith('\n'))
+            confText += "\n";
+        return confText + "SecRuleEngine On\n";
     }
 
     public static bool TryResolveCrs(out string crsSetup, out string rulesInclude, out string error)
@@ -190,4 +255,10 @@ public static partial class ModSecuritySetup
 
     [GeneratedRegex(@"^Include\s+(.+)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex IncludeLineRegex();
+
+    [GeneratedRegex(@"^\s*SecRuleEngine\s+\S+\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SecRuleEngineLineRegex();
+
+    [GeneratedRegex(@"^\s*SecRuleEngine\s+On\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SecRuleEngineOnRegex();
 }

@@ -1,3 +1,4 @@
+using System.Net;
 using FeatherQuilld.Utils.Config;
 using FeatherQuilld.Utils.Docker;
 using FeatherQuilld.Utils.Proxy;
@@ -19,6 +20,83 @@ public sealed class WebSpaceScheduleManagerTests
     {
         var uuid = Guid.NewGuid().ToString("D");
         var panel = new StubPanel();
+        await using var fixture = await CreateFixtureAsync(panel);
+        var manager = fixture.Manager;
+
+        manager.SyncSchedules(uuid,
+        [
+            new WebSpaceScheduleDefinition
+            {
+                Id = 1,
+                Name = "delayed",
+                Tasks =
+                [
+                    new WebSpaceScheduleTaskDefinition
+                    {
+                        Id = 1,
+                        SequenceId = 1,
+                        Action = "noop",
+                        TimeOffset = 60,
+                    },
+                ],
+            },
+        ]);
+
+        var triggerTask = manager.TriggerAsync(uuid, 1, CancellationToken.None);
+
+        await Task.Delay(200);
+        Assert.True(manager.IsRunning(uuid));
+
+        Assert.True(manager.Abort(uuid));
+
+        await triggerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(manager.IsRunning(uuid));
+    }
+
+    [Fact]
+    public async Task SyncWebSpaceFromPanelAsync_NotFound_ClearsSchedulesWithoutThrowing()
+    {
+        var uuid = Guid.NewGuid();
+        var panel = new StubPanel
+        {
+            FetchWebSpace = _ => throw new HttpRequestException(
+                "Panel resource not found (404)",
+                null,
+                HttpStatusCode.NotFound),
+        };
+        await using var fixture = await CreateFixtureAsync(panel);
+        var manager = fixture.Manager;
+
+        manager.SyncSchedules(uuid.ToString("D"),
+        [
+            new WebSpaceScheduleDefinition
+            {
+                Id = 7,
+                Name = "orphan",
+                CronMinute = "0",
+                CronHour = "*",
+                CronDayOfMonth = "*",
+                CronMonth = "*",
+                CronDayOfWeek = "*",
+                Tasks =
+                [
+                    new WebSpaceScheduleTaskDefinition
+                    {
+                        Id = 1,
+                        SequenceId = 1,
+                        Action = "noop",
+                    },
+                ],
+            },
+        ]);
+
+        await manager.SyncWebSpaceFromPanelAsync(uuid);
+
+        Assert.False(await manager.TriggerAsync(uuid.ToString("D"), 7, CancellationToken.None));
+    }
+
+    private static Task<Fixture> CreateFixtureAsync(StubPanel panel)
+    {
         var testRoot = Path.Combine(Path.GetTempPath(), "fq-sched-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(testRoot);
         var config = new AppConfig
@@ -57,38 +135,24 @@ public sealed class WebSpaceScheduleManagerTests
             activityReporter: null,
             NullLogger<WebSpaceScheduleManager>.Instance);
 
-        manager.SyncSchedules(uuid,
-        [
-            new WebSpaceScheduleDefinition
-            {
-                Id = 1,
-                Name = "delayed",
-                Tasks =
-                [
-                    new WebSpaceScheduleTaskDefinition
-                    {
-                        Id = 1,
-                        SequenceId = 1,
-                        Action = "noop",
-                        TimeOffset = 60,
-                    },
-                ],
-            },
-        ]);
+        return Task.FromResult(new Fixture(testRoot, manager));
+    }
 
-        var triggerTask = manager.TriggerAsync(uuid, 1, CancellationToken.None);
+    private sealed class Fixture(string root, WebSpaceScheduleManager manager) : IAsyncDisposable
+    {
+        public WebSpaceScheduleManager Manager { get; } = manager;
 
-        await Task.Delay(200);
-        Assert.True(manager.IsRunning(uuid));
-
-        Assert.True(manager.Abort(uuid));
-
-        await triggerTask.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.False(manager.IsRunning(uuid));
+        public ValueTask DisposeAsync()
+        {
+            try { Directory.Delete(root, recursive: true); } catch { /* ignore */ }
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class StubPanel : IPanelClient
     {
+        public Func<Guid, PanelWebSpaceConfig>? FetchWebSpace { get; init; }
+
         public Task<AppConfig> FetchRuntimeConfigAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(new AppConfig());
 
@@ -99,7 +163,7 @@ public sealed class WebSpaceScheduleManagerTests
             Task.FromResult(new PanelHealthResponse { Success = true });
 
         public Task<PanelWebSpaceConfig> FetchWebSpaceAsync(Guid uuid, CancellationToken cancellationToken = default) =>
-            Task.FromResult(new PanelWebSpaceConfig { Uuid = uuid });
+            Task.FromResult(FetchWebSpace?.Invoke(uuid) ?? new PanelWebSpaceConfig { Uuid = uuid });
 
         public Task<PanelInstallScript> FetchWebSpaceInstallAsync(Guid uuid, CancellationToken cancellationToken = default) =>
             Task.FromResult(new PanelInstallScript { Script = "" });

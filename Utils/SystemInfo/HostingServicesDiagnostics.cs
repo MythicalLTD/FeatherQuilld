@@ -11,6 +11,9 @@ public static class HostingServicesDiagnostics
     public static HostingServicesSnapshot Capture(AppConfig config)
     {
         var ftp = config.Ftp;
+        var provider = (config.System.Proxy.Provider ?? "caddy").Trim().ToLowerInvariant();
+        var proxyEnabled = config.System.Proxy.Enabled;
+        var modsec = ModSecurityProbe.IsAvailable();
         return new HostingServicesSnapshot(
             FtpEnabled: ftp.Enabled,
             FtpListening: ftp.Enabled && FtpProbe.IsListening(ftp),
@@ -18,11 +21,29 @@ public static class HostingServicesDiagnostics
             FtpPasvMin: ftp.PassivePortMin,
             FtpPasvMax: ftp.PassivePortMax,
             FtpPublicIp: ftp.PassiveHost ?? "",
-            ProxyProvider: (config.System.Proxy.Provider ?? "caddy").Trim().ToLowerInvariant(),
-            ProxyEnabled: config.System.Proxy.Enabled,
-            ModsecurityAvailable: ModSecurityProbe.IsAvailable(),
-            WebmailAvailable: WebmailProbe.ContainerRunning(config) || WebmailProbe.HttpReachable(config),
-            WebmailPort: WebmailPaths.DefaultPort);
+            ProxyProvider: provider,
+            ProxyEnabled: proxyEnabled,
+            ModsecurityAvailable: modsec,
+            WafMode: ResolveWafMode(provider, proxyEnabled, modsec),
+            WebmailAvailable: WebmailProbe.IsAvailable(config),
+            WebmailPort: WebmailPaths.DefaultPort,
+            WebmailHostname: config.System.Mail.WebmailHostname ?? "");
+    }
+
+    /// <summary>
+    /// <c>modsecurity</c> when nginx + ModSecurity/CRS are available;
+    /// <c>basic</c> when the reverse proxy is enabled (headers/deny lists);
+    /// otherwise <c>off</c>.
+    /// </summary>
+    public static string ResolveWafMode(string provider, bool proxyEnabled, bool modsecurityAvailable)
+    {
+        if (!proxyEnabled)
+            return "off";
+
+        if (string.Equals(provider, "nginx", StringComparison.OrdinalIgnoreCase) && modsecurityAvailable)
+            return "modsecurity";
+
+        return "basic";
     }
 }
 
@@ -36,5 +57,7 @@ public sealed record HostingServicesSnapshot(
     [property: JsonPropertyName("proxy_provider")] string ProxyProvider,
     [property: JsonPropertyName("proxy_enabled")] bool ProxyEnabled,
     [property: JsonPropertyName("modsecurity_available")] bool ModsecurityAvailable,
+    [property: JsonPropertyName("waf_mode")] string WafMode,
     [property: JsonPropertyName("webmail_available")] bool WebmailAvailable,
-    [property: JsonPropertyName("webmail_port")] int WebmailPort);
+    [property: JsonPropertyName("webmail_port")] int WebmailPort,
+    [property: JsonPropertyName("webmail_hostname")] string WebmailHostname = "");

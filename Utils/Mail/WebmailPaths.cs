@@ -6,6 +6,7 @@ internal static class WebmailPaths
 {
     public const string ContainerName = "featherquilld-webmail";
     public const string ComposeFileName = "docker-compose.yml";
+    public const string Image = "roundcube/roundcubemail:1.6.9-apache";
     public const int DefaultPort = 8080;
 
     public static string Root(AppConfig config) =>
@@ -16,4 +17,13 @@ internal static class WebmailPaths
 
     public static string DataDir(AppConfig config) =>
         Path.Combine(Root(config), "data");
+
+    public static string CustomDir(AppConfig config) =>
+        Path.Combine(Root(config), "custom");
+
+    public static string SsoSecretFile(AppConfig config) =>
+        Path.Combine(Root(config), "sso.secret");
+
+    public static string TokenPhpFile(AppConfig config) =>
+        Path.Combine(CustomDir(config), "token.php");
 }

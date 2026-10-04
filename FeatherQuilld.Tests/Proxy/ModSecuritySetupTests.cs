@@ -57,6 +57,34 @@ public class ModSecuritySetupTests
         Assert.False(ModSecuritySetup.IsValidRulesFile("/tmp/fq-modsec-missing-" + Guid.NewGuid().ToString("N")));
     }
 
+    [Fact]
+    public void ForceSecRuleEngineOnText_ReplacesDetectionOnly()
+    {
+        var result = ModSecuritySetup.ForceSecRuleEngineOnText("SecRuleEngine DetectionOnly\n");
+        Assert.Contains("SecRuleEngine On", result);
+        Assert.DoesNotContain("DetectionOnly", result);
+    }
+
+    [Fact]
+    public void ForceSecRuleEngineOnText_AppendsWhenMissing()
+    {
+        var result = ModSecuritySetup.ForceSecRuleEngineOnText("# comment only\n");
+        Assert.Contains("SecRuleEngine On", result);
+    }
+
+    [Fact]
+    public void TryForceSecRuleEngineOn_UpdatesFile()
+    {
+        using var dir = new TempDir();
+        var path = Path.Combine(dir.Path, "modsecurity.conf");
+        File.WriteAllText(path, "SecRuleEngine DetectionOnly\nSecRequestBodyAccess On\n");
+
+        Assert.True(ModSecuritySetup.TryForceSecRuleEngineOn(path, out var error), error);
+        var text = File.ReadAllText(path);
+        Assert.Contains("SecRuleEngine On", text);
+        Assert.DoesNotContain("DetectionOnly", text);
+    }
+
     private sealed class TempDir : IDisposable
     {
         public string Path { get; } = System.IO.Path.Combine(

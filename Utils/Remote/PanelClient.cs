@@ -380,16 +380,36 @@ public sealed class PanelClient : IPanelClient
                     statusCode),
 
             HttpStatusCode.NotFound =>
-                new HttpRequestException(
-                    $"Panel route not found (404) on {path}. Check remote.config_path / remote.health_path.",
-                    null,
-                    statusCode),
+                new HttpRequestException(FormatNotFoundMessage(path, panelMessage, detail), null, statusCode),
 
             _ => new HttpRequestException(
                 $"Panel request failed ({(int)statusCode} {statusCode}) on {path}: {detail}",
                 null,
                 statusCode),
         };
+    }
+
+    /// <summary>
+    /// Distinguishes missing API routes from missing resources (e.g. WEBSPACE_NOT_FOUND).
+    /// Wings maps the latter to "server does not exist on remote system".
+    /// </summary>
+    internal static string FormatNotFoundMessage(string path, string? panelMessage, string detail)
+    {
+        if (LooksLikeMissingRoute(panelMessage) || string.IsNullOrWhiteSpace(panelMessage))
+        {
+            return $"Panel route not found (404) on {path}. Check remote.config_path / remote.health_path.";
+        }
+
+        return $"Panel resource not found (404) on {path}: {detail}";
+    }
+
+    internal static bool LooksLikeMissingRoute(string? panelMessage)
+    {
+        if (string.IsNullOrWhiteSpace(panelMessage))
+            return false;
+
+        return panelMessage.Contains("api route does not exist", StringComparison.OrdinalIgnoreCase)
+               || panelMessage.Contains("route not found", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? TryParsePanelMessage(string body)

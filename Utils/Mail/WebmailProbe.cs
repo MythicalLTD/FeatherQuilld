@@ -40,4 +40,11 @@ public static class WebmailProbe
 
     public static bool HttpReachable(AppConfig? config = null) =>
         MailProbe.PortOpen(WebmailPaths.DefaultPort);
+
+    public static bool HostnameConfigured(AppConfig? config) =>
+        !string.IsNullOrWhiteSpace(config?.System.Mail.WebmailHostname);
+
+    /// <summary>Container running with a public hostname configured for reverse-proxy SSO.</summary>
+    public static bool IsAvailable(AppConfig? config) =>
+        config is not null && ContainerRunning(config) && HostnameConfigured(config);
 }
