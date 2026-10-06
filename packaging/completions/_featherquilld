@@ -9,8 +9,9 @@ _featherquilld() {
   )
   configure_opts=(
     '--join-data[Join YAML from FeatherPanel]:join data'
-    '--panel-url[Panel URL for OAuth setup]:url'
-    '--callback-host[Public IP for OAuth callback]:host'
+    '--panel-url[Panel URL for OAuth device-code setup]:url'
+    '--node-ip[This machine public IP for the web node]:host'
+    '--callback-host[Deprecated alias for --node-ip]:host'
     '--allow-insecure[Allow insecure TLS to the panel]'
     '--keep-oauth-key[Keep the temporary OAuth API key]'
     '--node-name[Web node name]:name'

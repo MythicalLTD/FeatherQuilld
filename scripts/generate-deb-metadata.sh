@@ -124,7 +124,7 @@ mapfile -t note_lines < <(printf '%s\n' "${notes}")
       <li>WebSpace lifecycle management</li>
       <li>HTTP API and built-in SFTP/FTP access</li>
       <li>Interactive first-run configuration via <code>featherquilld configure</code></li>
-      <li>OAuth2 quick setup with FeatherPanel</li>
+      <li>OAuth2 device-code quick setup with FeatherPanel</li>
       <li>systemd service integration for production deployments</li>
     </ul>
   </description>

@@ -9,7 +9,7 @@ Engine (`docker-ce`) before starting the service.
 Quick start
 -----------
 
-1. Configure FeatherQuilld (OAuth quick setup or paste join-data):
+1. Configure FeatherQuilld (OAuth device-code setup or paste join-data):
 
        sudo featherquilld configure
        # or: sudo quilld configure

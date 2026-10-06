@@ -32,6 +32,9 @@ public static class ConfigureCommand
             {
                 PanelUrl = GetOptionValue(args, "--panel-url")
                            ?? Environment.GetEnvironmentVariable("FEATHERQUILLD_PANEL_URL"),
+                NodeIp = GetOptionValue(args, "--node-ip")
+                         ?? Environment.GetEnvironmentVariable("FEATHERQUILLD_NODE_IP"),
+                // Legacy alias: --callback-host was the OAuth callback IP; now only sets node IP.
                 CallbackHost = GetOptionValue(args, "--callback-host")
                                ?? Environment.GetEnvironmentVariable("FEATHERQUILLD_CALLBACK_HOST"),
                 AllowInsecure = HasFlag(args, "--allow-insecure"),

@@ -16,7 +16,7 @@ _featherquilld()
     local commands="configure help version"
     local global_opts="-h --help -v --version -c --config"
     local configure_opts="
-        --join-data --panel-url --callback-host --allow-insecure --keep-oauth-key
+        --join-data --panel-url --node-ip --callback-host --allow-insecure --keep-oauth-key
         --node-name --node-fqdn --location-id --daemon-listen --sftp-port --daemon-base
         --install-service --no-service --override --quiet -q -c --config
         -h --help
@@ -41,7 +41,7 @@ _featherquilld()
             COMPREPLY=($(compgen -f -- "${cur}"))
             return
             ;;
-        --join-data|--panel-url|--callback-host|--node-name|--node-fqdn|--location-id|--daemon-listen|--sftp-port|--daemon-base)
+        --join-data|--panel-url|--node-ip|--callback-host|--node-name|--node-fqdn|--location-id|--daemon-listen|--sftp-port|--daemon-base)
             COMPREPLY=()
             return
             ;;

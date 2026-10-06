@@ -60,7 +60,8 @@ internal static class ConfigurePrompts
                 }));
     }
 
-    public static string PromptCallbackHost(IReadOnlyList<(string Host, string Source)> candidates)
+    /// <summary>Prompt for this machine's public IP (used when registering the web node, not for OAuth).</summary>
+    public static string PromptNodeIp(IReadOnlyList<(string Host, string Source)> candidates)
     {
         AnsiConsole.WriteLine();
 
@@ -487,7 +488,7 @@ internal static class ConfigurePrompts
             new()
             {
                 Mode = ConfigureInputMode.OAuth,
-                Label = $"[{Teal}]▸[/] [bold {Ink}]OAuth quick setup[/]   [grey](recommended · browser authorize)[/]",
+                Label = $"[{Teal}]▸[/] [bold {Ink}]OAuth quick setup[/]   [grey](recommended · device code)[/]",
             },
             new()
             {

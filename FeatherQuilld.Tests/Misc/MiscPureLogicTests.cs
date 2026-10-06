@@ -92,15 +92,15 @@ public class ColoredConsoleTests
     [Fact]
     public void LiteralToMarkup_KeepsQueryAmpersands()
     {
+        // ToMarkup treats &c as a Minecraft color; LiteralToMarkup must keep query ampersands.
         const string url =
-            "https://panel.example/oauth?name=node&callbackurl=http://10.0.0.1:1/callback&mode=server&appName=FeatherQuilld";
+            "https://panel.example/dashboard/account/oauth2/api/device?user_code=ABCD-EFGH&callback=1&appName=FeatherQuilld";
 
         var markup = ColoredConsole.LiteralToMarkup("&b", url);
 
-        Assert.Contains("&callbackurl=", markup);
-        Assert.Contains("&mode=server", markup);
+        Assert.Contains("&callback=1", markup);
         Assert.Contains("&appName=FeatherQuilld", markup);
-        Assert.DoesNotContain("&callbackurl=", ColoredConsole.ToMarkup("&b" + url));
+        Assert.DoesNotContain("&callback=1", ColoredConsole.ToMarkup("&b" + url));
     }
 }
 

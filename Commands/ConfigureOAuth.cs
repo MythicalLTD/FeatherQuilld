@@ -2,21 +2,23 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using FeatherQuilld.Utils;
 using FeatherQuilld.Utils.Remote;
 using Spectre.Console;
-// HttpListener intentionally avoided TcpListener works without URL ACLs on Linux.
 
 namespace FeatherQuilld.Commands;
 
-/// <summary>Options for OAuth2 quick setup (Wings-style panel consent → create web node).</summary>
+/// <summary>Options for OAuth2 device-auth quick setup (panel consent → create web node).</summary>
 public sealed class ConfigureOAuthOptions
 {
     public string? PanelUrl { get; init; }
+
+    /// <summary>This machine's public IP for the web node (not used for OAuth callback).</summary>
+    public string? NodeIp { get; init; }
+
+    /// <summary>Deprecated alias for <see cref="NodeIp"/> (legacy --callback-host).</summary>
     public string? CallbackHost { get; init; }
+
     public bool AllowInsecure { get; init; }
     public bool KeepOAuthKey { get; init; }
     public string? NodeName { get; init; }
@@ -30,15 +32,9 @@ public sealed class ConfigureOAuthOptions
     public string? AcmeEmail { get; init; }
 }
 
-/// <summary>FeatherWings-style OAuth2 configure flow for FeatherQuilld web nodes.</summary>
+/// <summary>FeatherPanel OAuth2 device-authorization configure flow for FeatherQuilld web nodes.</summary>
 public static class ConfigureOAuth
 {
-    private static readonly TimeSpan OAuthTimeout = TimeSpan.FromMinutes(10);
-    private static readonly JsonSerializerOptions CallbackJson = new()
-    {
-        PropertyNameCaseInsensitive = true,
-    };
-
     public static string ResolveJoinData(ConfigureOAuthOptions options)
     {
         return ResolveJoinDataAsync(options).GetAwaiter().GetResult().JoinData;
@@ -55,10 +51,10 @@ public static class ConfigureOAuth
             throw new InvalidOperationException("Panel URL is required.");
 
         AnsiConsole.WriteLine();
-        ColoredConsole.WriteLine("&8Authorize FeatherQuilld in your browser to continue.&r");
+        ColoredConsole.WriteLine("&8Connect FeatherPanel: authorize FeatherQuilld with a one-time device code.&r");
         AnsiConsole.WriteLine();
 
-        var (credentials, callbackHost) = await RunOAuthAsync(panelUrl, options, ct).ConfigureAwait(false);
+        var credentials = await RunDeviceAuthAsync(panelUrl, options, ct).ConfigureAwait(false);
         var apiKey = string.IsNullOrWhiteSpace(credentials.PublicKey)
             ? credentials.PrivateKey
             : credentials.PublicKey;
@@ -70,29 +66,14 @@ public static class ConfigureOAuth
         ColoredConsole.WriteLine($"&a✓&r &7Authorized as &f{clientInfo.Username}&r");
         AnsiConsole.WriteLine();
 
+        var nodeIp = await ResolveNodeIpAsync(options, ct).ConfigureAwait(false);
+
         var oauthOptions = options;
         if (string.IsNullOrWhiteSpace(oauthOptions.AcmeEmail) && !string.IsNullOrWhiteSpace(clientInfo.Email))
-        {
-            oauthOptions = new ConfigureOAuthOptions
-            {
-                PanelUrl = options.PanelUrl,
-                CallbackHost = options.CallbackHost,
-                AllowInsecure = options.AllowInsecure,
-                KeepOAuthKey = options.KeepOAuthKey,
-                NodeName = options.NodeName,
-                NodeFqdn = options.NodeFqdn,
-                LocationId = options.LocationId,
-                DaemonListen = options.DaemonListen,
-                SftpPort = options.SftpPort,
-                DaemonBase = options.DaemonBase,
-                BehindProxy = options.BehindProxy,
-                Scheme = options.Scheme,
-                AcmeEmail = clientInfo.Email,
-            };
-        }
+            oauthOptions = CloneOptions(options, Email: clientInfo.Email);
 
         using var panel = new AdminPanelClient(panelUrl, apiKey, options.AllowInsecure);
-        var (createRequest, tls) = await PromptWebNodeDetailsAsync(panel, callbackHost, oauthOptions, ct)
+        var (createRequest, tls) = await PromptWebNodeDetailsAsync(panel, nodeIp, oauthOptions, ct)
             .ConfigureAwait(false);
 
         var node = await panel.CreateWebNodeAsync(createRequest, ct).ConfigureAwait(false);
@@ -106,187 +87,134 @@ public static class ConfigureOAuth
         return new OAuthJoinResult(joinData, tls);
     }
 
-    private static async Task<(OAuthCredentials Credentials, string CallbackHost)> RunOAuthAsync(
+    private static ConfigureOAuthOptions CloneOptions(ConfigureOAuthOptions options, string? Email = null) =>
+        new()
+        {
+            PanelUrl = options.PanelUrl,
+            NodeIp = options.NodeIp,
+            CallbackHost = options.CallbackHost,
+            AllowInsecure = options.AllowInsecure,
+            KeepOAuthKey = options.KeepOAuthKey,
+            NodeName = options.NodeName,
+            NodeFqdn = options.NodeFqdn,
+            LocationId = options.LocationId,
+            DaemonListen = options.DaemonListen,
+            SftpPort = options.SftpPort,
+            DaemonBase = options.DaemonBase,
+            BehindProxy = options.BehindProxy,
+            Scheme = options.Scheme,
+            AcmeEmail = Email ?? options.AcmeEmail,
+        };
+
+    private static async Task<DeviceAuthCredentials> RunDeviceAuthAsync(
         string panelUrl,
         ConfigureOAuthOptions options,
         CancellationToken ct)
-    {
-        var callbackHost = await ResolveCallbackHostAsync(options.CallbackHost, ct).ConfigureAwait(false);
-
-        var listener = new TcpListener(IPAddress.Any, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        var callbackUrl = BuildCallbackUrl(callbackHost, port);
-        var resultTcs = new TaskCompletionSource<OAuthCredentials>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var listenTask = AcceptCallbackAsync(listener, resultTcs, ct);
-
-        var consentUrl = BuildConsentUrl(panelUrl, callbackUrl);
-
-        ColoredConsole.WriteLine($"&a✓&r &7Using node IP &f{callbackHost}&r");
-        ColoredConsole.WriteLine("&8FeatherPanel will send credentials to:&r");
-        ColoredConsole.WriteLineLiteral("&f", callbackUrl);
-        ColoredConsole.WriteLine("&8Ensure this port is open in your firewall and reachable from the panel.&r");
-        AnsiConsole.WriteLine();
-        ColoredConsole.WriteLine("&8Open this URL in your browser and approve the request:&r");
-        AnsiConsole.WriteLine();
-        ColoredConsole.WriteLineLiteral("&b", consentUrl);
-        AnsiConsole.WriteLine();
-
-        if (TryOpenBrowser(consentUrl))
-            ColoredConsole.WriteLine("&8Opened your browser waiting for panel delivery…&r");
-        else
-            ColoredConsole.WriteLine("&8Open the URL above in your browser waiting for panel delivery…&r");
-        AnsiConsole.WriteLine();
-
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(OAuthTimeout);
-
-        try
-        {
-            var completed = await Task.WhenAny(resultTcs.Task, Task.Delay(Timeout.Infinite, timeoutCts.Token))
-                .ConfigureAwait(false);
-            if (completed != resultTcs.Task)
-                throw new TimeoutException("Timed out waiting for FeatherPanel authorization.");
-
-            var credentials = await resultTcs.Task.ConfigureAwait(false);
-            return (credentials, callbackHost);
-        }
-        finally
-        {
-            try { listener.Stop(); } catch { /* ignore */ }
-            try { await listenTask.ConfigureAwait(false); } catch { /* ignore */ }
-        }
-    }
-
-    private static async Task AcceptCallbackAsync(
-        TcpListener listener,
-        TaskCompletionSource<OAuthCredentials> tcs,
-        CancellationToken ct)
-    {
-        try
-        {
-            while (!ct.IsCancellationRequested && !tcs.Task.IsCompleted)
-            {
-                var client = await listener.AcceptTcpClientAsync(ct).ConfigureAwait(false);
-                _ = HandleClientAsync(client, tcs);
-            }
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException and not ObjectDisposedException)
-        {
-            tcs.TrySetException(ex);
-        }
-    }
-
-    private static async Task HandleClientAsync(TcpClient client, TaskCompletionSource<OAuthCredentials> tcs)
-    {
-        try
-        {
-            await using var stream = client.GetStream();
-            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
-            var requestLine = await reader.ReadLineAsync().ConfigureAwait(false) ?? "";
-            var parts = requestLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            var method = parts.Length > 0 ? parts[0] : "";
-            var path = parts.Length > 1 ? parts[1] : "";
-
-            var contentLength = 0;
-            while (true)
-            {
-                var header = await reader.ReadLineAsync().ConfigureAwait(false);
-                if (string.IsNullOrEmpty(header))
-                    break;
-                if (header.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)
-                    && int.TryParse(header["Content-Length:".Length..].Trim(), out var len))
-                    contentLength = len;
-            }
-
-            var body = "";
-            if (contentLength > 0)
-            {
-                var buffer = new char[contentLength];
-                var read = 0;
-                while (read < contentLength)
-                {
-                    var n = await reader.ReadAsync(buffer.AsMemory(read, contentLength - read)).ConfigureAwait(false);
-                    if (n == 0)
-                        break;
-                    read += n;
-                }
-                body = new string(buffer, 0, read);
-            }
-
-            var ack = Encoding.UTF8.GetBytes(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 16\r\nConnection: close\r\n\r\n{\"received\":true}");
-            await stream.WriteAsync(ack).ConfigureAwait(false);
-
-            if (!string.Equals(method, "POST", StringComparison.OrdinalIgnoreCase)
-                || path is not ("/callback" or "/callback/"))
-                return;
-
-            var payload = JsonSerializer.Deserialize<OAuthCallbackPayload>(body, CallbackJson)
-                          ?? throw new InvalidOperationException("empty OAuth callback payload");
-
-            if (!payload.Success)
-            {
-                var message = payload.ErrorDescription ?? payload.Error ?? "authorization denied";
-                tcs.TrySetException(new InvalidOperationException($"Panel authorization denied: {message}"));
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(payload.PublicKey) || string.IsNullOrWhiteSpace(payload.PrivateKey))
-            {
-                tcs.TrySetException(new InvalidOperationException("OAuth callback did not include API credentials"));
-                return;
-            }
-
-            tcs.TrySetResult(new OAuthCredentials(
-                payload.PublicKey.Trim(),
-                payload.PrivateKey.Trim(),
-                payload.AuthorizationCode?.Trim() ?? ""));
-        }
-        catch (Exception ex)
-        {
-            tcs.TrySetException(ex);
-        }
-        finally
-        {
-            client.Dispose();
-        }
-    }
-
-    private static string BuildConsentUrl(string panelUrl, string callbackUrl)
     {
         var hostname = Dns.GetHostName();
         if (string.IsNullOrWhiteSpace(hostname))
             hostname = "node";
 
-        var query = new Dictionary<string, string>
+        using var device = new DeviceAuthClient(panelUrl, options.AllowInsecure);
+        DeviceAuthorizationGrant grant;
+        try
         {
-            ["name"] = $"FeatherQuilld on {hostname}",
-            ["callbackurl"] = callbackUrl,
-            ["mode"] = "server",
-            ["appName"] = "FeatherQuilld",
-            ["description"] = "Authorize FeatherQuilld CLI to register this machine as a web hosting node",
+            grant = await device.StartAsync(new DeviceAuthorizationRequest
+            {
+                Name = $"FeatherQuilld on {hostname}",
+                Description = "Authorize FeatherQuilld CLI to register this machine as a web hosting node",
+                AppName = DeviceAuthClient.DefaultAppName,
+                AllowedIps = "",
+                AlertCors = "false",
+            }, ct).ConfigureAwait(false);
+        }
+        catch (DeviceAuthException ex)
+        {
+            throw new InvalidOperationException($"Could not start FeatherPanel device authorization: {ex.Message}", ex);
+        }
+
+        PrintDeviceAuthInstructions(grant);
+
+        if (TryOpenBrowser(grant.VerificationUriComplete))
+            ColoredConsole.WriteLine("&8Opened your browser waiting for approval…&r");
+        else
+            ColoredConsole.WriteLine("&8Open the URL above in your browser and approve the request.&r");
+        AnsiConsole.WriteLine();
+
+        try
+        {
+            return await AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .SpinnerStyle(new Style(Color.FromHex(ConfigurePrompts.Teal)))
+                .StartAsync("Waiting for approval…", async ctx =>
+                {
+                    var localProgress = new Progress<DeviceAuthPollStatus>(status =>
+                    {
+                        var code = grant.UserCode;
+                        ctx.Status(status.Phase switch
+                        {
+                            DeviceAuthPollPhase.SlowDown =>
+                                $"Waiting for approval… code {code} · slowing poll to {status.IntervalSeconds}s · {status.SecondsRemaining}s left",
+                            DeviceAuthPollPhase.Approved =>
+                                "Approved · finishing…",
+                            _ =>
+                                $"Waiting for approval… code {code} · {status.SecondsRemaining}s left",
+                        });
+                    });
+
+                    return await device.PollForCredentialsAsync(
+                            grant.DeviceCode,
+                            grant.Interval,
+                            grant.ExpiresIn,
+                            localProgress,
+                            ct)
+                        .ConfigureAwait(false);
+                })
+                .ConfigureAwait(false);
+        }
+        catch (DeviceAuthException ex)
+        {
+            var hint = NormalizeDeviceErrorHint(ex.ErrorCode);
+            throw new InvalidOperationException(hint, ex);
+        }
+    }
+
+    private static void PrintDeviceAuthInstructions(DeviceAuthorizationGrant grant)
+    {
+        ColoredConsole.WriteLine("&8Visit:&r");
+        ColoredConsole.WriteLineLiteral("&b", grant.VerificationUriComplete);
+        AnsiConsole.WriteLine();
+        ColoredConsole.Write("&8Or enter code:&r &f&l");
+        ColoredConsole.WriteLineLiteral("&f&l", grant.UserCode);
+        AnsiConsole.WriteLine();
+        ColoredConsole.WriteLine(
+            $"&8Code expires in &f{grant.ExpiresIn}&8s · polling every &f{grant.Interval}&8s&r");
+        AnsiConsole.WriteLine();
+        // Intentionally never print device_code.
+    }
+
+    private static string NormalizeDeviceErrorHint(string errorCode) =>
+        errorCode.Trim().ToLowerInvariant() switch
+        {
+            "access_denied" =>
+                "FeatherPanel authorization was denied. Run configure again to retry.",
+            "expired_token" =>
+                "Device authorization expired. Run configure again to start a new code.",
+            "invalid_device_code" =>
+                "Device code was rejected. Run configure again to start a new code.",
+            _ =>
+                $"FeatherPanel device authorization failed ({errorCode}). Run configure again to retry.",
         };
 
-        var qs = string.Join("&", query.Select(kv =>
-            $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
-        return $"{panelUrl}/dashboard/account/oauth2/api/new?{qs}";
-    }
-
-    private static string BuildCallbackUrl(string host, int port)
+    private static async Task<string> ResolveNodeIpAsync(ConfigureOAuthOptions options, CancellationToken ct)
     {
-        host = host.Trim().Trim('[', ']');
-        return host.Contains(':')
-            ? $"http://[{host}]:{port}/callback"
-            : $"http://{host}:{port}/callback";
-    }
+        var forced = FirstNonEmpty(options.NodeIp, options.CallbackHost);
+        if (!string.IsNullOrWhiteSpace(forced))
+            return NormalizeHost(forced);
 
-    private static async Task<string> ResolveCallbackHostAsync(string? forcedHost, CancellationToken ct)
-    {
-        if (!string.IsNullOrWhiteSpace(forcedHost))
-            return NormalizeHost(forcedHost);
-
-        var envHost = Environment.GetEnvironmentVariable("FEATHERQUILLD_CALLBACK_HOST");
+        var envHost = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("FEATHERQUILLD_NODE_IP"),
+            Environment.GetEnvironmentVariable("FEATHERQUILLD_CALLBACK_HOST"));
         if (!string.IsNullOrWhiteSpace(envHost))
             return NormalizeHost(envHost);
 
@@ -295,17 +223,17 @@ public static class ConfigureOAuth
         {
             if (candidates.Count == 0)
                 throw new InvalidOperationException(
-                    "Could not detect this machine's public IP set --callback-host to this node's IP address.");
+                    "Could not detect this machine's public IP. Set --node-ip to this node's IP address.");
             if (candidates.Count == 1)
                 return candidates[0].Host;
             var outbound = candidates.FirstOrDefault(c => c.Source == "outbound");
             if (!string.IsNullOrEmpty(outbound.Host))
                 return outbound.Host;
             throw new InvalidOperationException(
-                $"Multiple public IPs detected set --callback-host to this node's IP address.");
+                "Multiple public IPs detected. Set --node-ip to this node's IP address.");
         }
 
-        return ConfigurePrompts.PromptCallbackHost(candidates.Select(c => (c.Host, c.Source)).ToList());
+        return ConfigurePrompts.PromptNodeIp(candidates.Select(c => (c.Host, c.Source)).ToList());
     }
 
     private static async Task<List<(string Host, string Source)>> DiscoverHostsAsync(CancellationToken ct)
@@ -377,7 +305,7 @@ public static class ConfigureOAuth
 
         value = value.TrimEnd('/').Trim('[', ']');
         if (string.IsNullOrWhiteSpace(value))
-            throw new InvalidOperationException("Callback host is required.");
+            throw new InvalidOperationException("Node IP is required.");
         return value;
     }
 
@@ -396,6 +324,17 @@ public static class ConfigureOAuth
     private static bool IsLoopback(string host) =>
         host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
         || (IPAddress.TryParse(host, out var ip) && IPAddress.IsLoopback(ip));
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return null;
+    }
 
     private static bool TryOpenBrowser(string url)
     {
@@ -432,8 +371,6 @@ public static class ConfigureOAuth
                 && TryOpenLinuxBrowserAsUser(sudoUser, url))
                 return true;
 
-            // Root's xdg-open cannot talk to the user's display and only
-            // prints "cannot open display" / "no method available" noise.
             return false;
         }
 
@@ -575,7 +512,6 @@ public static class ConfigureOAuth
 
             _ = DrainAsync(process);
 
-            // xdg-open returns quickly; a hang means a browser likely started.
             if (!process.WaitForExit(1500))
                 return true;
 
@@ -712,6 +648,8 @@ public static class ConfigureOAuth
         if (!revoke)
         {
             ColoredConsole.WriteLine("&8Keeping temporary OAuth API key on the panel.&r");
+            ColoredConsole.WriteLine(
+                "&8To disconnect later: FeatherPanel → Account → API keys → delete this client.&r");
             AnsiConsole.WriteLine();
             return;
         }
@@ -725,31 +663,10 @@ public static class ConfigureOAuth
         catch (Exception ex)
         {
             ColoredConsole.WriteLine($"&e!&r &7Could not delete temporary OAuth API key: {ex.Message}&r");
+            ColoredConsole.WriteLine(
+                "&8You can delete it in FeatherPanel → Account → API keys.&r");
             AnsiConsole.WriteLine();
         }
-    }
-
-    private sealed record OAuthCredentials(string PublicKey, string PrivateKey, string AuthorizationCode);
-
-    private sealed class OAuthCallbackPayload
-    {
-        [JsonPropertyName("success")]
-        public bool Success { get; set; }
-
-        [JsonPropertyName("public_key")]
-        public string? PublicKey { get; set; }
-
-        [JsonPropertyName("private_key")]
-        public string? PrivateKey { get; set; }
-
-        [JsonPropertyName("authorization_code")]
-        public string? AuthorizationCode { get; set; }
-
-        [JsonPropertyName("error")]
-        public string? Error { get; set; }
-
-        [JsonPropertyName("error_description")]
-        public string? ErrorDescription { get; set; }
     }
 }
 
