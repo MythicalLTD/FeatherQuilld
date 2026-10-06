@@ -76,6 +76,32 @@ public class WebSpaceFileServiceTests : IDisposable
     }
 
     [Fact]
+    public void ReadWrite_ThroughEscapingSymlink_Throws()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var outside = Path.Combine(Path.GetTempPath(), "fq-outside-" + Guid.NewGuid());
+        Directory.CreateDirectory(outside);
+        var secret = Path.Combine(outside, "secret.txt");
+        File.WriteAllText(secret, "host-secret");
+        try
+        {
+            File.CreateSymbolicLink(Path.Combine(_root, "public", "leak.txt"), secret);
+
+            Assert.Throws<UnauthorizedAccessException>(() =>
+                _files.ReadText(_uuid, "/public/leak.txt"));
+            Assert.Throws<UnauthorizedAccessException>(() =>
+                _files.WriteText(_uuid, "/public/leak.txt", "pwned"));
+            Assert.Equal("host-secret", File.ReadAllText(secret));
+        }
+        finally
+        {
+            try { Directory.Delete(outside, recursive: true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
     public void UnknownUuid_Throws()
     {
         Assert.Throws<InvalidOperationException>(() =>

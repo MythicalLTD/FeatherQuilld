@@ -2080,9 +2080,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 {
                     Domain = domain,
                     Type = type,
-                    RedirectTarget = string.IsNullOrWhiteSpace(route.RedirectTarget)
-                        ? null
-                        : route.RedirectTarget.Trim(),
+                    RedirectTarget = Proxy.ProxyRouteSanitizer.NormalizeRedirectTarget(route.RedirectTarget),
                     DocumentRoot = NormalizeDocumentRoot(route.DocumentRoot),
                 });
             }
@@ -2124,7 +2122,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         string.IsNullOrWhiteSpace(email) ? "" : email.Trim();
 
     private static string NormalizeBackendHost(string? host) =>
-        string.IsNullOrWhiteSpace(host) ? "" : host.Trim();
+        Proxy.ProxyRouteSanitizer.NormalizeBackendHost(host);
 
     private static ulong DirectorySize(string path)
     {

@@ -126,9 +126,52 @@ public class WebSpaceFileArchiveTests : IDisposable
     }
 
     [Fact]
-    public void Compress_EscapePath_Throws()
+    public void ParseOctalMode_StripsSetuidSetgidSticky()
     {
-        Assert.Throws<UnauthorizedAccessException>(() =>
+        Assert.Equal((UnixFileMode)0b111_101_101, WebSpaceFileService.ParseOctalMode("4755"));
+        Assert.Equal((UnixFileMode)0b110_100_100, WebSpaceFileService.ParseOctalMode("4644"));
+    }
+
+    [Fact]
+    public void Compress_SkipsEscapingSymlinkContent()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        var outside = Path.Combine(Path.GetTempPath(), "fq-pack-out-" + Guid.NewGuid());
+        Directory.CreateDirectory(outside);
+        File.WriteAllText(Path.Combine(outside, "secret.txt"), "HOSTCONFIDENTIAL");
+        try
+        {
+            File.CreateSymbolicLink(
+                Path.Combine(_root, "public", "leak.txt"),
+                Path.Combine(outside, "secret.txt"));
+            File.WriteAllText(Path.Combine(_root, "public", "ok.txt"), "safe");
+
+            var archiveVirtual = _files.Compress(_uuid, "/public", ["ok.txt", "leak.txt"], "pack", "zip");
+            var archivePath = Path.Combine(_root, archiveVirtual.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+            using var zip = System.IO.Compression.ZipFile.OpenRead(archivePath);
+            var names = zip.Entries.Select(e => e.FullName).ToList();
+            Assert.Contains(names, n => n.Contains("ok.txt", StringComparison.Ordinal));
+            Assert.DoesNotContain(names, n => n.Contains("leak.txt", StringComparison.Ordinal));
+            foreach (var entry in zip.Entries)
+            {
+                if (entry.Length == 0) continue;
+                using var s = entry.Open();
+                using var reader = new StreamReader(s);
+                Assert.DoesNotContain("HOSTCONFIDENTIAL", reader.ReadToEnd());
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(outside, recursive: true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
+    public void Compress_EscapePath_SkipsAndFailsWhenEmpty()
+    {
+        Assert.Throws<ArgumentException>(() =>
             _files.Compress(_uuid, "/", ["../etc/passwd"], "x", "zip"));
     }
 

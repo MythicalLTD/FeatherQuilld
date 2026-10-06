@@ -436,7 +436,7 @@ public sealed class DaemonHost
         app.UseAuthorization();
 
         app.UseHttpMetrics();
-        app.MapMetrics().AllowAnonymous();
+        app.MapMetrics().RequireAuthorization();
 
         pluginManager.ConfigurePipeline(app);
 

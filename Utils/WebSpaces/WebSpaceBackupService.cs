@@ -405,9 +405,39 @@ public sealed class WebSpaceBackupService
     private static void CreateTarGz(string sourceDir, string archivePath)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
-        using var file = File.Create(archivePath);
-        using var gzip = new GZipStream(file, CompressionLevel.Optimal);
-        TarFile.CreateFromDirectory(sourceDir, gzip, includeBaseDirectory: false);
+        var staging = Path.Combine(Path.GetTempPath(), "fq-bak-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(staging);
+        try
+        {
+            // Copy only non-escaping entries so planted symlinks cannot exfil host files.
+            foreach (var path in Directory.EnumerateFileSystemEntries(sourceDir, "*", SearchOption.AllDirectories))
+            {
+                if (!WebSpaceFileService.IsSafeToPack(sourceDir, path))
+                    continue;
+                if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0
+                    && Directory.Exists(path))
+                    continue;
+
+                var rel = Path.GetRelativePath(sourceDir, path);
+                var dest = Path.Combine(staging, rel);
+                if (Directory.Exists(path))
+                {
+                    Directory.CreateDirectory(dest);
+                    continue;
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                File.Copy(path, dest, overwrite: true);
+            }
+
+            using var file = File.Create(archivePath);
+            using var gzip = new GZipStream(file, CompressionLevel.Optimal);
+            TarFile.CreateFromDirectory(staging, gzip, includeBaseDirectory: false);
+        }
+        finally
+        {
+            try { Directory.Delete(staging, recursive: true); } catch { /* ignore */ }
+        }
     }
 
     private static void ExtractTarGz(string archivePath, string destDir)

@@ -9,10 +9,12 @@ internal static class BackendHostResolver
     public static string ResolveUpstream(ProxyConfig proxy, WebSpace? space = null)
     {
         if (!string.IsNullOrWhiteSpace(space?.BackendHost))
-            return space.BackendHost.Trim();
+            return ProxyRouteSanitizer.NormalizeBackendHost(space.BackendHost);
 
         var configured = proxy.BackendHost?.Trim();
-        return string.IsNullOrWhiteSpace(configured) ? "127.0.0.1" : configured;
+        if (string.IsNullOrWhiteSpace(configured))
+            return "127.0.0.1";
+        return ProxyRouteSanitizer.NormalizeBackendHost(configured);
     }
 
     public static string ResolveBindHost(ProxyConfig proxy) =>

@@ -69,9 +69,18 @@ public class ConsoleJwtValidatorTests
     }
 
     [Fact]
-    public void TryValidate_MissingPermissionsClaim_DefaultsToWildcard()
+    public void TryValidate_MissingPermissionsClaim_DefaultsToDeny()
     {
         var jwt = MintJwt(SpaceId, TokenId, TokenSecret, expOffsetSeconds: 3600);
+        Assert.True(_validator.TryValidate(jwt, SpaceId, out var error, out var permissions), error);
+        Assert.Empty(permissions);
+        Assert.DoesNotContain(ConsolePermissions.Wildcard, permissions);
+    }
+
+    [Fact]
+    public void TryValidate_ExplicitWildcard_IsGranted()
+    {
+        var jwt = MintJwt(SpaceId, TokenId, TokenSecret, expOffsetSeconds: 3600, permissions: ["*"]);
         Assert.True(_validator.TryValidate(jwt, SpaceId, out var error, out var permissions), error);
         Assert.Contains(ConsolePermissions.Wildcard, permissions);
     }

@@ -63,6 +63,28 @@ public class WebSpaceTrashServiceTests : IDisposable
     }
 
     [Fact]
+    public void RestoreTrash_StripsPathTraversalInOriginalName()
+    {
+        _files.Delete(_uuid, ["/public/note.txt"], useTrash: true);
+        var trashRoot = Path.Combine(_root, WebSpaceTrashService.TrashDirName);
+        var entryDir = Directory.EnumerateDirectories(trashRoot).Single();
+        var metaPath = Path.Combine(entryDir, "meta.json");
+        var json = File.ReadAllText(metaPath);
+        json = System.Text.RegularExpressions.Regex.Replace(
+            json,
+            "\"original_name\"\\s*:\\s*\"[^\"]+\"",
+            "\"original_name\":\"../../pwned.txt\"");
+        File.WriteAllText(metaPath, json);
+
+        var listed = _trash.ListTrash(_uuid, 1024 * 1024, 30);
+        _trash.RestoreTrash(_uuid, [listed.Entries[0].Id], overwrite: true);
+
+        // Basename only — must land under the WebSpace, never outside.
+        Assert.True(File.Exists(Path.Combine(_root, "public", "pwned.txt")));
+        Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_root)!, "pwned.txt")));
+    }
+
+    [Fact]
     public void ListTrash_PurgesExpiredEntries()
     {
         _files.Delete(_uuid, ["/public/note.txt"], useTrash: true);

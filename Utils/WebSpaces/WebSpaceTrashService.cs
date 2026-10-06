@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FeatherQuilld.Plugins.Events;
+using FeatherQuilld.Utils.IO;
 
 namespace FeatherQuilld.Utils.WebSpaces;
 
@@ -174,12 +175,18 @@ public sealed class WebSpaceTrashService
 
             var destDir = WebSpaceFileService.ResolveWritableStatic(root, meta.OriginalRoot);
             Directory.CreateDirectory(destDir);
-            var destPath = Path.Combine(destDir, meta.OriginalName);
+            var safeName = Path.GetFileName(meta.OriginalName ?? "");
+            if (string.IsNullOrWhiteSpace(safeName) || safeName is "." or "..")
+                throw new UnauthorizedAccessException("Trash restore name escapes WebSpace root.");
+
+            var destPath = Path.GetFullPath(Path.Combine(destDir, safeName));
+            if (!RootedPath.IsUnderRoot(root, destPath))
+                throw new UnauthorizedAccessException("Trash restore path escapes WebSpace root.");
 
             if (File.Exists(destPath) || Directory.Exists(destPath))
             {
                 if (!overwrite)
-                    throw new InvalidOperationException($"Restore target already exists: {meta.OriginalRoot}/{meta.OriginalName}");
+                    throw new InvalidOperationException($"Restore target already exists: {meta.OriginalRoot}/{safeName}");
                 if (Directory.Exists(destPath))
                     Directory.Delete(destPath, recursive: true);
                 else

@@ -16,6 +16,16 @@ public sealed class DaemonSelfUpdater
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
 
+    internal const string AllowedOwner = "mythicalltd";
+    internal const string AllowedRepo = "featherquilld";
+
+    private static readonly HashSet<string> AllowedDownloadHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    };
+
     static DaemonSelfUpdater()
     {
         Http.DefaultRequestHeaders.UserAgent.Add(
@@ -48,6 +58,9 @@ public sealed class DaemonSelfUpdater
         if (!OperatingSystem.IsLinux())
             return SelfUpdateResult.Fail("Self-update is only supported on Linux.");
 
+        if (request.DisableChecksum)
+            return SelfUpdateResult.Fail("disable_checksum is not allowed.");
+
         var target = SystemdServiceInstaller.ResolveExecutablePath();
         if (string.IsNullOrWhiteSpace(target) || !File.Exists(target))
             return SelfUpdateResult.Fail("Could not locate the running FeatherQuilld binary.");
@@ -57,9 +70,29 @@ public sealed class DaemonSelfUpdater
 
         try
         {
-            var (downloadUrl, expectedSha256) = await ResolveDownloadAsync(request, ct).ConfigureAwait(false);
+            var (downloadUrl, expectedSha256, releaseVersion) = await ResolveDownloadAsync(request, ct)
+                .ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(downloadUrl))
                 return SelfUpdateResult.Fail("Could not resolve a download URL for the update.");
+
+            if (!IsAllowedDownloadUrl(downloadUrl))
+                return SelfUpdateResult.Fail("Download URL host is not allowlisted.");
+
+            var sha256 = (expectedSha256 ?? request.Sha256)?.Trim();
+            if (string.IsNullOrWhiteSpace(sha256))
+                return SelfUpdateResult.Fail("SHA-256 checksum is required for self-update.");
+
+            if (!request.Force)
+            {
+                var incoming = (request.Version ?? releaseVersion)?.Trim().TrimStart('v');
+                var current = StartupBanner.Version.TrimStart('v');
+                if (!string.IsNullOrWhiteSpace(incoming)
+                    && string.Equals(current, incoming, StringComparison.OrdinalIgnoreCase))
+                {
+                    return SelfUpdateResult.Fail(
+                        "Requested version matches the current version. Pass force=true to reinstall.");
+                }
+            }
 
             logger?.Info(LoggerTypes.Application, $"Self-update downloading from {downloadUrl}");
 
@@ -72,21 +105,18 @@ public sealed class DaemonSelfUpdater
                 await DownloadFileAsync(downloadUrl, downloadPath, ct).ConfigureAwait(false);
                 TryMarkExecutable(downloadPath);
 
-                var sha256 = request.DisableChecksum
-                    ? null
-                    : (expectedSha256 ?? request.Sha256)?.Trim();
-                if (!string.IsNullOrWhiteSpace(sha256))
-                {
-                    var actual = ComputeSha256Hex(downloadPath);
-                    if (!actual.Equals(sha256, StringComparison.OrdinalIgnoreCase))
-                        return SelfUpdateResult.Fail($"Checksum mismatch (expected {sha256}, got {actual}).");
-                }
+                var actual = ComputeSha256Hex(downloadPath);
+                if (!actual.Equals(sha256, StringComparison.OrdinalIgnoreCase))
+                    return SelfUpdateResult.Fail($"Checksum mismatch (expected {sha256}, got {actual}).");
 
-                if (!request.Force && string.Equals(StartupBanner.Version.TrimStart('v'),
-                        await TryReadVersionFromBinaryAsync(downloadPath, ct).ConfigureAwait(false),
-                        StringComparison.OrdinalIgnoreCase))
+                if (!request.Force)
                 {
-                    return SelfUpdateResult.Fail("Downloaded binary matches the current version. Pass force=true to reinstall.");
+                    var currentSha = ComputeSha256Hex(target);
+                    if (currentSha.Equals(actual, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return SelfUpdateResult.Fail(
+                            "Downloaded binary matches the running binary. Pass force=true to reinstall.");
+                    }
                 }
 
                 var stagingPath = target + ".new";
@@ -112,15 +142,43 @@ public sealed class DaemonSelfUpdater
         }
     }
 
-    private static async Task<(string? Url, string? Sha256)> ResolveDownloadAsync(
+    internal static bool IsAllowedDownloadUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+        if (uri.Scheme is not ("https"))
+            return false;
+        return AllowedDownloadHosts.Contains(uri.Host);
+    }
+
+    internal static bool IsAllowedRepo(string? owner, string? repo)
+    {
+        var o = string.IsNullOrWhiteSpace(owner) ? AllowedOwner : owner.Trim();
+        var r = string.IsNullOrWhiteSpace(repo) ? AllowedRepo : repo.Trim();
+        return string.Equals(o, AllowedOwner, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(r, AllowedRepo, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<(string? Url, string? Sha256, string? Version)> ResolveDownloadAsync(
         SelfUpdateRequest request,
         CancellationToken ct)
     {
         if (string.Equals(request.Source, "url", StringComparison.OrdinalIgnoreCase))
-            return (request.Url?.Trim(), request.Sha256?.Trim());
+        {
+            var url = request.Url?.Trim();
+            if (string.IsNullOrWhiteSpace(url) || !IsAllowedDownloadUrl(url))
+                throw new InvalidOperationException("source=url requires an allowlisted https download URL.");
+            if (string.IsNullOrWhiteSpace(request.Sha256))
+                throw new InvalidOperationException("source=url requires sha256.");
+            return (url, request.Sha256.Trim(), request.Version);
+        }
 
-        var owner = string.IsNullOrWhiteSpace(request.RepoOwner) ? "mythicalltd" : request.RepoOwner.Trim();
-        var repo = string.IsNullOrWhiteSpace(request.RepoName) ? "featherquilld" : request.RepoName.Trim();
+        if (!IsAllowedRepo(request.RepoOwner, request.RepoName))
+            throw new InvalidOperationException(
+                $"Self-update is limited to {AllowedOwner}/{AllowedRepo}.");
+
+        var owner = AllowedOwner;
+        var repo = AllowedRepo;
         var version = request.Version?.Trim().TrimStart('v');
 
         var releaseUrl = string.IsNullOrWhiteSpace(version)
@@ -134,6 +192,10 @@ public sealed class DaemonSelfUpdater
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
 
+        var tagName = doc.RootElement.TryGetProperty("tag_name", out var tagEl)
+            ? tagEl.GetString()?.Trim().TrimStart('v')
+            : version;
+
         var arch = RuntimeInformation.ProcessArchitecture switch
         {
             Architecture.X64 => "x64",
@@ -146,15 +208,47 @@ public sealed class DaemonSelfUpdater
         string? bestSha = null;
         var score = -1;
 
+        // Prefer a companion *.sha256 asset for the chosen binary when present.
+        var shaByStem = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var asset in assets.EnumerateArray())
+        {
+            var name = asset.GetProperty("name").GetString() ?? "";
+            if (!name.EndsWith(".sha256", StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(".sha256.txt", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var url = asset.GetProperty("browser_download_url").GetString();
+            if (string.IsNullOrWhiteSpace(url) || !IsAllowedDownloadUrl(url))
+                continue;
+            try
+            {
+                var text = (await Http.GetStringAsync(url, ct).ConfigureAwait(false)).Trim();
+                var hex = text.Split([' ', '\t', '\n', '\r'], StringSplitOptions.RemoveEmptyEntries)
+                    .FirstOrDefault();
+                if (hex is { Length: 64 } && hex.All(Uri.IsHexDigit))
+                {
+                    var stem = name
+                        .Replace(".sha256.txt", "", StringComparison.OrdinalIgnoreCase)
+                        .Replace(".sha256", "", StringComparison.OrdinalIgnoreCase);
+                    shaByStem[stem] = hex.ToLowerInvariant();
+                }
+            }
+            catch
+            {
+                // ignore digest asset failures; request.Sha256 may still apply
+            }
+        }
+
         foreach (var asset in assets.EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString() ?? "";
             var url = asset.GetProperty("browser_download_url").GetString();
-            if (string.IsNullOrWhiteSpace(url))
+            if (string.IsNullOrWhiteSpace(url) || !IsAllowedDownloadUrl(url))
                 continue;
 
             var lower = name.ToLowerInvariant();
-            if (!lower.Contains("linux") && !lower.Contains("FeatherQuilld".ToLowerInvariant()) && !lower.Contains(repo))
+            if (lower.EndsWith(".sha256") || lower.EndsWith(".sha256.txt"))
+                continue;
+            if (!lower.Contains("linux") && !lower.Contains("featherquilld") && !lower.Contains(repo))
                 continue;
 
             var candidateScore = 0;
@@ -171,37 +265,27 @@ public sealed class DaemonSelfUpdater
             {
                 score = candidateScore;
                 bestUrl = url;
-                bestSha = null;
+                bestSha = shaByStem.TryGetValue(name, out var matchedDigest) ? matchedDigest : null;
+                if (bestSha is null)
+                {
+                    foreach (var (stem, stemDigest) in shaByStem)
+                    {
+                        if (name.StartsWith(stem, StringComparison.OrdinalIgnoreCase)
+                            || stem.StartsWith(Path.GetFileNameWithoutExtension(name), StringComparison.OrdinalIgnoreCase))
+                        {
+                            bestSha = stemDigest;
+                            break;
+                        }
+                    }
+                }
             }
         }
 
+        var sha = bestSha ?? request.Sha256?.Trim();
         if (bestUrl is null)
-        {
-            // Fallback: releases/latest/download/{repo} or FeatherQuilld
-            foreach (var candidate in new[] { repo, "FeatherQuilld", "featherquilld" })
-            {
-                var tag = doc.RootElement.GetProperty("tag_name").GetString()?.TrimStart('v') ?? "latest";
-                var url = $"https://github.com/{owner}/{repo}/releases/download/v{tag}/{candidate}";
-                if (await HeadOkAsync(url, ct).ConfigureAwait(false))
-                    return (url, null);
-            }
-        }
+            return (null, sha, tagName);
 
-        return (bestUrl, bestSha);
-    }
-
-    private static async Task<bool> HeadOkAsync(string url, CancellationToken ct)
-    {
-        try
-        {
-            using var req = new HttpRequestMessage(HttpMethod.Head, url);
-            using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
-            return resp.IsSuccessStatusCode;
-        }
-        catch
-        {
-            return false;
-        }
+        return (bestUrl, sha, tagName);
     }
 
     private static async Task DownloadFileAsync(string url, string destPath, CancellationToken ct)
@@ -218,33 +302,6 @@ public sealed class DaemonSelfUpdater
         using var stream = File.OpenRead(path);
         var hash = SHA256.HashData(stream);
         return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private static async Task<string?> TryReadVersionFromBinaryAsync(string path, CancellationToken ct)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = path,
-                ArgumentList = { "--version" },
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-            };
-            using var proc = Process.Start(psi);
-            if (proc is null)
-                return null;
-            await proc.WaitForExitAsync(ct).ConfigureAwait(false);
-            var output = (await proc.StandardOutput.ReadToEndAsync(ct).ConfigureAwait(false)).Trim();
-            if (output.Length == 0)
-                output = (await proc.StandardError.ReadToEndAsync(ct).ConfigureAwait(false)).Trim();
-            return output.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim().TrimStart('v');
-        }
-        catch
-        {
-            return null;
-        }
     }
 
     private static bool ScheduleReplaceAndRestart(string target, string stagingPath, AppLogger? logger)

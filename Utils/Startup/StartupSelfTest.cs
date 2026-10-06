@@ -87,6 +87,7 @@ public static class StartupSelfTest
         checks.Add(CheckWebSpaces(spaces, config, logger, reporter));
         checks.Add(CheckDockerNetwork(config, logger, reporter));
         checks.AddRange(CheckProxy(config, logger, reporter));
+        checks.Add(CheckApiTls(config, logger, reporter));
         checks.Add(CheckPowerDns(config, logger, reporter));
         checks.AddRange(CheckMail(config, logger, reporter));
         checks.Add(CheckFtp(config, logger, reporter));
@@ -96,6 +97,30 @@ public static class StartupSelfTest
         checks.Add(CheckPanel(config, logger, reporter));
 
         return checks;
+    }
+
+    private static DiagnosticCheck CheckApiTls(AppConfig config, AppLogger logger, BootReporter? reporter)
+    {
+        if (config.Api.Ssl.Enabled)
+            return new DiagnosticCheck("api.tls", "ok", "API TLS enabled", config.Api.Host);
+
+        var host = (config.Api.Host ?? "").Trim();
+        var publicBind = host is "" or "0.0.0.0" or "::" or "*"
+            || (System.Net.IPAddress.TryParse(host, out var ip)
+                && !System.Net.IPAddress.IsLoopback(ip));
+
+        if (!publicBind)
+            return new DiagnosticCheck("api.tls", "ok", "API bound to loopback without TLS", host);
+
+        Warn(
+            "API binds a non-loopback address without TLS — enable api.ssl or terminate TLS on a trusted local reverse proxy for production",
+            logger,
+            reporter);
+        return new DiagnosticCheck(
+            "api.tls",
+            "warn",
+            "API public bind without TLS",
+            $"host={host} port={config.Api.Port}");
     }
 
     private static DiagnosticCheck CheckDirectory(
@@ -363,10 +388,19 @@ public static class StartupSelfTest
         if (!config.Ftp.Enabled)
             return new DiagnosticCheck("ftp.listener", "ok", "Classic FTP disabled in config", null);
 
+        Warn(
+            "Classic FTP is enabled (cleartext credentials) — prefer SFTP; disable ftp.enabled when unused",
+            logger,
+            reporter);
+
         if (FtpProbe.IsListening(config.Ftp))
         {
             logger.Debug(LoggerTypes.SelfTest, $"FTP listening on port {config.Ftp.Port}");
-            return new DiagnosticCheck("ftp.listener", "ok", $"FTP listening on port {config.Ftp.Port}", null);
+            return new DiagnosticCheck(
+                "ftp.listener",
+                "warn",
+                "FTP listening (cleartext) — prefer SFTP",
+                $"port={config.Ftp.Port}");
         }
 
         Warn($"FTP enabled but not listening on port {config.Ftp.Port}", logger, reporter);

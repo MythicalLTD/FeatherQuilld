@@ -643,7 +643,7 @@ public sealed class WebSpaceRuntime : IDisposable
             binds.Add($"{WebSpaceSiteFiles.PhpIniHostPath(dataPath)}:/usr/local/etc/php/conf.d/zz-featherquilld.ini:ro");
         }
 
-        return new HostConfig
+        var hostConfig = new HostConfig
         {
             Binds = binds,
             PortBindings = portBindings,
@@ -655,7 +655,14 @@ public sealed class WebSpaceRuntime : IDisposable
             Memory = memoryBytes > 0 ? memoryBytes : 0,
             NanoCPUs = nanoCpus > 0 ? nanoCpus : 0,
             LogConfig = BuildLogConfig(),
+            CapDrop = ["ALL"],
+            SecurityOpt = ["no-new-privileges:true"],
         };
+
+        if (!string.IsNullOrWhiteSpace(_docker.UsernsMode))
+            hostConfig.UsernsMode = _docker.UsernsMode.Trim();
+
+        return hostConfig;
     }
 
     private LogConfig BuildLogConfig()

@@ -260,12 +260,19 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                     "SFTP ed25519 connection: could not hook subsystem requests; SFTP subsystem will fail for this connection.");
             }
 
-            // Bind pending username auth onto this connection once authenticated.
-            if (connection.User is { Username: { Length: > 0 } username }
-                && _authBySession.TryRemove("user:" + username, out var auth))
+            // Auth is bound via AuthenticatedUser.Properties["sftp_auth"] and/or
+            // conn:{SessionId} — never by username (avoids cross-session confusion).
+            try
             {
-                _authBySession["conn:" + Convert.ToHexString(connection.SessionId.ToArray())] = auth;
+                if (connection.User?.Properties is not null
+                    && connection.User.Properties.TryGetValue("sftp_auth", out var boxed)
+                    && boxed is SftpAuthResult bound
+                    && connection.SessionId is { Length: > 0 } sid)
+                {
+                    _authBySession["conn:" + Convert.ToHexString(sid.ToArray())] = bound;
+                }
             }
+            catch { /* SessionId may not be ready yet; Properties path still works */ }
 
             while (!ct.IsCancellationRequested)
             {
@@ -592,13 +599,6 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         }
         catch { /* SessionId may throw if not ready */ }
 
-        var username = connection.User?.Username;
-        if (!string.IsNullOrEmpty(username)
-            && _authBySession.TryGetValue("user:" + username, out auth!))
-        {
-            return true;
-        }
-
         return false;
     }
 
@@ -872,7 +872,8 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                     return ValueTask.FromResult<(AuthResult, AuthenticatedUser?)>((AuthResult.Failure, null));
                 }
 
-                _owner._authBySession["user:" + context.Username] = result;
+                if (sessionKey.Length > 0)
+                    _owner._authBySession["conn:" + sessionKey] = result;
                 var user = new AuthenticatedUser
                 {
                     Username = context.Username,

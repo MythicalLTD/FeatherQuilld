@@ -183,6 +183,7 @@ public sealed class WebSpaceFileService
         var root = RequireRoot(uuid);
         var path = ResolveWritable(root, file);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        RemoveEscapingSymlinkIfPresent(root, path);
         File.WriteAllText(path, contents ?? "", Encoding.UTF8);
     
     }
@@ -461,6 +462,7 @@ public sealed class WebSpaceFileService
             : ResolveWritable(root, directory);
         Directory.CreateDirectory(dir);
         var dest = ResolveWritable(root, CombineVirtual(directory, safeName));
+        RemoveEscapingSymlinkIfPresent(root, dest);
         await using var fs = File.Create(dest);
         await content.CopyToAsync(fs, ct);
     
@@ -532,7 +534,18 @@ public sealed class WebSpaceFileService
             var virtualPath = item.Contains('/') || item.StartsWith('/')
                 ? item
                 : CombineVirtual(workDirVirtual, item);
-            var full = ResolveExisting(root, virtualPath, mustBeDirectory: null);
+            string full;
+            try
+            {
+                full = ResolveExisting(root, virtualPath, mustBeDirectory: null);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                continue; // skip jail-escaping symlinks rather than packing their targets
+            }
+
+            if (!IsSafeToPack(root, full))
+                continue;
             var name = Path.GetFileName(full);
             if (name is "webspace.json" or "site.json")
                 continue;
@@ -545,11 +558,11 @@ public sealed class WebSpaceFileService
         Directory.CreateDirectory(Path.GetDirectoryName(archivePath)!);
 
         if (ext == "zip")
-            CreateZip(archivePath, sources);
+            CreateZip(archivePath, sources, root);
         else if (ext == "7z")
-            Create7z(archivePath, sources);
+            Create7z(archivePath, sources, root);
         else
-            CreateTarGz(archivePath, sources);
+            CreateTarGz(archivePath, sources, root);
 
         return RootedPath.ToVirtual(root, archivePath);
     
@@ -789,11 +802,11 @@ public sealed class WebSpaceFileService
         var tempExt = ext switch { "zip" => "zip", "7z" => "7z", _ => "tar.gz" };
         var temp = Path.Combine(Path.GetTempPath(), $"fq-dl-{Guid.NewGuid():N}.{tempExt}");
         if (ext == "zip")
-            CreateZip(temp, [(dirPath, dirName)]);
+            CreateZip(temp, [(dirPath, dirName)], root);
         else if (ext == "7z")
-            Create7z(temp, [(dirPath, dirName)]);
+            Create7z(temp, [(dirPath, dirName)], root);
         else
-            CreateTarGz(temp, [(dirPath, dirName)]);
+            CreateTarGz(temp, [(dirPath, dirName)], root);
         return temp;
     }
 
@@ -968,6 +981,7 @@ public sealed class WebSpaceFileService
                     continue;
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                RemoveEscapingSymlinkIfPresent(root, target);
                 entry.ExtractToFile(target, overwrite: true);
             }
         }
@@ -993,6 +1007,7 @@ public sealed class WebSpaceFileService
                     continue;
                 }
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                RemoveEscapingSymlinkIfPresent(root, target);
                 using var outStream = File.Create(target);
                 entry.DataStream?.CopyTo(outStream);
             }
@@ -1076,6 +1091,7 @@ public sealed class WebSpaceFileService
 
         var destVirtual = CombineVirtual(dirVirtual, safeName);
         var dest = ResolveWritable(root, destVirtual);
+        RemoveEscapingSymlinkIfPresent(root, dest);
 
         using var response = await GetWithValidatedRedirectsAsync(uri, cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -1270,7 +1286,8 @@ public sealed class WebSpaceFileService
 
     private static string ResolveExisting(string root, string virtualPath, bool? mustBeDirectory)
     {
-        var full = RootedPath.Resolve(root, virtualPath);
+        // Follow existing symlinks and re-jail the final target (SFTP parity).
+        var full = RootedPath.Resolve(root, virtualPath, followExistingLinks: true);
         if (mustBeDirectory == true)
         {
             if (!Directory.Exists(full))
@@ -1290,7 +1307,55 @@ public sealed class WebSpaceFileService
     }
 
     private static string ResolveWritable(string root, string virtualPath) =>
-        RootedPath.Resolve(root, virtualPath, allowMissing: true);
+        RootedPath.Resolve(root, virtualPath, allowMissing: true, followExistingLinks: true);
+
+    /// <summary>
+    /// Before creating/overwriting <paramref name="target"/>, remove an existing symlink
+    /// (without following it) so writes cannot escape the jail through a planted link.
+    /// </summary>
+    private static void RemoveEscapingSymlinkIfPresent(string jailRoot, string target)
+    {
+        try
+        {
+            if (!IsSymlink(target))
+            {
+                if (File.Exists(target) || Directory.Exists(target))
+                    EnsureUnderRoot(jailRoot, RootedPath.ResolveExisting(target));
+                return;
+            }
+
+            // Delete the link inode itself (does not follow), including dangling links.
+            try { File.Delete(target); }
+            catch
+            {
+                Directory.Delete(target);
+            }
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw;
+        }
+        catch
+        {
+            throw new UnauthorizedAccessException("Path escapes WebSpace root.");
+        }
+    }
+
+    private static bool IsSymlink(string path)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(new FileInfo(path).LinkTarget))
+                return true;
+            if (!string.IsNullOrEmpty(new DirectoryInfo(path).LinkTarget))
+                return true;
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static void EnsureUnderRoot(string root, string path)
     {
@@ -1324,7 +1389,31 @@ public sealed class WebSpaceFileService
         if (parsed is < 0 or > 0xFFF)
             throw new ArgumentException($"Invalid mode '{modeStr}'.");
 
+        // Strip setuid/setgid/sticky — daemon creates files as root.
+        parsed &= 0x1FF; // 0o777
         return (UnixFileMode)parsed;
+    }
+
+    /// <summary>True when <paramref name="path"/> is safe to pack (not a symlink escaping the jail).</summary>
+    internal static bool IsSafeToPack(string jailRoot, string path)
+    {
+        try
+        {
+            var attrs = File.GetAttributes(path);
+            if ((attrs & FileAttributes.ReparsePoint) != 0)
+            {
+                // Symlink: only pack if the final target stays under the jail.
+                var resolved = RootedPath.ResolveExisting(path);
+                return RootedPath.IsUnderRoot(jailRoot, resolved);
+            }
+
+            var full = Path.GetFullPath(path);
+            return RootedPath.IsUnderRoot(jailRoot, full);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string FormatUnixMode(string path, bool isDir)
@@ -1355,36 +1444,42 @@ public sealed class WebSpaceFileService
         }
     }
 
-    private static void CreateZip(string archivePath, List<(string FullPath, string EntryName)> sources)
+    private static void CreateZip(string archivePath, List<(string FullPath, string EntryName)> sources, string? jailRoot = null)
     {
         using var zip = ZipFile.Open(archivePath, ZipArchiveMode.Create);
         foreach (var (full, entryName) in sources)
         {
-            if (Directory.Exists(full))
-                AddDirectoryToZip(zip, full, entryName);
-            else
+            if (jailRoot is not null && !IsSafeToPack(jailRoot, full))
+                continue;
+            if (Directory.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReparsePoint) == 0)
+                AddDirectoryToZip(zip, full, entryName, jailRoot);
+            else if (File.Exists(full))
                 zip.CreateEntryFromFile(full, entryName, CompressionLevel.Optimal);
         }
     }
 
-    private static void AddDirectoryToZip(ZipArchive zip, string dirPath, string entryPrefix)
+    private static void AddDirectoryToZip(ZipArchive zip, string dirPath, string entryPrefix, string? jailRoot = null)
     {
         var prefix = entryPrefix.TrimEnd('/') + "/";
         zip.CreateEntry(prefix);
         foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
         {
+            if (jailRoot is not null && !IsSafeToPack(jailRoot, file))
+                continue;
             var rel = Path.GetRelativePath(dirPath, file).Replace('\\', '/');
             zip.CreateEntryFromFile(file, prefix + rel, CompressionLevel.Optimal);
         }
 
         foreach (var sub in Directory.EnumerateDirectories(dirPath, "*", SearchOption.AllDirectories))
         {
+            if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0)
+                continue;
             var rel = Path.GetRelativePath(dirPath, sub).Replace('\\', '/');
             zip.CreateEntry(prefix + rel.TrimEnd('/') + "/");
         }
     }
 
-    private static void CreateTarGz(string archivePath, List<(string FullPath, string EntryName)> sources)
+    private static void CreateTarGz(string archivePath, List<(string FullPath, string EntryName)> sources, string? jailRoot = null)
     {
         var staging = Path.Combine(Path.GetTempPath(), "fq-compress-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(staging);
@@ -1392,10 +1487,12 @@ public sealed class WebSpaceFileService
         {
             foreach (var (full, entryName) in sources)
             {
+                if (jailRoot is not null && !IsSafeToPack(jailRoot, full))
+                    continue;
                 var dest = Path.Combine(staging, entryName);
-                if (Directory.Exists(full))
-                    CopyDirectory(full, dest);
-                else
+                if (Directory.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReparsePoint) == 0)
+                    CopyDirectory(full, dest, jailRoot);
+                else if (File.Exists(full))
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                     File.Copy(full, dest, overwrite: true);
@@ -1412,11 +1509,13 @@ public sealed class WebSpaceFileService
         }
     }
 
-    private static void CopyDirectory(string src, string dest)
+    private static void CopyDirectory(string src, string dest, string? jailRoot = null)
     {
         Directory.CreateDirectory(dest);
         foreach (var file in Directory.EnumerateFiles(src, "*", SearchOption.AllDirectories))
         {
+            if (jailRoot is not null && !IsSafeToPack(jailRoot, file))
+                continue;
             var rel = Path.GetRelativePath(src, file);
             var target = Path.Combine(dest, rel);
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
@@ -1445,11 +1544,12 @@ public sealed class WebSpaceFileService
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            RemoveEscapingSymlinkIfPresent(jailRoot, target);
             entry.ExtractToFile(target, overwrite: true);
         }
     }
 
-    private static void Create7z(string archivePath, List<(string FullPath, string EntryName)> sources)
+    private static void Create7z(string archivePath, List<(string FullPath, string EntryName)> sources, string? jailRoot = null)
     {
         using var stream = File.Create(archivePath);
         using var writer = WriterFactory.OpenWriter(
@@ -1458,9 +1558,11 @@ public sealed class WebSpaceFileService
             new SevenZipWriterOptions(CompressionType.LZMA2));
         foreach (var (full, entryName) in sources)
         {
-            if (Directory.Exists(full))
-                AddDirectoryTo7z(writer, full, entryName);
-            else
+            if (jailRoot is not null && !IsSafeToPack(jailRoot, full))
+                continue;
+            if (Directory.Exists(full) && (File.GetAttributes(full) & FileAttributes.ReparsePoint) == 0)
+                AddDirectoryTo7z(writer, full, entryName, jailRoot);
+            else if (File.Exists(full))
             {
                 using var fileStream = File.OpenRead(full);
                 writer.Write(Path.GetFileName(entryName), fileStream, File.GetLastWriteTimeUtc(full));
@@ -1468,11 +1570,13 @@ public sealed class WebSpaceFileService
         }
     }
 
-    private static void AddDirectoryTo7z(IWriter writer, string dirPath, string entryPrefix)
+    private static void AddDirectoryTo7z(IWriter writer, string dirPath, string entryPrefix, string? jailRoot = null)
     {
         var prefix = entryPrefix.TrimEnd('/') + "/";
         foreach (var file in Directory.EnumerateFiles(dirPath, "*", SearchOption.AllDirectories))
         {
+            if (jailRoot is not null && !IsSafeToPack(jailRoot, file))
+                continue;
             var rel = Path.GetRelativePath(dirPath, file).Replace('\\', '/');
             using var fs = File.OpenRead(file);
             writer.Write(prefix + rel, fs, File.GetLastWriteTimeUtc(file));
@@ -1494,6 +1598,7 @@ public sealed class WebSpaceFileService
             var target = Path.GetFullPath(Path.Combine(destDir, relative.Replace('/', Path.DirectorySeparatorChar)));
             EnsureUnderRoot(jailRoot, target);
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            RemoveEscapingSymlinkIfPresent(jailRoot, target);
 
             using var entryStream = entry.OpenEntryStream();
             using var outStream = File.Create(target);
@@ -1530,6 +1635,7 @@ public sealed class WebSpaceFileService
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                RemoveEscapingSymlinkIfPresent(jailRoot, target);
                 File.Copy(path, target, overwrite: true);
             }
         }

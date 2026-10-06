@@ -4,7 +4,8 @@ using FeatherQuilld.Utils.Config.System;
 
 public class PluginsConfig
 {
-    public bool Enabled { get; set; } = true;
+    /// <summary>Plugins are off by default; enabling them is an explicit root-equivalent trust decision.</summary>
+    public bool Enabled { get; set; }
     public string Directory { get; set; } = SystemConfig.DefaultPluginsDirectory;
     public bool Strict { get; set; }
 

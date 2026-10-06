@@ -342,9 +342,7 @@ public sealed class ReverseProxyManager
             foreach (var redirect in redirectRoutes)
             {
                 any = true;
-                var target = string.IsNullOrWhiteSpace(redirect.RedirectTarget)
-                    ? "/"
-                    : redirect.RedirectTarget.Trim();
+                var target = ProxyRouteSanitizer.NormalizeRedirectTarget(redirect.RedirectTarget) ?? "/";
                 sb.AppendLine(redirect.Domain);
                 sb.AppendLine("{");
                 sb.AppendLine($"\tredir {target}{{uri}} permanent");
@@ -381,7 +379,7 @@ public sealed class ReverseProxyManager
                 var domain = route.Domain;
                 if (string.Equals(route.Type, "redirect", StringComparison.OrdinalIgnoreCase))
                 {
-                    var target = string.IsNullOrWhiteSpace(route.RedirectTarget) ? "/" : route.RedirectTarget.Trim();
+                    var target = ProxyRouteSanitizer.NormalizeRedirectTarget(route.RedirectTarget) ?? "/";
                     sb.AppendLine("server {");
                     sb.AppendLine("    listen 80;");
                     sb.AppendLine($"    server_name {domain};");
@@ -698,9 +696,7 @@ public sealed class ReverseProxyManager
             for (var i = 0; i < redirectRoutes.Count; i++)
             {
                 var redirect = redirectRoutes[i];
-                var target = string.IsNullOrWhiteSpace(redirect.RedirectTarget)
-                    ? "/"
-                    : redirect.RedirectTarget.Trim();
+                var target = ProxyRouteSanitizer.NormalizeRedirectTarget(redirect.RedirectTarget) ?? "/";
                 var routerId = $"ws-rd-{space.Uuid.ToString("N")[..8]}-{i}";
                 var mwId = routerId;
 

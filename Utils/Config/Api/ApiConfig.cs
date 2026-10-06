@@ -22,7 +22,8 @@ public class ApiConfig
 
 public class ApiDocsConfig
 {
-    public bool Enabled { get; set; } = true;
+    /// <summary>OpenAPI/Scalar docs. Off by default for production hardening.</summary>
+    public bool Enabled { get; set; }
 }
 
 public class ApiSslConfig

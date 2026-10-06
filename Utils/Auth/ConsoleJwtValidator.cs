@@ -186,17 +186,18 @@ public sealed class ConsoleJwtValidator
 
     private static IReadOnlyList<string> ParsePermissions(JsonElement payload)
     {
+        // Deny by default — wildcard only when the claim explicitly grants "*".
         if (!payload.TryGetProperty("permissions", out var permsEl))
-            return [ConsolePermissions.Wildcard];
+            return [];
 
         if (permsEl.ValueKind == JsonValueKind.String)
         {
             var s = permsEl.GetString();
-            return string.IsNullOrWhiteSpace(s) ? [ConsolePermissions.Wildcard] : [s];
+            return string.IsNullOrWhiteSpace(s) ? [] : [s];
         }
 
         if (permsEl.ValueKind != JsonValueKind.Array)
-            return [ConsolePermissions.Wildcard];
+            return [];
 
         var list = new List<string>();
         foreach (var el in permsEl.EnumerateArray())
@@ -209,7 +210,7 @@ public sealed class ConsoleJwtValidator
             }
         }
 
-        return list.Count == 0 ? [ConsolePermissions.Wildcard] : list;
+        return list;
     }
 
     private static byte[] Base64UrlDecode(string input)

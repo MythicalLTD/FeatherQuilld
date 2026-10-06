@@ -13,6 +13,7 @@ using FeatherQuilld.Utils.Services;
 using FeatherQuilld.Utils.Startup;
 using FeatherQuilld.Utils.WebSpaces;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using YamlDotNet.Serialization;
@@ -241,7 +242,8 @@ public sealed class PluginManager
 
         foreach (var route in RouteRegistry.Routes)
         {
-            var endpoint = app.MapMethods(route.Pattern, [route.Method], route.Handler);
+            var endpoint = app.MapMethods(route.Pattern, [route.Method], route.Handler)
+                .RequireAuthorization();
             if (!string.IsNullOrEmpty(route.Name))
                 endpoint.WithName(route.Name);
             if (route.Tags.Length > 0)
