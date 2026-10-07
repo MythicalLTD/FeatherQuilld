@@ -12,6 +12,11 @@ public class DockerConfig
     public bool UsePerformantInspect { get; set; } = true;
     public DockerRuntimeReconciliationConfig RuntimeReconciliation { get; set; } = new();
     public string UsernsMode { get; set; } = "";
+
+    /// <summary>
+    /// Linux capability handling for WebSpace containers.
+    /// </summary>
+    public DockerWebSpaceSecurityConfig WebSpaceSecurity { get; set; } = new();
     public List<string> SystemIps { get; set; } = [];
     public bool EnableNativeKvm { get; set; } = true;
     public DockerLogConfig LogConfig { get; set; } = new();
@@ -92,3 +97,47 @@ public class DockerLogConfig
         ["mode"] = "non-blocking",
     };
 }
+
+/// <summary>
+/// Capability hardening for WebSpace containers.
+/// </summary>
+public class DockerWebSpaceSecurityConfig
+{
+    /// <summary>
+    /// Capabilities a WebPlate needs when its startup installs packages before serving:
+    /// the built-in PHP bootstrap (<c>WebSpacePhpExtensions</c>) runs
+    /// <c>apt-get</c> + <c>docker-php-ext-install</c> as root and then Apache.
+    /// apt drops privileges to <c>_apt</c> (SETUID/SETGID/SETGROUPS) and re-owns its list
+    /// directories (CHOWN/DAC_OVERRIDE/FOWNER), Apache binds <c>:80</c> (NET_BIND_SERVICE)
+    /// and switches to www-data. Without these the container dies with
+    /// <c>setgroups 0 failed - setgroups (1: Operation not permitted)</c> and restarts in a loop.
+    /// </summary>
+    public static IReadOnlyList<string> RequiredByPackageInstalls { get; } =
+    [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "KILL",
+        "NET_BIND_SERVICE",
+        "SETGID",
+        "SETUID",
+        "SYS_CHROOT",
+    ];
+
+    /// <summary>
+    /// Drop every capability except <see cref="Capabilities"/>. Switching this off leaves the
+    /// container with the Docker engine default set - only for plates that need more.
+    /// </summary>
+    public bool DropCapabilities { get; set; } = true;
+
+    /// <summary>
+    /// Capabilities kept while <see cref="DropCapabilities"/> is on. An empty list drops every
+    /// capability: strongest hardening, but plates that install packages at boot (PHP) need a
+    /// prebuilt image then.
+    /// </summary>
+    public List<string> Capabilities { get; set; } = [.. RequiredByPackageInstalls];
+
+    /// <summary>Set <c>no-new-privileges</c> on the container.</summary>
+    public bool NoNewPrivileges { get; set; } = true;
+}
+

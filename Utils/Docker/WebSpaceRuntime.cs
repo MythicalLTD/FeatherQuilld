@@ -655,14 +655,37 @@ public sealed class WebSpaceRuntime : IDisposable
             Memory = memoryBytes > 0 ? memoryBytes : 0,
             NanoCPUs = nanoCpus > 0 ? nanoCpus : 0,
             LogConfig = BuildLogConfig(),
-            CapDrop = ["ALL"],
-            SecurityOpt = ["no-new-privileges:true"],
         };
+
+        ApplyContainerSecurity(hostConfig, _docker.WebSpaceSecurity);
 
         if (!string.IsNullOrWhiteSpace(_docker.UsernsMode))
             hostConfig.UsernsMode = _docker.UsernsMode.Trim();
 
         return hostConfig;
+    }
+
+    /// <summary>
+    /// Applies the container's capability hardening. Dropping every capability breaks plates
+    /// whose startup installs packages at boot (the PHP bootstrap runs apt-get +
+    /// docker-php-ext-install), so the config keeps the smallest set those need - see
+    /// <see cref="DockerWebSpaceSecurityConfig.RequiredByPackageInstalls"/>.
+    /// </summary>
+    public static void ApplyContainerSecurity(HostConfig hostConfig, DockerWebSpaceSecurityConfig? security)
+    {
+        ArgumentNullException.ThrowIfNull(hostConfig);
+
+        security ??= new DockerWebSpaceSecurityConfig();
+
+        if (security.DropCapabilities)
+        {
+            hostConfig.CapDrop = ["ALL"];
+            if (security.Capabilities.Count > 0)
+                hostConfig.CapAdd = [.. security.Capabilities];
+        }
+
+        if (security.NoNewPrivileges)
+            hostConfig.SecurityOpt = ["no-new-privileges:true"];
     }
 
     private LogConfig BuildLogConfig()
