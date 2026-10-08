@@ -63,6 +63,15 @@ while [[ "${attempt}" -le "${NEXUS_MAX_RETRIES}" ]]; do
     exit 0
   fi
 
+  # Idempotent re-runs / race between tag-push and release-published jobs.
+  if [[ "${http_code}" =~ ^(400|409)$ ]]; then
+    response="$(cat /tmp/nexus-upload-response.txt 2>/dev/null || true)"
+    if echo "${response}" | grep -Eiq 'already exists|repository does not allow updating assets|cannot be updated'; then
+      echo "Skipping ${filename} (already present in Nexus; HTTP ${http_code})"
+      exit 2
+    fi
+  fi
+
   if [[ "${http_code}" =~ ^(429|502|503|504)$ && "${attempt}" -lt "${NEXUS_MAX_RETRIES}" ]]; then
     echo "Transient error (HTTP ${http_code}). Waiting ${delay}s before retry ${attempt}/${NEXUS_MAX_RETRIES}..." >&2
     sleep "${delay}"

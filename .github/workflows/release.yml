@@ -6,6 +6,12 @@ on:
       - "v*"
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)upload .deb packages to Nexus (e.g. v1.0.0)"
+        required: true
+        type: string
 
 jobs:
   build-and-release:
@@ -42,7 +48,14 @@ jobs:
 
       - name: Set deb version
         id: deb_version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF_NAME}" =~ (rc|beta|alpha) ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build release binaries and .deb packages
         env:
@@ -85,13 +98,14 @@ jobs:
           git commit -m "bump version for release ${VERSION}" || true
           git push -u origin "${BRANCH}"
 
+      # Stable tags publish immediately so apt/docker can follow. Prereleases stay draft.
       - name: Create release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          draft: true
-          prerelease: ${{ contains(github.ref, 'rc') || contains(github.ref, 'beta') || contains(github.ref, 'alpha') }}
+          draft: ${{ steps.deb_version.outputs.is_prerelease == 'true' }}
+          prerelease: ${{ steps.deb_version.outputs.is_prerelease == 'true' }}
           body_path: ./RELEASE_CHANGELOG
           files: |
             dist/featherquilld_linux_amd64
@@ -100,46 +114,16 @@ jobs:
             dist/featherquilld_${{ steps.deb_version.outputs.version }}_arm64.deb
             checksums.txt
 
-  upload-to-nexus:
-    name: Upload to Nexus APT Repository
-    if: github.event_name == 'release'
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-
-    steps:
-      - name: Code Checkout
-        uses: actions/checkout@v4
-
-      - name: Download .deb release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          mapfile -t deb_assets < <(gh release view "${{ github.event.release.tag_name }}" \
-            --repo "${{ github.repository }}" \
-            --json assets \
-            -q '.assets[] | select(.name | endswith(".deb")) | .name')
-
-          if [ "${#deb_assets[@]}" -eq 0 ]; then
-            echo "No .deb assets found on release ${{ github.event.release.tag_name }}"
-            exit 1
-          fi
-
-          for asset in "${deb_assets[@]}"; do
-            gh release download "${{ github.event.release.tag_name }}" \
-              --repo "${{ github.repository }}" \
-              --pattern "${asset}" \
-              --dir dist
-          done
-
+      # Upload from local dist after assets are attached — avoids the publish-vs-asset race
+      # that left v1.0.0 out of apt when the release event fired with an empty asset list.
       - name: Upload .deb packages to Nexus
+        if: steps.deb_version.outputs.is_prerelease != 'true'
         env:
           NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
           NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
           NEXUS_HOST: https://apt.mythicalsystems.org
           NEXUS_REPOSITORY: MythicalSystems
+          NEXUS_CHECK_EXISTS: "1"
         run: |
           set -euo pipefail
 
@@ -167,8 +151,130 @@ jobs:
             ./scripts/nexus-upload-deb.sh "${deb_file}"
             status=$?
             set -e
-            if [ "${status}" -eq 1 ]; then
-              exit 1
+            # 0 = uploaded, 2 = already present, 3 = refused dirty version
+            if [ "${status}" -eq 1 ] || [ "${status}" -eq 3 ]; then
+              exit "${status}"
+            fi
+          done
+
+  upload-to-nexus:
+    name: Upload to Nexus APT Repository
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Code Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download .deb release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # softprops / manual publish can fire before assets finish uploading.
+          # Wait until both architecture packages are present.
+          max_attempts=36
+          sleep_seconds=10
+          attempt=1
+          deb_assets=()
+
+          while [ "${attempt}" -le "${max_attempts}" ]; do
+            mapfile -t deb_assets < <(gh release view "${TAG}" \
+              --repo "${{ github.repository }}" \
+              --json assets \
+              -q '.assets[] | select(.name | (endswith(".deb") and startswith("featherquilld_"))) | .name' \
+              | sort -u)
+
+            # Drop empty lines if gh returns nothing.
+            filtered=()
+            for asset in "${deb_assets[@]}"; do
+              [ -n "${asset}" ] && filtered+=("${asset}")
+            done
+            deb_assets=("${filtered[@]+"${filtered[@]}"}")
+
+            amd64=0
+            arm64=0
+            for asset in "${deb_assets[@]+"${deb_assets[@]}"}"; do
+              case "${asset}" in
+                *_amd64.deb) amd64=1 ;;
+                *_arm64.deb) arm64=1 ;;
+              esac
+            done
+
+            if [ "${#deb_assets[@]}" -ge 2 ] && [ "${amd64}" -eq 1 ] && [ "${arm64}" -eq 1 ]; then
+              echo "Found .deb assets on attempt ${attempt}: ${deb_assets[*]}"
+              break
+            fi
+
+            echo "Waiting for .deb assets on ${TAG} (attempt ${attempt}/${max_attempts}; found: ${#deb_assets[@]})..."
+            sleep "${sleep_seconds}"
+            attempt=$((attempt + 1))
+          done
+
+          if [ "${#deb_assets[@]}" -lt 2 ] || [ "${amd64:-0}" -ne 1 ] || [ "${arm64:-0}" -ne 1 ]; then
+            echo "Timed out waiting for amd64+arm64 .deb assets on release ${TAG}"
+            gh release view "${TAG}" --repo "${{ github.repository }}" --json assets -q '.assets[].name' || true
+            exit 1
+          fi
+
+          for asset in "${deb_assets[@]}"; do
+            gh release download "${TAG}" \
+              --repo "${{ github.repository }}" \
+              --pattern "${asset}" \
+              --dir dist
+          done
+
+      - name: Upload .deb packages to Nexus
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+          NEXUS_HOST: https://apt.mythicalsystems.org
+          NEXUS_REPOSITORY: MythicalSystems
+          NEXUS_CHECK_EXISTS: "1"
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NEXUS_USERNAME}" ] || [ -z "${NEXUS_PASSWORD}" ]; then
+            echo "NEXUS_USERNAME and NEXUS_PASSWORD secrets must be configured"
+            exit 1
+          fi
+
+          shopt -s nullglob
+          deb_files=(dist/featherquilld_*.deb)
+
+          if [ "${#deb_files[@]}" -eq 0 ]; then
+            echo "No .deb files to upload"
+            exit 1
+          fi
+
+          for deb_file in "${deb_files[@]}"; do
+            case "$(basename "${deb_file}")" in
+              featherquilld-dev_*)
+                echo "Skipping unexpected -dev package on prod release: ${deb_file}"
+                continue
+                ;;
+            esac
+            set +e
+            ./scripts/nexus-upload-deb.sh "${deb_file}"
+            status=$?
+            set -e
+            # 0 = uploaded, 2 = already present, 3 = refused dirty version
+            if [ "${status}" -eq 1 ] || [ "${status}" -eq 3 ]; then
+              exit "${status}"
             fi
           done
 
