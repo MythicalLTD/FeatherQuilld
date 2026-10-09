@@ -110,7 +110,7 @@ public static class MailProbe
             return ContainerRunning(null);
 
         return MailBackendKind.IsMailcow(config.System.Mail.Backend)
-            ? MailcowDocker.StackRunning(config)
+            ? MailcowDocker.StackReachable(config)
             : ContainerRunning(config);
     }
 
@@ -120,7 +120,13 @@ public static class MailProbe
         if (config is not null && MailBackendKind.IsMailcow(config.System.Mail.Backend))
         {
             var dovecot = MailcowDocker.FindContainer("dovecot-mailcow");
-            return dovecot ?? MailcowPaths.ProjectName;
+            if (dovecot is not null)
+                return dovecot;
+
+            // A remote stack has no container here; the host name is what diagnostics need.
+            var remote = MailcowDocker.RemoteHost(config);
+
+            return remote is not null ? $"{remote} (remote)" : MailcowPaths.ProjectName;
         }
 
         return MailPaths.ContainerName;

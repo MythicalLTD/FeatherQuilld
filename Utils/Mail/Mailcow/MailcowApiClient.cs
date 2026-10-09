@@ -252,6 +252,20 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
     }
 
     /// <summary>
+    /// True when the API answers the public version endpoint with a version document —
+    /// which is what "the mail stack is reachable" means for a mailcow on another host.
+    /// </summary>
+    public async Task<bool> PingAsync(CancellationToken ct = default)
+    {
+        if (!HasApiKey)
+            return false;
+
+        var body = await GetAsync("/api/v1/get/status/version", ct).ConfigureAwait(false);
+        return !string.IsNullOrWhiteSpace(body)
+            && body.Contains("\"version\"", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// Public DKIM TXT for a domain. mailcow assembles it from its redis keys
     /// (<c>dkim_selector</c>/<c>dkim_txt</c>) and splits long values into quoted
     /// chunks; both are normalized into one usable record value.

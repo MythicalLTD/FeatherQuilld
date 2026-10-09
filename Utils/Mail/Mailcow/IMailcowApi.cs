@@ -38,6 +38,14 @@ public interface IMailcowApi
     Task<string?> GetContainersStatusAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Reachability probe for the mailcow API (<c>GET /api/v1/get/status/version</c>).
+    /// Needed when mailcow runs on its own host: then there is no local container to look
+    /// for and the stack counts as "running" when its API answers. Implementations that
+    /// cannot probe return false, so fakes keep compiling.
+    /// </summary>
+    Task<bool> PingAsync(CancellationToken ct = default) => Task.FromResult(false);
+
+    /// <summary>
     /// DKIM TXT record mailcow generated for a domain (<c>GET /api/v1/get/dkim/&lt;domain&gt;</c>).
     /// mailcow keeps the keys in redis, not as files, so this is the only reliable
     /// source for the DNS hint. Implementations without DKIM support return (null, null)

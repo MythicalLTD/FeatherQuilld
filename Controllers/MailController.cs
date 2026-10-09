@@ -31,7 +31,8 @@ public sealed class MailController : ControllerBase
     {
         try
         {
-            if (MailProbe.ContainerRunning(config))
+            // Backend-aware: a mailcow on its own host has no local container to look for.
+            if (MailProbe.StackRunning(config))
             {
                 var mgr = new MailManager(config, _events);
                 return Ok(mgr.ProbeStatus());
@@ -130,8 +131,9 @@ public sealed class MailController : ControllerBase
             return BadRequest(new { error = "domain is required." });
         try
         {
-            // Best-effort DKIM generation when container is up so hints include keys.
-            if (MailProbe.ContainerRunning(config))
+            // Best-effort DKIM generation when the stack is up (local container or remote API)
+            // so hints include keys.
+            if (MailProbe.StackRunning(config))
             {
                 try
                 {

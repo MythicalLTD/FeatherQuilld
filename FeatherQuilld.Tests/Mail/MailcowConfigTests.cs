@@ -179,6 +179,43 @@ public class MailcowApiClientDkimTests
     }
 
     [Fact]
+    public async Task PingAsync_TrueOnVersionDocument()
+    {
+        var (client, handler) = MakeClient("{\"version\":\"2026-09a\"}");
+
+        Assert.True(await client.PingAsync());
+        Assert.Equal("/api/v1/get/status/version", handler.LastPath);
+    }
+
+    [Fact]
+    public async Task PingAsync_FalseWithoutApiKey()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Backend = MailBackendKind.Mailcow,
+                    Mailcow = new MailcowConfig { Url = "https://mail.example.com" },
+                },
+            },
+        };
+
+        using var client = new MailcowApiClient(config, new HttpClient(new FakeHandler("{\"version\":\"2026-09a\"}")));
+
+        Assert.False(await client.PingAsync());
+    }
+
+    [Fact]
+    public async Task PingAsync_FalseOnErrorBody()
+    {
+        var (client, _) = MakeClient("{\"type\":\"error\",\"msg\":\"api access denied\"}");
+
+        Assert.False(await client.PingAsync());
+    }
+
+    [Fact]
     public async Task GetDkimAsync_ReadsSelectorAndTxtFromMailcowApi()
     {
         var (client, handler) = MakeClient("{\"dkim_selector\":\"dkim\",\"dkim_txt\":\"v=DKIM1;k=rsa;p=ABC\"}");

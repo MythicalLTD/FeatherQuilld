@@ -28,7 +28,7 @@ public sealed class MailcowBackend : IMailBackend
 
     public string DisplayName => "mailcow: dockerized";
 
-    public bool IsRunning() => MailcowDocker.StackRunning(_config);
+    public bool IsRunning() => MailcowDocker.StackReachable(_config);
 
     public object ProbeStatus()
     {
@@ -36,13 +36,20 @@ public sealed class MailcowBackend : IMailBackend
             ? _config.System.Mail.Hostname
             : _config.System.Mail.Mailcow.MailHost;
         var api = _api as MailcowApiClient;
+        var running = IsRunning();
+        // No containers here + the API answers => mailcow runs on its own host.
+        var remoteHost = running && !MailcowDocker.StackRunning(_config, 1500)
+            ? MailcowDocker.RemoteHost(_config)
+            : null;
+        var portsOpen = MailProbe.SmtpReachable(_config) && MailProbe.ImapReachable(_config);
 
         return new
         {
-            available = IsRunning() && MailProbe.SmtpReachable(_config) && MailProbe.ImapReachable(_config),
+            available = running && (remoteHost is not null || portsOpen),
             backend = Kind,
+            mode = remoteHost is not null ? "remote" : "local",
             project = MailcowPaths.ProjectName,
-            container = MailcowPaths.ApiContainerName,
+            container = remoteHost is not null ? $"{remoteHost} (remote)" : MailcowPaths.ApiContainerName,
             hostname = mailHost,
             api_url = api?.BaseUrl.ToString() ?? MailcowApiClient.ResolveBaseUrl(_config).ToString(),
             api_key_configured = api?.HasApiKey ?? MailcowApiClient.ResolveApiKey(_config).Length > 0,

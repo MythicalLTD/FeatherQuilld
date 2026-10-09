@@ -96,4 +96,44 @@ internal static class MailcowDocker
     public static bool StackRunning(AppConfig config, int timeoutMs = 5000) =>
         FindContainer("nginx-mailcow", TimeSpan.FromMilliseconds(timeoutMs)) is not null
         && FindContainer("dovecot-mailcow", TimeSpan.FromMilliseconds(timeoutMs)) is not null;
+
+    /// <summary>
+    /// True when the mailcow stack is usable: either the containers run on this host, or the
+    /// stack lives on a dedicated mail host and answers on <c>system.mail.mailcow.url</c>
+    /// with the configured API key. The panel then manages that remote stack through its API.
+    /// </summary>
+    public static bool StackReachable(AppConfig config, int timeoutMs = 5000) =>
+        StackRunning(config, timeoutMs) || RemoteStackReachable(config);
+
+    public static bool RemoteStackReachable(AppConfig config)
+    {
+        var mailcow = config.System.Mail.Mailcow;
+        if (string.IsNullOrWhiteSpace(mailcow.Url))
+            return false;
+
+        if (MailcowApiClient.ResolveApiKey(config).Length == 0)
+            return false;
+
+        try
+        {
+            using var api = new MailcowApiClient(config);
+            return api.PingAsync().GetAwaiter().GetResult();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Host label for diagnostics: the remote URL when mailcow runs elsewhere.</summary>
+    public static string? RemoteHost(AppConfig config)
+    {
+        var url = (config.System.Mail.Mailcow.Url ?? string.Empty).Trim();
+        if (url.Length == 0)
+            return null;
+
+        return Uri.TryCreate(url.Contains("://", StringComparison.Ordinal) ? url : "https://" + url, UriKind.Absolute, out var uri)
+            ? uri.Host
+            : url;
+    }
 }
