@@ -144,6 +144,14 @@ public sealed class MailController : ControllerBase
                 }
             }
 
+            // mailcow keeps DKIM in redis, so the hints need the API; docker-mailserver
+            // keeps the key as a file and gets null here.
+            if (MailBackendKind.IsMailcow(config.System.Mail.Backend))
+            {
+                using var api = new MailcowApiClient(config);
+                return Ok(MailDnsHelper.BuildHintsPayload(config, domain, api));
+            }
+
             return Ok(MailDnsHelper.BuildHintsPayload(config, domain));
         }
         catch (Exception ex)

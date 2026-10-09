@@ -251,6 +251,55 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
         }
     }
 
+    /// <summary>
+    /// Public DKIM TXT for a domain. mailcow assembles it from its redis keys
+    /// (<c>dkim_selector</c>/<c>dkim_txt</c>) and splits long values into quoted
+    /// chunks; both are normalized into one usable record value.
+    /// </summary>
+    public async Task<(string? Selector, string? Txt)> GetDkimAsync(string domain, CancellationToken ct = default)
+    {
+        var normalized = domain.Trim().TrimEnd('.').ToLowerInvariant();
+        if (normalized.Length == 0)
+            return (null, null);
+
+        var body = await GetAsync("/api/v1/get/dkim/" + Uri.EscapeDataString(normalized), ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(body))
+            return (null, null);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            // mailcow answers "[]" when a domain has no key yet; a non-object root has
+            // no properties and would otherwise throw.
+            if (root.ValueKind != JsonValueKind.Object)
+                return (null, null);
+
+            var selector = root.TryGetProperty("dkim_selector", out var sel) ? sel.GetString() : null;
+            var txt = root.TryGetProperty("dkim_txt", out var value) ? value.GetString() : null;
+
+            return (NormalizeDkimValue(selector), NormalizeDkimValue(txt));
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException)
+        {
+            return (null, null);
+        }
+    }
+
+    /// <summary>Joins mailcow's <c>"chunk1" "chunk2"</c> split back into a single TXT value.</summary>
+    private static string? NormalizeDkimValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var joined = value
+            .Replace("\" \"", string.Empty, StringComparison.Ordinal)
+            .Replace("\"", string.Empty, StringComparison.Ordinal)
+            .Trim();
+
+        return joined.Length == 0 ? null : joined;
+    }
+
     private async Task<MailcowResult> PostAsync(string path, object payload, CancellationToken ct)
     {
         try

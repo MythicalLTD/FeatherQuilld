@@ -8,7 +8,7 @@ public static class MailDnsHelper
 {
     public sealed record DnsHintRecord(string Type, string Name, string Value, int? Priority = null);
 
-    public static IReadOnlyList<DnsHintRecord> BuildHints(AppConfig config, string domain)
+    public static IReadOnlyList<DnsHintRecord> BuildHints(AppConfig config, string domain, IMailcowApi? mailcowApi = null)
     {
         domain = NormalizeDomain(domain);
         var hostname = ResolveMailHostname(config, domain);
@@ -18,7 +18,7 @@ public static class MailDnsHelper
             new("TXT", "@", BuildSpf(hostname)),
         };
 
-        var dkim = TryGetDkimRecord(config, domain);
+        var dkim = TryGetDkimRecord(config, domain, mailcowApi);
         if (dkim is { } dkimRecord)
         {
             records.Add(new DnsHintRecord("TXT", dkimRecord.Selector + "._domainkey", dkimRecord.Value));
@@ -38,15 +38,15 @@ public static class MailDnsHelper
         return $"v=DMARC1; p=none; rua=mailto:{rua}";
     }
 
-    public static bool IsDkimReady(AppConfig config, string domain) =>
-        TryGetDkimRecord(config, domain) is not null;
+    public static bool IsDkimReady(AppConfig config, string domain, IMailcowApi? mailcowApi = null) =>
+        TryGetDkimRecord(config, domain, mailcowApi) is not null;
 
     /// <summary>Hints plus whether DKIM TXT is available for auto-provision.</summary>
-    public static object BuildHintsPayload(AppConfig config, string domain)
+    public static object BuildHintsPayload(AppConfig config, string domain, IMailcowApi? mailcowApi = null)
     {
         domain = NormalizeDomain(domain);
-        var records = BuildHints(config, domain);
-        var dkim = TryGetDkimRecord(config, domain);
+        var records = BuildHints(config, domain, mailcowApi);
+        var dkim = TryGetDkimRecord(config, domain, mailcowApi);
         return new
         {
             domain,
@@ -80,19 +80,32 @@ public static class MailDnsHelper
     private static string NormalizeDomain(string domain) =>
         domain.Trim().TrimEnd('.').ToLowerInvariant();
 
-    public static (string Selector, string Value)? TryGetDkimRecord(AppConfig config, string domain)
+    /// <summary>
+    /// DKIM TXT for a domain. With the mailcow backend the key lives in mailcow's redis
+    /// (read through the API); docker-mailserver keeps it as a file. The file candidates
+    /// stay as a fallback so a half-migrated host still yields a record.
+    /// </summary>
+    public static (string Selector, string Value)? TryGetDkimRecord(AppConfig config, string domain, IMailcowApi? mailcowApi = null)
     {
         domain = NormalizeDomain(domain);
         var selector = (config.System.Mail.DkimSelector ?? "mail").Trim();
         if (selector.Length == 0)
             selector = "mail";
 
+        if (mailcowApi is not null && MailBackendKind.IsMailcow(config.System.Mail.Backend))
+        {
+            var fromApi = TryGetDkimRecordFromApi(mailcowApi, domain);
+            if (fromApi is { } apiRecord)
+                return apiRecord;
+        }
+
         var candidates = new[]
         {
             Path.Combine(MailPaths.MailStateDir(config), "opendkim", "keys", domain, $"{selector}.txt"),
             Path.Combine(MailPaths.MailStateDir(config), "opendkim", "keys", domain, "mail.txt"),
             Path.Combine(MailPaths.ConfigDir(config), "opendkim", "keys", domain, $"{selector}.txt"),
-            // mailcow keeps generated keys under data/dkim/<domain>/<selector>.txt
+            // legacy mailcow layouts (< 2024 releases shipped key files); current
+            // mailcow keeps them in redis, hence the API path above.
             MailcowPaths.DkimKeyFile(config, domain, selector),
             MailcowPaths.DkimKeyFile(config, domain, "dkim"),
             MailcowPaths.DkimKeyFile(config, domain, "mail"),
@@ -117,6 +130,27 @@ public static class MailDnsHelper
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Synchronous bridge to the (async) mailcow client. The hints endpoint runs without a
+    /// synchronization context, so waiting here cannot deadlock; a missing key simply
+    /// falls back to the file candidates.
+    /// </summary>
+    private static (string Selector, string Value)? TryGetDkimRecordFromApi(IMailcowApi mailcowApi, string domain)
+    {
+        try
+        {
+            var (selector, txt) = mailcowApi.GetDkimAsync(domain).GetAwaiter().GetResult();
+            if (string.IsNullOrWhiteSpace(txt))
+                return null;
+
+            return (string.IsNullOrWhiteSpace(selector) ? "dkim" : selector.Trim(), txt.Trim());
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     internal static string ParseDkimTxt(string raw)

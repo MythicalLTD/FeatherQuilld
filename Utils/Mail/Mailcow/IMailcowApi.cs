@@ -36,4 +36,13 @@ public interface IMailcowApi
     Task<MailcowResult> SetSpamScoreAsync(string email, double score, CancellationToken ct = default);
 
     Task<string?> GetContainersStatusAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// DKIM TXT record mailcow generated for a domain (<c>GET /api/v1/get/dkim/&lt;domain&gt;</c>).
+    /// mailcow keeps the keys in redis, not as files, so this is the only reliable
+    /// source for the DNS hint. Implementations without DKIM support return (null, null)
+    /// so fakes keep compiling.
+    /// </summary>
+    Task<(string? Selector, string? Txt)> GetDkimAsync(string domain, CancellationToken ct = default) =>
+        Task.FromResult<(string?, string?)>((null, null));
 }

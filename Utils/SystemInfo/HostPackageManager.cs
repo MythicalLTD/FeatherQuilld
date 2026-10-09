@@ -774,9 +774,11 @@ public sealed class HostPackageManager
                 return fetch;
         }
 
-        await WriteMailcowConfAsync(packageId, root, ct).ConfigureAwait(false);
+        var apiKey = MailcowConfigFile.GenerateApiKey();
+        var apiKeyReadOnly = MailcowConfigFile.GenerateApiKey();
 
-        var apiKey = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
+        await WriteMailcowConfAsync(packageId, root, apiKey, apiKeyReadOnly, ct).ConfigureAwait(false);
+
         await File.WriteAllTextAsync(MailcowPaths.ApiKeyFile(_config), apiKey + "\n", ct).ConfigureAwait(false);
 
         await EmitOutputAsync(packageId, "Pulling mailcow images (this takes a while)…\n", ct).ConfigureAwait(false);
@@ -791,25 +793,28 @@ public sealed class HostPackageManager
 
         return MailcowDocker.StackRunning(_config)
             ? HostPackageOperationResult.Ok(
-                $"mailcow installed (UI on port {_config.System.Mail.Mailcow.HttpsPort}); " +
-                "set system.mail.backend: mailcow and paste the API key from feather-api-key into mailcow")
+                $"mailcow installed (UI/API on https://127.0.0.1:{_config.System.Mail.Mailcow.HttpsPort}, " +
+                "published on loopback because the panel's proxy owns 80/443); " +
+                "the API key lives in mailcow.conf (API_KEY/API_ALLOW_FROM) and feather-api-key — " +
+                "set system.mail.backend: mailcow and /api/mail/* manages the stack, nothing to paste")
             : HostPackageOperationResult.Fail("mailcow compose finished but the containers are not running (check docker compose logs)");
     }
 
     /// <summary>
-    /// Writes mailcow.conf from mailcow's own example file, overriding only the keys
-    /// the panel has an opinion about (hostname, ports, ACME, timezone). Everything
-    /// else stays at mailcow's defaults so upgrades keep working.
+    /// Writes mailcow.conf: mailcow's own <c>generate_config.sh</c> creates the file
+    /// (only it knows every key the compose file expects) and the panel then overrides
+    /// the keys it owns — including <c>API_KEY</c>/<c>API_ALLOW_FROM</c>, which is what
+    /// lets <c>/api/mail/*</c> manage the stack without pasting anything into the UI.
+    /// When the script is missing from the checkout a documented fallback config is
+    /// written instead of an empty file.
     /// </summary>
-    private async Task WriteMailcowConfAsync(string packageId, string root, CancellationToken ct)
+    private async Task WriteMailcowConfAsync(
+        string packageId,
+        string root,
+        string apiKey,
+        string apiKeyReadOnly,
+        CancellationToken ct)
     {
-        var examplePath = Path.Combine(root, "mailcow.conf.example");
-        var confPath = Path.Combine(root, "mailcow.conf");
-
-        var lines = File.Exists(examplePath)
-            ? (await File.ReadAllLinesAsync(examplePath, ct).ConfigureAwait(false)).ToList()
-            : [];
-
         var mail = _config!.System.Mail;
         var hostname = (mail.Mailcow.MailHost ?? string.Empty).Trim();
         if (hostname.Length == 0)
@@ -817,38 +822,85 @@ public sealed class HostPackageManager
         if (hostname.Length == 0)
             hostname = "mail." + Environment.MachineName.ToLowerInvariant();
 
-        var overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["MAILCOW_HOSTNAME"] = hostname,
-            // The panel's reverse proxy owns 80/443, so mailcow listens elsewhere
-            // unless the operator configured the default ports explicitly.
-            ["HTTP_PORT"] = mail.Mailcow.HttpPort.ToString(),
-            ["HTTPS_PORT"] = mail.Mailcow.HttpsPort.ToString(),
-            ["SKIP_LETS_ENCRYPT"] = mail.Mailcow.SkipAcme ? "y" : "n",
-            ["TZ"] = string.IsNullOrWhiteSpace(_config.System.Timezone) ? "UTC" : _config.System.Timezone.Trim(),
-        };
+        var timezone = string.IsNullOrWhiteSpace(_config.System.Timezone) ? "UTC" : _config.System.Timezone.Trim();
+        var skipClamd = ResolveSkipClamd();
 
-        foreach (var (key, value) in overrides)
+        var overrides = MailcowConfigFile.BuildOverrides(
+            mail,
+            hostname,
+            timezone,
+            apiKey,
+            apiKeyReadOnly,
+            "127.0.0.1",
+            skipClamd);
+
+        var confPath = MailcowPaths.ConfFile(_config);
+        var scriptPath = Path.Combine(root, "generate_config.sh");
+        var usedScript = false;
+
+        if (File.Exists(scriptPath))
         {
-            var replaced = false;
-            for (var i = 0; i < lines.Count; i++)
+            await EmitOutputAsync(packageId, "Running mailcow's generate_config.sh…\n", ct).ConfigureAwait(false);
+            var run = await RunShellAsync(
+                packageId,
+                MailcowConfigFile.BuildGenerateConfigCommand(root, hostname, timezone, skipClamd),
+                null,
+                ct).ConfigureAwait(false);
+            usedScript = run.Success && File.Exists(confPath);
+            if (!usedScript)
             {
-                if (lines[i].StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
-                {
-                    lines[i] = $"{key}={value}";
-                    replaced = true;
-                    break;
-                }
+                await EmitOutputAsync(
+                    packageId,
+                    "generate_config.sh did not produce mailcow.conf, writing the fallback config\n",
+                    ct).ConfigureAwait(false);
             }
+        }
 
-            if (!replaced)
-                lines.Add($"{key}={value}");
+        List<string> lines;
+        if (usedScript)
+        {
+            var generated = await File.ReadAllLinesAsync(confPath, ct).ConfigureAwait(false);
+            lines = MailcowConfigFile.ApplyOverrides(generated, overrides);
+        }
+        else
+        {
+            lines = MailcowConfigFile.BuildFallbackConf(hostname, timezone, overrides, MailcowConfigFile.GenerateSecret);
         }
 
         await File.WriteAllLinesAsync(confPath, lines, ct).ConfigureAwait(false);
+
         await EmitOutputAsync(packageId,
-            $"Wrote {confPath} (hostname {hostname}, HTTP {mail.Mailcow.HttpPort}, HTTPS {mail.Mailcow.HttpsPort}, " +
-            $"ACME {(mail.Mailcow.SkipAcme ? "skipped use the panel's certificates" : "by mailcow")})\n", ct).ConfigureAwait(false);
+            $"Wrote {confPath} ({(usedScript ? "from mailcow's generate_config.sh" : "fallback template")}; " +
+            $"hostname {hostname}, UI/API on 127.0.0.1:{mail.Mailcow.HttpsPort}, " +
+            $"ACME {(mail.Mailcow.SkipAcme ? "skipped, the panel's proxy keeps 80/443" : "by mailcow")}, " +
+            $"API key + API_ALLOW_FROM set{ (skipClamd ? ", ClamAV disabled (low memory)" : "") })\n",
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// ClamAV off below 2.5 GiB, matching what generate_config.sh recommends for small
+    /// hosts — without answering that prompt interactively the install would hang.
+    /// </summary>
+    private static bool ResolveSkipClamd()
+    {
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/meminfo"))
+            {
+                if (!line.StartsWith("MemTotal:", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var digits = new string(line.Where(char.IsDigit).ToArray());
+                if (long.TryParse(digits, out var kb))
+                    return kb <= 2621440;
+            }
+        }
+        catch
+        {
+            // unknown memory: keep mailcow's default (ClamAV on)
+        }
+
+        return false;
     }
 
     private async Task<HostPackageOperationResult> RemoveMailcowAsync(

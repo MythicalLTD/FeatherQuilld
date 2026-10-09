@@ -41,7 +41,11 @@ public static class MailcowPaths
     public static string DataDir(AppConfig config) =>
         Path.Combine(Root(config), "data");
 
-    /// <summary>mailcow stores generated DKIM keys as <c>data/dkim/&lt;domain&gt;/&lt;selector&gt;.txt</c>.</summary>
+    /// <summary>
+    /// Legacy location of a generated DKIM key file. Current mailcow releases keep the
+    /// keys in redis (read them through <c>GET /api/v1/get/dkim/&lt;domain&gt;</c>); this
+    /// path is only a fallback for old checkouts.
+    /// </summary>
     public static string DkimKeyFile(AppConfig config, string domain, string selector) =>
         Path.Combine(DataDir(config), "dkim", domain.Trim().ToLowerInvariant(), selector + ".txt");
 
