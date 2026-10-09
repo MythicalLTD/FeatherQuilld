@@ -87,6 +87,66 @@ public class MailDnsHelperTests
     }
 
     [Fact]
+    public void BuildHints_IncludesClientAutoconfigurationAsOptional()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "mail.example.com",
+                    ImapPort = 993,
+                    SmtpPort = 587,
+                    Mailcow = new MailcowConfig { MailHost = "mail.example.com" },
+                },
+            },
+        };
+
+        var hints = MailDnsHelper.BuildHints(config, "example.com");
+
+        var autodiscover = hints.Single(h => h.Type == "CNAME" && h.Name == "autodiscover");
+        Assert.Equal("mail.example.com.", autodiscover.Value);
+        Assert.True(autodiscover.Optional);
+
+        var imaps = hints.Single(h => h.Type == "SRV" && h.Name == "_imaps._tcp");
+        Assert.True(imaps.Optional);
+        Assert.Equal("_imaps", imaps.Service);
+        Assert.Equal("_tcp", imaps.Protocol);
+        Assert.Equal(993, imaps.Port);
+        Assert.Equal("mail.example.com.", imaps.Target);
+
+        var submission = hints.Single(h => h.Type == "SRV" && h.Name == "_submission._tcp");
+        Assert.Equal(587, submission.Port);
+
+        // The records a mail domain cannot work without stay required.
+        Assert.False(hints.Single(h => h.Type == "MX").Optional);
+        Assert.False(hints.Single(h => h.Type == "TXT" && h.Name == "@").Optional);
+    }
+
+    [Fact]
+    public void BuildHints_UsesTheConfiguredPorts()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "mail.example.com",
+                    ImapPort = 1993,
+                    SmtpPort = 1587,
+                },
+            },
+        };
+
+        var hints = MailDnsHelper.BuildHints(config, "example.com");
+
+        Assert.Equal(1993, hints.Single(h => h.Name == "_imaps._tcp").Port);
+        Assert.Equal(1587, hints.Single(h => h.Name == "_submission._tcp").Port);
+    }
+
+    [Fact]
     public void ResolveMailHostname_FallsBackToTheMailcowHost()
     {
         // A node that never set mail.hostname must still publish an MX record that resolves:

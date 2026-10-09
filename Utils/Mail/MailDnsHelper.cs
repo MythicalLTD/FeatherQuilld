@@ -6,16 +6,50 @@ namespace FeatherQuilld.Utils.Mail;
 
 public static class MailDnsHelper
 {
-    public sealed record DnsHintRecord(string Type, string Name, string Value, int? Priority = null);
+    private const int DEFAULT_IMAPS_PORT = 993;
+    private const int DEFAULT_SUBMISSION_PORT = 587;
+    private const int DEFAULT_POP3S_PORT = 995;
+
+    /// <summary>
+    /// One record the panel should write for a mail domain.
+    ///
+    /// <paramref name="Optional"/> marks the client-autoconfiguration records (autodiscover,
+    /// autoconfig, SRV): they make mail clients configure themselves but must never make a
+    /// provisioning run fail. SRV records carry their structured parts as well, because DNS
+    /// providers want them as separate fields.
+    /// </summary>
+    public sealed record DnsHintRecord(
+        string Type,
+        string Name,
+        string Value,
+        int? Priority = null,
+        bool Optional = false,
+        string? Service = null,
+        string? Protocol = null,
+        int? Port = null,
+        int? Weight = null,
+        string? Target = null);
 
     public static IReadOnlyList<DnsHintRecord> BuildHints(AppConfig config, string domain, IMailcowApi? mailcowApi = null)
     {
         domain = NormalizeDomain(domain);
         var hostname = ResolveMailHostname(config, domain);
+        var host = hostname.TrimEnd('.');
+        var imapPort = config.System.Mail.ImapPort > 0 ? config.System.Mail.ImapPort : DEFAULT_IMAPS_PORT;
+        var submissionPort = config.System.Mail.SmtpPort > 0 ? config.System.Mail.SmtpPort : DEFAULT_SUBMISSION_PORT;
         var records = new List<DnsHintRecord>
         {
             new("MX", "@", hostname, 10),
             new("TXT", "@", BuildSpf(hostname)),
+            // Client autoconfiguration: Outlook/Thunderbird read these before asking the user.
+            new("CNAME", "autodiscover", host + ".", Optional: true),
+            new("CNAME", "autoconfig", host + ".", Optional: true),
+            new("SRV", "_imaps._tcp", $"0 1 {imapPort} {hostname}", Optional: true,
+                Service: "_imaps", Protocol: "_tcp", Port: imapPort, Weight: 1, Target: hostname),
+            new("SRV", "_submission._tcp", $"0 1 {submissionPort} {hostname}", Optional: true,
+                Service: "_submission", Protocol: "_tcp", Port: submissionPort, Weight: 1, Target: hostname),
+            new("SRV", "_pop3s._tcp", $"0 1 {DEFAULT_POP3S_PORT} {hostname}", Optional: true,
+                Service: "_pop3s", Protocol: "_tcp", Port: DEFAULT_POP3S_PORT, Weight: 1, Target: hostname),
         };
 
         var dkim = TryGetDkimRecord(config, domain, mailcowApi);
@@ -61,6 +95,12 @@ public static class MailDnsHelper
                 name = r.Name,
                 value = r.Value,
                 priority = r.Priority,
+                optional = r.Optional,
+                service = r.Service,
+                protocol = r.Protocol,
+                port = r.Port,
+                weight = r.Weight,
+                target = r.Target,
             }),
         };
     }
