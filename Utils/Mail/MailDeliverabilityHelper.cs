@@ -51,11 +51,29 @@ public static class MailDeliverabilityHelper
     {
         domain = domain.Trim().TrimEnd('.').ToLowerInvariant();
         var mxHost = MailDnsHelper.ResolveMailHostname(config, domain).TrimEnd('.');
-        var ptr = CheckPtr(mxHost, publicIp);
+
+        // What a receiving server reverse-resolves is the address of the MX target, not the
+        // address of the web node that happens to run this daemon.
+        var mxIp = ResolveHostIp(mxHost);
+        var ptr = CheckPtr(mxHost, mxIp ?? publicIp);
+        if (mxIp is null && ptr.Status != "pass")
+        {
+            ptr = ptr with
+            {
+                Detail = $"{mxHost} does not resolve to an address, PTR checked against the web node IP"
+                    + (string.IsNullOrWhiteSpace(publicIp) ? "." : $" ({publicIp})."),
+            };
+        }
+
+        var nodePtr = publicIp is not null && !string.Equals(mxIp, publicIp, StringComparison.Ordinal)
+            ? CheckPtr(mxHost, publicIp)
+            : null;
+
         return new
         {
             domain,
             mx_host = mxHost,
+            mx_ip = mxIp,
             public_ip = publicIp,
             ptr = new
             {
@@ -65,14 +83,51 @@ public static class MailDeliverabilityHelper
                 ptr_host = ptr.PtrHost,
                 detail = ptr.Detail,
             },
+            node_ptr = nodePtr is null
+                ? null
+                : new
+                {
+                    status = nodePtr.Status,
+                    public_ip = nodePtr.PublicIp,
+                    ptr_host = nodePtr.PtrHost,
+                    detail = nodePtr.Detail,
+                },
             ports = new
             {
-                smtp_25 = MailProbe.PortOpen(25),
+                smtp_25 = MailProbe.MxPortOpen(config),
                 submission = MailProbe.SmtpReachable(config),
                 imap = MailProbe.ImapReachable(config),
+                probe_host = MailProbe.ProbeHost(config),
             },
             mail_container = MailProbe.ContainerRunning(config),
         };
+    }
+
+    /// <summary>First IPv4 (else any) address of a hostname, null when it does not resolve.</summary>
+    private static string? ResolveHostIp(string host)
+    {
+        if (host.Trim().Length == 0)
+            return null;
+
+        try
+        {
+            var addresses = global::System.Net.Dns.GetHostAddresses(host);
+            foreach (var address in addresses)
+            {
+                if (address.AddressFamily == AddressFamily.InterNetwork)
+                    return address.ToString();
+            }
+
+            return addresses.Length > 0 ? addresses[0].ToString() : null;
+        }
+        catch (SocketException)
+        {
+            return null;
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
     }
 
     private static bool HostnamesMatch(string left, string right)

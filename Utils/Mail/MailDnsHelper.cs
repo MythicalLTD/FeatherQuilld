@@ -118,6 +118,16 @@ public static class MailDnsHelper
     /// </summary>
     public static string ResolveMailHostname(AppConfig config, string domain)
     {
+        var configured = ResolveConfiguredMailHost(config);
+
+        return configured.Length > 0 ? configured + "." : "mail." + NormalizeDomain(domain) + ".";
+    }
+
+    /// <summary>
+    /// Configured mail host without the per-domain fallback; empty when nothing is configured.
+    /// </summary>
+    public static string ResolveConfiguredMailHost(AppConfig config)
+    {
         string?[] candidates =
         [
             config.System.Mail.Hostname,
@@ -129,10 +139,10 @@ public static class MailDnsHelper
         {
             var value = NormalizeHostnameCandidate(candidate);
             if (value.Length > 0)
-                return value + ".";
+                return value;
         }
 
-        return "mail." + NormalizeDomain(domain) + ".";
+        return string.Empty;
     }
 
     /// <summary>Bare hostname from a hostname, URL or "host:port" value.</summary>
