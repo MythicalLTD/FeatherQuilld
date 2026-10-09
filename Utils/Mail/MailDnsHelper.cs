@@ -68,13 +68,48 @@ public static class MailDnsHelper
     public static string BuildSpf(string hostname) =>
         "v=spf1 mx a:" + hostname.TrimEnd('.') + " -all";
 
+    /// <summary>
+    /// Hostname clients should use for MX/SPF.
+    ///
+    /// Prefers the configured <c>mail.hostname</c>, then the mail backend's own host (a remote
+    /// mailcow usually has one) and only invents <c>mail.&lt;domain&gt;</c> when nothing is
+    /// configured - that last fallback produced an MX record pointing at a host that does not
+    /// exist whenever a node left <c>mail.hostname</c> empty.
+    /// </summary>
     public static string ResolveMailHostname(AppConfig config, string domain)
     {
-        var configured = (config.System.Mail.Hostname ?? "").Trim();
-        if (configured.Length > 0)
-            return configured.TrimEnd('.') + ".";
+        string?[] candidates =
+        [
+            config.System.Mail.Hostname,
+            config.System.Mail.Mailcow.MailHost,
+            config.System.Mail.Mailcow.Url,
+        ];
+
+        foreach (var candidate in candidates)
+        {
+            var value = NormalizeHostnameCandidate(candidate);
+            if (value.Length > 0)
+                return value + ".";
+        }
 
         return "mail." + NormalizeDomain(domain) + ".";
+    }
+
+    /// <summary>Bare hostname from a hostname, URL or "host:port" value.</summary>
+    private static string NormalizeHostnameCandidate(string? candidate)
+    {
+        var value = (candidate ?? string.Empty).Trim();
+        if (value.Length == 0)
+            return string.Empty;
+
+        if (value.Contains("://", StringComparison.Ordinal) && Uri.TryCreate(value, UriKind.Absolute, out var uri))
+            value = uri.Host;
+
+        var cut = value.IndexOfAny(['/', ':']);
+        if (cut >= 0)
+            value = value[..cut];
+
+        return value.Trim().TrimEnd('.').ToLowerInvariant();
     }
 
     private static string NormalizeDomain(string domain) =>

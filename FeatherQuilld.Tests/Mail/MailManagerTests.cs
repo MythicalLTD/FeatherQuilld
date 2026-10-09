@@ -87,6 +87,58 @@ public class MailDnsHelperTests
     }
 
     [Fact]
+    public void ResolveMailHostname_FallsBackToTheMailcowHost()
+    {
+        // A node that never set mail.hostname must still publish an MX record that resolves:
+        // the remote mailcow knows its own host, so use it before inventing mail.<domain>.
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "",
+                    Mailcow = new MailcowConfig { MailHost = "mail.allo.bet" },
+                },
+            },
+        };
+
+        Assert.Equal("mail.allo.bet.", MailDnsHelper.ResolveMailHostname(config, "example.com"));
+    }
+
+    [Fact]
+    public void ResolveMailHostname_UsesTheMailcowUrlHostAsLastFallback()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "",
+                    Mailcow = new MailcowConfig { Url = "https://mail.example.com:8443" },
+                },
+            },
+        };
+
+        Assert.Equal("mail.example.com.", MailDnsHelper.ResolveMailHostname(config, "example.com"));
+    }
+
+    [Fact]
+    public void ResolveMailHostname_OnlyInventsAHostWhenNothingIsConfigured()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig { Hostname = "", Mailcow = new MailcowConfig { Url = "", MailHost = "" } },
+            },
+        };
+
+        Assert.Equal("mail.example.com.", MailDnsHelper.ResolveMailHostname(config, "example.com"));
+    }
+
+    [Fact]
     public void IsDkimReady_TrueWhenKeyFilePresent()
     {
         var root = Path.Combine(Path.GetTempPath(), "fq-mail-dkim-" + Guid.NewGuid().ToString("N"));
