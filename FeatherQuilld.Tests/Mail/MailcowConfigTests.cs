@@ -148,9 +148,12 @@ public class MailcowApiClientDkimTests
 
         public string? LastPath { get; private set; }
 
+        public string? LastBody { get; private set; }
+
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             LastPath = request.RequestUri?.AbsolutePath;
+            LastBody = request.Content?.ReadAsStringAsync(cancellationToken).GetAwaiter().GetResult();
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(_body, Encoding.UTF8, "application/json"),
@@ -176,6 +179,65 @@ public class MailcowApiClientDkimTests
 
         var handler = new FakeHandler(body);
         return (new MailcowApiClient(config, new HttpClient(handler)), handler);
+    }
+
+    [Fact]
+    public async Task DeleteDomainAsync_SendsBareArrayBody()
+    {
+        // json_api.php assigns the whole delete request to $_POST['items'], so a wrapped
+        // {"items": […]} deletes nothing and mailcow answers "access_denied".
+        var (client, handler) = MakeClient("[]");
+
+        await client.DeleteDomainAsync("example.com");
+
+        Assert.Equal("[\"example.com\"]", handler.LastBody?.Trim());
+        Assert.Equal("/api/v1/delete/domain", handler.LastPath);
+    }
+
+    [Fact]
+    public async Task DeleteMailboxAsync_SendsBareArrayBody()
+    {
+        var (client, handler) = MakeClient("[]");
+
+        await client.DeleteMailboxAsync("user@example.com");
+
+        Assert.Equal("[\"user@example.com\"]", handler.LastBody?.Trim());
+        Assert.Equal("/api/v1/delete/mailbox", handler.LastPath);
+    }
+
+    [Fact]
+    public async Task AddDomainAsync_KeepsMailboxesUsable()
+    {
+        // mailcow treats mailboxes=0 as "no mailboxes at all" (count >= mailboxes), so a
+        // freshly created domain must carry a real limit or every mailbox add fails.
+        var (client, handler) = MakeClient("[{\"type\":\"success\",\"msg\":[\"domain added\"]}]");
+
+        await client.AddDomainAsync("example.com");
+
+        Assert.Contains("\"mailboxes\":\"10\"", handler.LastBody);
+        Assert.Contains("\"active\":\"1\"", handler.LastBody);
+    }
+
+    [Fact]
+    public async Task AddDomainAsync_UsesConfiguredMailboxLimit()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Backend = MailBackendKind.Mailcow,
+                    Mailcow = new MailcowConfig { Url = "https://mail.example.com", ApiKey = "k", DomainMailboxLimit = 25 },
+                },
+            },
+        };
+        var handler = new FakeHandler("[]");
+        using var client = new MailcowApiClient(config, new HttpClient(handler));
+
+        await client.AddDomainAsync("example.com");
+
+        Assert.Contains("\"mailboxes\":\"25\"", handler.LastBody);
     }
 
     [Fact]

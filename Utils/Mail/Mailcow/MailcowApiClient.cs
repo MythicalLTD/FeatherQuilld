@@ -14,11 +14,16 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
     private readonly HttpClient _http;
     private readonly string _apiKey;
     private readonly bool _ownsHttpClient;
+    private readonly int _domainMailboxLimit;
 
     public MailcowApiClient(AppConfig config, HttpClient? httpClient = null)
     {
         BaseUrl = ResolveBaseUrl(config);
         _apiKey = ResolveApiKey(config);
+        // mailcow treats 0 as "no mailboxes"; keep a usable value even with a bad setting.
+        _domainMailboxLimit = config.System.Mail.Mailcow.DomainMailboxLimit > 0
+            ? config.System.Mail.Mailcow.DomainMailboxLimit
+            : 10;
         _ownsHttpClient = httpClient is null;
         _http = httpClient ?? CreateDefaultClient(config);
         if (_http.BaseAddress is null)
@@ -91,7 +96,8 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
             ["domain"] = domain,
             ["description"] = "managed by FeatherQuilld",
             ["aliases"] = "400",
-            ["mailboxes"] = "0",
+            // NOT 0: mailcow's mailbox add rejects everything while count >= mailboxes.
+            ["mailboxes"] = _domainMailboxLimit.ToString(),
             ["defquota"] = "3072",
             ["maxquota"] = "10240",
             ["quota"] = "10240",
@@ -103,7 +109,10 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
         }, ct);
 
     public Task<MailcowResult> DeleteDomainAsync(string domain, CancellationToken ct = default) =>
-        PostAsync("/api/v1/delete/domain", new Dictionary<string, object?> { ["domain"] = domain }, ct);
+        // delete/* expects the BARE array as the request body: json_api.php assigns the whole
+        // request to $_POST['items'] and the handler json_decodes it, so {"items":[…]}
+        // arrives as items = {"items": […]} and mailcow answers "access_denied".
+        PostAsync("/api/v1/delete/domain", new[] { domain }, ct);
 
     public Task<MailcowResult> AddMailboxAsync(string email, string password, bool active = true,
         long quotaMb = 0, CancellationToken ct = default)
@@ -125,7 +134,8 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
     }
 
     public Task<MailcowResult> DeleteMailboxAsync(string email, CancellationToken ct = default) =>
-        PostAsync("/api/v1/delete/mailbox", new Dictionary<string, object?> { ["items"] = new[] { email } }, ct);
+        // bare array body, see DeleteDomainAsync
+        PostAsync("/api/v1/delete/mailbox", new[] { email }, ct);
 
     public Task<MailcowResult> EditMailboxAsync(string email, IReadOnlyDictionary<string, object?> attributes,
         CancellationToken ct = default) =>
@@ -151,8 +161,7 @@ public sealed class MailcowApiClient : IMailcowApi, IDisposable
         if (id is null)
             return MailcowResult.Success("alias not found");
 
-        return await PostAsync("/api/v1/delete/alias",
-            new Dictionary<string, object?> { ["items"] = new[] { id } }, ct).ConfigureAwait(false);
+        return await PostAsync("/api/v1/delete/alias", new[] { id }, ct).ConfigureAwait(false);
     }
 
     /// <summary>Resolves a mailcow alias id from its address; null when it does not exist.</summary>

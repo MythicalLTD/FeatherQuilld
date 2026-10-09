@@ -432,8 +432,10 @@ public class MailcowApiClientTests
 
         var deleteRequest = handler.Requests[1];
         Assert.Equal("/api/v1/delete/alias", deleteRequest.Path);
+        // delete/* takes the bare array as the body (json_api.php: items = whole request)
         using var doc = JsonDocument.Parse(deleteRequest.Body!);
-        Assert.Equal("6", doc.RootElement.GetProperty("items")[0].GetString());
+        Assert.Equal(JsonValueKind.Array, doc.RootElement.ValueKind);
+        Assert.Equal("6", doc.RootElement[0].GetString());
     }
 
     [Fact]

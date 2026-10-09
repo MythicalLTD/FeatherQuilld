@@ -181,6 +181,15 @@ public class MailcowConfig
     public string MailHost { get; set; } = "";
 
     /// <summary>
+    /// Max. number of mailboxes mailcow allows per domain the panel creates. mailcow reads
+    /// this as a hard cap (<c>functions.mailbox.inc.php: count &gt;= mailboxes</c>), so 0
+    /// means "no mailboxes at all" — a real number is required, otherwise every mailbox on
+    /// an auto-created domain fails with <c>max_mailbox_exceeded</c>.
+    /// </summary>
+    [YamlMember(Alias = "domain_mailbox_limit")]
+    public int DomainMailboxLimit { get; set; } = 10;
+
+    /// <summary>
     /// Accept mailcow's certificate even when it is self-signed (typical when the
     /// panel's reverse proxy terminates ACME and mailcow serves its default cert).
     /// </summary>
