@@ -21,8 +21,11 @@ public sealed class MailController : ControllerBase
 
     private MailManager RequireManager(AppConfig config)
     {
-        if (!MailProbe.ContainerRunning(config))
-            throw new InvalidOperationException("Mail server is not running on this node.");
+        // A mailcow on its own host has no container here, so the stack predicate decides -
+        // ContainerRunning() would report every remote setup as "not running".
+        if (!MailProbe.StackRunning(config))
+            throw new InvalidOperationException(
+                $"Mail server is not running ({MailProbe.StackIdentifier(config)}). Docs: docs/mail-backends.md");
         return new MailManager(config, _events);
     }
 
@@ -31,7 +34,8 @@ public sealed class MailController : ControllerBase
     {
         try
         {
-            if (MailProbe.ContainerRunning(config))
+            // Backend-aware: a mailcow on its own host has no local container to look for.
+            if (MailProbe.StackRunning(config))
             {
                 var mgr = new MailManager(config, _events);
                 return Ok(mgr.ProbeStatus());
@@ -130,8 +134,9 @@ public sealed class MailController : ControllerBase
             return BadRequest(new { error = "domain is required." });
         try
         {
-            // Best-effort DKIM generation when container is up so hints include keys.
-            if (MailProbe.ContainerRunning(config))
+            // Best-effort DKIM generation when the stack is up (local container or remote API)
+            // so hints include keys.
+            if (MailProbe.StackRunning(config))
             {
                 try
                 {
@@ -142,6 +147,14 @@ public sealed class MailController : ControllerBase
                 {
                     // hints may still return MX/SPF without DKIM
                 }
+            }
+
+            // mailcow keeps DKIM in redis, so the hints need the API; docker-mailserver
+            // keeps the key as a file and gets null here.
+            if (MailBackendKind.IsMailcow(config.System.Mail.Backend))
+            {
+                using var api = new MailcowApiClient(config);
+                return Ok(MailDnsHelper.BuildHintsPayload(config, domain, api));
             }
 
             return Ok(MailDnsHelper.BuildHintsPayload(config, domain));

@@ -1,52 +1,46 @@
-using System.Diagnostics;
-using System.Text;
 using System.Text.Json;
 using FeatherQuilld.Plugins.Events;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 
 namespace FeatherQuilld.Utils.Mail;
 
+/// <summary>
+/// Front door for the mail API. Parsing, event hooks and panel side bookkeeping
+/// (domain list, autoresponder state, mailing lists) live here; everything that
+/// depends on the installed mail stack is delegated to the configured
+/// <see cref="IMailBackend"/> (docker-mailserver by default, mailcow optional).
+/// </summary>
 public sealed class MailManager
 {
     private readonly AppConfig _config;
     private readonly IEventBus _events;
+    private readonly IMailBackend _backend;
 
     public MailManager(AppConfig config, IEventBus? events = null)
+        : this(config, events, backend: null)
+    {
+    }
+
+    /// <summary>
+    /// Test/DI seam: <paramref name="backend"/> overrides the backend that
+    /// <c>system.mail.backend</c> would select.
+    /// </summary>
+    public MailManager(AppConfig config, IEventBus? events, IMailBackend? backend)
     {
         _config = config;
         _events = events.OrNoOp();
-        if (!MailProbe.ContainerRunning(config))
-            throw new InvalidOperationException("Mail server container is not running.");
+        _backend = backend ?? MailBackendFactory.Create(config, _events);
+        if (!_backend.IsRunning())
+            throw new InvalidOperationException(
+                $"{_backend.DisplayName} mail server is not running. {_backend.NotRunningHint()}");
     }
 
-    public object ProbeStatus() => new
-    {
-        available = MailProbe.IsAvailable(_config),
-        container = MailPaths.ContainerName,
-        hostname = _config.System.Mail.Hostname,
-        smtp_port = _config.System.Mail.SmtpPort,
-        imap_port = _config.System.Mail.ImapPort,
-        port_25_open = MailProbe.PortOpen(25),
-        submission_open = MailProbe.SmtpReachable(_config),
-        imap_open = MailProbe.ImapReachable(_config),
-        deliverability_hint = MailProbe.PortOpen(25)
-            ? null
-            : "SMTP port 25 is not listening inbound MX and many providers require it; also set PTR/rDNS for outbound.",
-    };
+    /// <summary>Backend actually in use (also surfaced through the probe payload).</summary>
+    public string BackendKind => _backend.Kind;
 
-    public IReadOnlyList<string> ListDomains()
-    {
-        var path = MailPaths.DomainsFile(_config);
-        if (!File.Exists(path))
-            return Array.Empty<string>();
+    public object ProbeStatus() => _backend.ProbeStatus();
 
-        return File.ReadAllLines(path)
-            .Select(l => l.Trim().ToLowerInvariant())
-            .Where(l => l.Length > 0 && !l.StartsWith('#'))
-            .Distinct()
-            .OrderBy(l => l)
-            .ToList();
-    }
+    public IReadOnlyList<string> ListDomains() => _backend.ListDomains();
 
     public void AddDomain(string domain)
     {
@@ -56,17 +50,13 @@ public sealed class MailManager
             err => new MailDomainAddAfterEvent { Domain = domain, Error = err },
             () =>
             {
-                // docker-mailserver has no top-level "domain" management command as
-                // of v13+ (ACCOUNT_PROVISIONER=FILE, the default here): domains
-                // exist implicitly from mailbox addresses in postfix-accounts.cf,
-                // there is nothing to "add" separately. Calling
-                // "setup domain add <domain>" against a current image fails with
-                // "invalid command" and previously aborted mailbox creation before
-                // "setup email add" ever ran. Domain tracking for our own
-                // /api/mail/domains listing and DKIM key generation is handled
-                // locally/via "config dkim domain" (EnsureDkim) below.
-                PersistDomain(domain, add: true);
-                EnsureDkim(domain);
+                // Both backends keep their own view of domains: docker-mailserver
+                // v13+ (ACCOUNT_PROVISIONER=FILE) has no "setup domain add" and
+                // creates domains implicitly from mailbox addresses, mailcow needs
+                // an explicit /add/domain before the first mailbox. Our own
+                // tracking file serves GET /api/mail/domains and DKIM generation
+                // in both cases.
+                _backend.AddDomain(domain);
             });
     }
 
@@ -76,14 +66,7 @@ public sealed class MailManager
         _events.WithHooks(
             new MailDomainRemoveBeforeEvent { Domain = domain },
             err => new MailDomainRemoveAfterEvent { Domain = domain, Error = err },
-            () =>
-            {
-                // See AddDomain: no "setup domain del" command exists on current
-                // docker-mailserver images. Removing the last mailbox on a domain
-                // is what actually removes it from the container's own view; this
-                // only drops it from our local tracking file.
-                PersistDomain(domain, add: false);
-            });
+            () => _backend.RemoveDomain(domain));
     }
 
     public object Provision(IReadOnlyDictionary<string, object?> payload)
@@ -122,11 +105,10 @@ public sealed class MailManager
         var domain = EmailDomain(email);
         AddDomain(domain);
 
-        var args = new List<string> { "email", "add", email, password };
-        RunSetup(args.ToArray());
+        _backend.CreateMailbox(email, password);
 
         if (GetBool(payload, "enabled") == false)
-            SetEnabledInternal(email, enabled: false);
+            _backend.SetMailboxEnabled(email, enabled: false);
 
         return new { ok = true, email };
     }
@@ -134,7 +116,7 @@ public sealed class MailManager
     private object DeleteMailbox(IReadOnlyDictionary<string, object?> payload)
     {
         var email = RequireEmail(payload);
-        RunSetup("email", "del", email);
+        _backend.DeleteMailbox(email);
         return new { ok = true, email };
     }
 
@@ -142,7 +124,7 @@ public sealed class MailManager
     {
         var email = RequireEmail(payload);
         var password = GetString(payload, "password") ?? throw new InvalidOperationException("password is required.");
-        RunSetup("email", "update", email, password);
+        _backend.UpdateMailboxPassword(email, password);
         return new { ok = true, email };
     }
 
@@ -150,16 +132,8 @@ public sealed class MailManager
     {
         var email = RequireEmail(payload);
         var enabled = GetBool(payload, "enabled") ?? true;
-        SetEnabledInternal(email, enabled);
+        _backend.SetMailboxEnabled(email, enabled);
         return new { ok = true, email, enabled };
-    }
-
-    private void SetEnabledInternal(string email, bool enabled)
-    {
-        if (enabled)
-            RunSetup("email", "restrict", "del", email);
-        else
-            RunSetup("email", "restrict", "add", email, "send");
     }
 
     private object SetForward(IReadOnlyDictionary<string, object?> payload, bool delete)
@@ -170,9 +144,9 @@ public sealed class MailManager
             throw new InvalidOperationException("destination is required.");
 
         if (delete)
-            RunSetup("alias", "del", source);
+            _backend.DeleteAlias(source, destination);
         else
-            RunSetup("alias", "add", source, destination);
+            _backend.AddAlias(source, destination);
 
         return new { ok = true, source, destination };
     }
@@ -190,7 +164,7 @@ public sealed class MailManager
         {
             if (File.Exists(path))
                 File.Delete(path);
-            MailVacationHelper.RemoveAutorespond(_config, email);
+            _backend.SetAutorespond(email, enabled: false, subject, body);
             return new { ok = true, email, enabled = false };
         }
 
@@ -203,13 +177,13 @@ public sealed class MailManager
             updated_at = DateTimeOffset.UtcNow.ToString("O"),
         };
         File.WriteAllText(path, JsonSerializer.Serialize(doc, new JsonSerializerOptions { WriteIndented = true }));
-        MailVacationHelper.WriteAutorespond(_config, email, subject, body);
+        _backend.SetAutorespond(email, enabled: true, subject, body);
 
         return new { ok = true, email, enabled = true, sieve = true };
     }
 
     public bool GetSpamFilterEnabled(string email) =>
-        MailSpamHelper.GetSpamFilterEnabled(_config, email);
+        _backend.GetSpamFilterEnabled(email);
 
     public object SetSpamFilter(IReadOnlyDictionary<string, object?> payload)
     {
@@ -220,7 +194,7 @@ public sealed class MailManager
             (_, err) => new MailSpamFilterAfterEvent { Email = email, Error = err },
             () =>
             {
-                MailSpamHelper.SetSpamFilterEnabled(_config, email, enabled);
+                _backend.SetSpamFilterEnabled(email, enabled);
                 return new { ok = true, email, enabled };
             });
     }
@@ -235,13 +209,15 @@ public sealed class MailManager
         if (members.Count == 0)
             throw new InvalidOperationException("members is required.");
 
-        return MailListHelper.CreateList(_config, address, members, (source, dest) => RunSetup("alias", "add", source, dest));
+        // Mailing lists are emulated with per-member aliases because neither
+        // docker-mailserver's setup CLI nor mailcow's API exposes list objects.
+        return MailListHelper.CreateList(_config, address, members, _backend.AddAlias);
     }
 
     private object DeleteList(IReadOnlyDictionary<string, object?> payload)
     {
         var address = GetString(payload, "address") ?? RequireEmail(payload);
-        return MailListHelper.DeleteList(_config, address, (source, dest) => RunSetup("alias", "del", source, dest));
+        return MailListHelper.DeleteList(_config, address, (source, dest) => _backend.DeleteAlias(source, dest));
     }
 
     private object SetListMember(IReadOnlyDictionary<string, object?> payload)
@@ -254,8 +230,8 @@ public sealed class MailManager
             address,
             member,
             add,
-            (source, dest) => RunSetup("alias", "add", source, dest),
-            (source, dest) => RunSetup("alias", "del", source, dest));
+            _backend.AddAlias,
+            (source, dest) => _backend.DeleteAlias(source, dest));
     }
 
     private static List<string> GetStringList(IReadOnlyDictionary<string, object?> payload, string key)
@@ -285,84 +261,8 @@ public sealed class MailManager
     }
 
     /// <summary>Generate DKIM keys with short retries until the TXT file is readable.</summary>
-    public bool EnsureDkim(string domain, int maxAttempts = 6, int delayMs = 1000)
-    {
-        domain = NormalizeDomain(domain);
-        for (var attempt = 0; attempt < Math.Max(1, maxAttempts); attempt++)
-        {
-            try
-            {
-                RunSetup("config", "dkim", "domain", domain);
-            }
-            catch
-            {
-                // Container may still be starting retry until file appears.
-            }
-
-            if (MailDnsHelper.IsDkimReady(_config, domain))
-                return true;
-
-            if (attempt < maxAttempts - 1 && delayMs > 0)
-                Thread.Sleep(delayMs);
-        }
-
-        return MailDnsHelper.IsDkimReady(_config, domain);
-    }
-
-    private void PersistDomain(string domain, bool add)
-    {
-        var path = MailPaths.DomainsFile(_config);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var domains = File.Exists(path)
-            ? File.ReadAllLines(path).Select(l => l.Trim()).Where(l => l.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        if (add)
-            domains.Add(domain);
-        else
-            domains.Remove(domain);
-
-        File.WriteAllLines(path, domains.OrderBy(d => d));
-    }
-
-    private void RunSetup(params string[] setupArgs)
-    {
-        var args = new List<string> { "exec", MailPaths.ContainerName, "setup" };
-        args.AddRange(setupArgs);
-        RunDocker(args);
-    }
-
-    internal void RunDocker(IReadOnlyList<string> args)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "docker",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        foreach (var arg in args)
-            psi.ArgumentList.Add(arg);
-
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start docker.");
-
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        if (!proc.WaitForExit(120_000))
-        {
-            try { proc.Kill(entireProcessTree: true); } catch { /* ignore */ }
-            throw new InvalidOperationException("docker command timed out.");
-        }
-
-        if (proc.ExitCode != 0)
-        {
-            var combined = (stdout + "\n" + stderr).Trim();
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(combined)
-                ? $"docker exited with code {proc.ExitCode}"
-                : combined);
-        }
-    }
+    public bool EnsureDkim(string domain, int maxAttempts = 6, int delayMs = 1000) =>
+        _backend.EnsureDkim(NormalizeDomain(domain), maxAttempts, delayMs);
 
     private static string ResolveProvisionEmail(IReadOnlyDictionary<string, object?> payload) =>
         (GetString(payload, "email")
