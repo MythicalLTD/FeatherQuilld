@@ -54,10 +54,14 @@ public class MailDnsHelperTests
     [Fact]
     public void BuildHints_IncludesMxAndSpfWithoutDkimFile()
     {
+        // A throwaway root: with the default root directory the assertion below reads the mail
+        // state of the machine running the tests, so a single leftover DKIM key for example.com
+        // (e.g. from a live node) turned this into a false negative.
         var config = new AppConfig
         {
             System = new SystemConfig
             {
+                RootDirectory = Path.Combine(Path.GetTempPath(), "fq-mail-hints-" + Guid.NewGuid().ToString("N")),
                 Mail = new MailConfig
                 {
                     Enabled = true,
