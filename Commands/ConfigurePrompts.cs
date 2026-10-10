@@ -223,8 +223,8 @@ internal static class ConfigurePrompts
     {
         AnsiConsole.WriteLine();
         AnsiConsole.Write(new Panel(new Markup(Mc(
-                "&7Create a &fweb&7 location on FeatherPanel (Admin → Locations).&r\n" +
-                "&8Same API as FeatherWings type is set to &fweb&8 automatically.&r")))
+                "&7Create a web location on FeatherPanel (Admin → Locations).&r\n" +
+                "&8Creating one accepts the Web Hosting alpha notice on the panel.&r")))
             .Header("[bold] new location [/]", Justify.Center)
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.FromHex(Teal))

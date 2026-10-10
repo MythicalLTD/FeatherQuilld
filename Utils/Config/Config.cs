@@ -2,6 +2,7 @@ using FeatherQuilld.Utils.Config.Api;
 using FeatherQuilld.Utils.Config.Docker;
 using FeatherQuilld.Utils.Config.Remote;
 using FeatherQuilld.Utils.Config.Ftp;
+using FeatherQuilld.Utils.Config.Sentry;
 using FeatherQuilld.Utils.Config.Sftp;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Plugins;
@@ -37,6 +38,7 @@ public class Config
     public SftpConfig Sftp { get; set; } = new();
     public FtpConfig Ftp { get; set; } = new();
     public DockerConfig Docker { get; set; } = new();
+    public SentryConfig Sentry { get; set; } = new();
 
     [YamlIgnore]
     public string BearerToken => $"{TokenId}.{Token}";
@@ -164,6 +166,7 @@ public class Config
         Sftp = merged.Sftp;
         Ftp = merged.Ftp;
         Docker = merged.Docker;
+        Sentry = merged.Sentry;
 
         Uuid = uuid;
         TokenId = tokenId;

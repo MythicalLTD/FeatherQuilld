@@ -52,6 +52,7 @@ public class AdminPanelCreateLocationTests
         Assert.Equal("de", location.FlagCode);
         Assert.NotNull(capturedBody);
         Assert.Contains("\"type\":\"web\"", capturedBody);
+        Assert.Contains("\"webhosting_alpha_accepted\":true", capturedBody);
         Assert.Contains("\"flag_code\":\"de\"", capturedBody);
     }
 

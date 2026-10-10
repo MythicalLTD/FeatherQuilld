@@ -10,7 +10,7 @@ public static class RootPrivileges
 {
     public const string Hint =
         """
-        FeatherQuilld must run as root (same as FeatherWings).
+        FeatherQuilld must run as root.
 
         It talks to the Docker daemon, bind-mounts WebSpace volumes, and writes
         /etc/featherquilld, /var/lib/featherquilld, and /var/log/featherquilld.

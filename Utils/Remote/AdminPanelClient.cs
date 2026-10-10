@@ -125,6 +125,9 @@ public sealed class AdminPanelClient : IDisposable
         if (string.IsNullOrWhiteSpace(request.Type))
             request.Type = "web";
 
+        // Panel rejects web locations until the Web Hosting alpha notice is accepted.
+        request.WebhostingAlphaAccepted = true;
+
         if (!string.IsNullOrWhiteSpace(request.FlagCode))
             request.FlagCode = request.FlagCode.Trim().ToLowerInvariant();
         else
@@ -317,7 +320,7 @@ public sealed class AdminPanelLocation
     public string? FlagCode { get; set; }
 }
 
-/// <summary>Create payload for PUT /api/admin/locations (FeatherWings-compatible).</summary>
+/// <summary>Create payload for PUT /api/admin/locations (type=web).</summary>
 public sealed class CreateLocationRequest
 {
     [JsonPropertyName("name")]
@@ -325,6 +328,10 @@ public sealed class CreateLocationRequest
 
     [JsonPropertyName("type")]
     public string Type { get; set; } = "web";
+
+    /// <summary>Required by FeatherPanel when creating a web location (alpha feature gate).</summary>
+    [JsonPropertyName("webhosting_alpha_accepted")]
+    public bool WebhostingAlphaAccepted { get; set; } = true;
 
     [JsonPropertyName("description")]
     public string? Description { get; set; }

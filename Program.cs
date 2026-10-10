@@ -2,7 +2,9 @@ using FeatherQuilld.Commands;
 using FeatherQuilld.Utils;
 using FeatherQuilld.Utils.Config;
 using FeatherQuilld.Utils.Logger;
+using FeatherQuilld.Utils.Sentry;
 using FeatherQuilld.Utils.Startup;
+using Sentry;
 
 namespace FeatherQuilld;
 
@@ -80,6 +82,8 @@ public static class Program
             return;
         }
 
+        SentryBootstrap.Init(Config);
+
         StartupBanner.Print(Config.AppName, quiet: Config.Quiet);
 
         var host = DaemonHost.Build(args, Config);
@@ -93,7 +97,12 @@ public static class Program
         catch (Exception ex)
         {
             Logger.Error(LoggerTypes.Application, "Fatal error", ex);
+            SentrySdk.CaptureException(ex);
             Environment.Exit(1);
+        }
+        finally
+        {
+            SentryBootstrap.Flush();
         }
     }
 

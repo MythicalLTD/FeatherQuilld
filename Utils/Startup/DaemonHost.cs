@@ -6,6 +6,7 @@ using FeatherQuilld.Utils.Plugins;
 using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.Remote;
 using FeatherQuilld.Utils.Services;
+using FeatherQuilld.Utils.Sentry;
 using FeatherQuilld.Utils.WebSpaces;
 using FeatherQuilld.Utils.WebSpaces.Disk;
 using Microsoft.AspNetCore.Authentication;
@@ -172,6 +173,11 @@ public sealed class DaemonHost
 
         if (config.Debug)
             Logger.Debug(LoggerTypes.Application, "Debug logging enabled");
+
+        if (config.Sentry.IsActive)
+            Logger.Info(LoggerTypes.Application, "Error reporting → GlitchTip (Sentry SDK)");
+        else
+            Logger.Info(LoggerTypes.Application, "Error reporting disabled");
     }
 
     public void Run() => App.Run();
@@ -186,6 +192,7 @@ public sealed class DaemonHost
         builder.Services.AddSingleton(config.Sftp);
         builder.Services.AddSingleton(config.Ftp);
         builder.Services.AddSingleton(config.Docker);
+        builder.Services.AddSingleton(config.Sentry);
         builder.Services.AddSingleton<DaemonState>();
         builder.Services.AddSingleton<PanelClient>();
         builder.Services.AddSingleton<IPanelClient>(sp => sp.GetRequiredService<PanelClient>());
@@ -481,6 +488,8 @@ public sealed class DaemonHost
             {
                 // Soft shutdown plugins may observe the stopping token.
             }
+
+            SentryBootstrap.Flush();
         });
     }
 

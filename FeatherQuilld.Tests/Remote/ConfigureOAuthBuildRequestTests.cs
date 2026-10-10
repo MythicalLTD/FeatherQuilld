@@ -62,18 +62,20 @@ public class ConfigureOAuthBuildRequestTests
 public class CreateLocationRequestTests
 {
     [Fact]
-    public void Serializes_WingsCompatible_WebLocationPayload()
+    public void Serializes_WebLocationPayload_WithAlphaAcceptance()
     {
         var json = System.Text.Json.JsonSerializer.Serialize(new CreateLocationRequest
         {
             Name = "EU West",
             Type = "web",
+            WebhostingAlphaAccepted = true,
             Description = "Amsterdam",
             FlagCode = "nl",
         });
 
         Assert.Contains("\"name\":\"EU West\"", json);
         Assert.Contains("\"type\":\"web\"", json);
+        Assert.Contains("\"webhosting_alpha_accepted\":true", json);
         Assert.Contains("\"description\":\"Amsterdam\"", json);
         Assert.Contains("\"flag_code\":\"nl\"", json);
     }
