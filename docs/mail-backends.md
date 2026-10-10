@@ -15,6 +15,13 @@ stack answers.
 
 ## 1. Enable mailcow on this node (FeatherQuilld installs and manages it)
 
+**From the panel:** open the web node, tab *Package manager*, and install the
+`Mail server (mailcow: dockerized)` package — the panel registers the node's mail host for you and
+its card links back here. The backend switch itself is a node setting: paste the three lines under
+*Configuration → Advanced config overrides* (`system.mail.backend: mailcow`, plus
+`mail.mailcow.url`/`api_key` only when the stack runs somewhere else). The commands below are the
+same steps without a panel.
+
 Requirements on the mail host:
 
 * Docker with the compose plugin (`docker compose version` must work) — mailcow is not a
