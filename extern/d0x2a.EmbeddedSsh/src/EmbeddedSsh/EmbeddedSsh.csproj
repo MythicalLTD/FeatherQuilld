@@ -1,0 +1,35 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>d0x2a.EmbeddedSsh</RootNamespace>
+    <AssemblyName>d0x2a.EmbeddedSsh</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>CS1591;CS0675</NoWarn>
+  </PropertyGroup>
+
+  <!-- NuGet Package Metadata -->
+  <PropertyGroup>
+    <PackageId>d0x2a.EmbeddedSsh</PackageId>
+    <Version>1.1.1</Version>
+    <Authors>d0x2a</Authors>
+    <Description>Minimal, embeddable SSH-2 server library for .NET. Zero external dependencies with pure managed cryptographic implementations (ChaCha20-Poly1305, AES-GCM, Curve25519, Ed25519). Features post-quantum hybrid key exchange (mlkem768x25519-sha256) and supports public key and password authentication.</Description>
+    <PackageTags>ssh;ssh2;server;embedded;cryptography;security;networking;post-quantum;mlkem</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/d0x2a/EmbeddedSsh</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/d0x2a/EmbeddedSsh.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <Copyright>Copyright (c) 2025 d0x2a</Copyright>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>

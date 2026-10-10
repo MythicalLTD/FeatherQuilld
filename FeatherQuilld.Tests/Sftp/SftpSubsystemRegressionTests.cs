@@ -12,10 +12,9 @@ using AppConfig = FeatherQuilld.Utils.Config.Config;
 namespace FeatherQuilld.Tests.Sftp;
 
 /// <summary>
-/// Regression test for the "subsystem request failed on channel 0" bug: SFTP connections
-/// died silently right after successful auth because HandleEmbeddedConnectionAsync hooked
-/// subsystem requests and started accepting channels before SshConnection.RunAsync had
-/// finished the handshake and constructed its internal connection layer.
+/// Regression smoke for SFTP startup with a slow panel auth round-trip. The historical
+/// "subsystem request failed on channel 0" bug is covered by the OpenSSH e2e tests and
+/// fixed by installing ChannelRequestHandler on ConnectionLayer at construction time.
 /// </summary>
 public sealed class SftpSubsystemRegressionTests : IDisposable
 {

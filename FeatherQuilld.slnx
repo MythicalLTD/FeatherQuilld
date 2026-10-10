@@ -5,6 +5,9 @@
   <Folder Name="/Solution Items/">
     <File Path="compose.yaml" />
   </Folder>
+  <Folder Name="/extern/">
+    <Project Path="extern/d0x2a.EmbeddedSsh/src/EmbeddedSsh/EmbeddedSsh.csproj" />
+  </Folder>
   <Project Path="FeatherQuilld.Plugins/FeatherQuilld.Plugins.csproj" />
   <Project Path="FeatherQuilld.csproj" />
   <Project Path="FeatherQuilld.Tests/FeatherQuilld.Tests.csproj" />

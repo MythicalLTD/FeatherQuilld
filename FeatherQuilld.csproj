@@ -11,7 +11,7 @@
         <Description>FeatherQuilld daemon light as a feather, sharp as a quill.</Description>
         <!-- Sibling trees live under the Web project root; without excludes the SDK
              globs them as Content and copies gigabytes into bin/ on every build. -->
-        <DefaultItemExcludes>$(DefaultItemExcludes);FeatherQuilld.Tests/**;FeatherQuilld.Plugins/**;FeatherQuilld.Plugins.Sdk/**;FeatherQuilld.PluginSdk/**;plugins/**;featherpanel/**;fusequota/**;wings/**;FeatherWings/**;deploy/**;scripts/**;packaging/**;dist/**</DefaultItemExcludes>
+        <DefaultItemExcludes>$(DefaultItemExcludes);FeatherQuilld.Tests/**;FeatherQuilld.Plugins/**;FeatherQuilld.Plugins.Sdk/**;FeatherQuilld.PluginSdk/**;plugins/**;featherpanel/**;fusequota/**;wings/**;FeatherWings/**;deploy/**;scripts/**;packaging/**;dist/**;extern/**</DefaultItemExcludes>
         <!-- Used by scripts/build-deb.sh release publish; local `dotnet run` stays framework-dependent. -->
         <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
         <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
@@ -25,13 +25,14 @@
 
     <ItemGroup>
         <ProjectReference Include="FeatherQuilld.Plugins\FeatherQuilld.Plugins.csproj" />
+        <!-- Patched 1.1.1: ChannelRequestHandler installed at ConnectionLayer construction. -->
+        <ProjectReference Include="extern\d0x2a.EmbeddedSsh\src\EmbeddedSsh\EmbeddedSsh.csproj" />
     </ItemGroup>
 
     <ItemGroup>
         <PackageReference Include="AWSSDK.S3" Version="3.7.400" />
         <PackageReference Include="Certes" Version="3.0.4" />
         <PackageReference Include="Cronos" Version="0.8.4" />
-        <PackageReference Include="d0x2a.EmbeddedSsh" Version="1.1.0" />
         <PackageReference Include="Docker.DotNet" Version="3.125.15" />
         <PackageReference Include="FubarDev.FtpServer" Version="3.1.2" />
         <PackageReference Include="FubarDev.FtpServer.FileSystem.DotNet" Version="3.1.2" />

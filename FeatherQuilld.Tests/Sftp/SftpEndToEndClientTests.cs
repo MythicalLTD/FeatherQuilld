@@ -24,8 +24,8 @@ namespace FeatherQuilld.Tests.Sftp;
 ///    which counts EVERY auth request, so the third request (the signed key)
 ///    tripped "too many attempts" right after USERAUTH_SUCCESS and the
 ///    connection was killed. FileZilla clients failed 8/8.
-/// 2. The subsystem hook must win the post-auth race (the subsystem request
-///    is dispatched by the library right after auth, with no yield point).
+/// 2. The sftp subsystem must be accepted via ChannelRequestHandler installed
+///    at ConnectionLayer construction (no post-auth subscriber race).
 /// 3. A scripted login must disconnect cleanly and quickly — previously nobody
 ///    closed the channel on session end and one-shot clients hung for their
 ///    full disconnect timeout (12s+).
