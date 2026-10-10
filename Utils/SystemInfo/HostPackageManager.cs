@@ -21,6 +21,10 @@ namespace FeatherQuilld.Utils.SystemInfo;
 /// <summary>Install/remove host packages FeatherQuilld depends on (reverse proxies, Docker).</summary>
 public sealed class HostPackageManager
 {
+    /// <summary>Mail backend guide shipped with the daemon, linked from the panel's package manager.</summary>
+    private const string MailDocsUrl =
+        "https://github.com/MythicalLTD/FeatherQuilld/blob/master/docs/mail-backends.md";
+
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private static readonly Regex AnsiRegex = new(@"\x1b\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
     private readonly SystemPackageWsHub? _wsHub;
@@ -232,6 +236,7 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "docker",
             DisplayName: "Docker",
+            Description: "Container runtime. Every other package on this page needs it.",
             Category: "runtime",
             Installed: binary is not null,
             BinaryPath: binary,
@@ -284,6 +289,10 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "mailserver",
             DisplayName: "Mail server (docker-mailserver)",
+            Description: "One mail container driven through its setup CLI. Install it to give the "
+                + "WebSpaces on this node mailboxes; the panel creates the mail host and its domains "
+                + "through the daemon.",
+            DocsUrl: MailDocsUrl,
             Category: "mail",
             Installed: running,
             BinaryPath: _config is not null ? MailPaths.ComposeFile(_config) : null,
@@ -304,6 +313,11 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "mailcow",
             DisplayName: "Mail server (mailcow: dockerized)",
+            Description: "Full mailcow stack (~15 containers, its own web UI on a loopback port). "
+                + "Install it from here, then set system.mail.backend: mailcow in this node's advanced "
+                + "config overrides - the panel's mail actions, domains and DNS hints work the same for "
+                + "both mail stacks.",
+            DocsUrl: MailDocsUrl,
             Category: "mail",
             Installed: running || composePresent,
             BinaryPath: compose,
@@ -323,6 +337,9 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "webmail",
             DisplayName: "Webmail (Roundcube)",
+            Description: "Roundcube webmail for this node's mailboxes, published over HTTPS by the "
+                + "panel proxy. Needs a mail server package.",
+            DocsUrl: MailDocsUrl,
             Category: "mail",
             Installed: running,
             BinaryPath: _config is not null ? WebmailPaths.ComposeFile(_config) : null,
@@ -1540,7 +1557,14 @@ public sealed record HostPackageStatus(
     bool Managed,
     [property: JsonPropertyName("install_blocked")] bool InstallBlocked = false,
     [property: JsonPropertyName("blocked_by")] string? BlockedBy = null,
-    [property: JsonPropertyName("blocked_by_name")] string? BlockedByName = null);
+    [property: JsonPropertyName("blocked_by_name")] string? BlockedByName = null,
+    /// <summary>
+    /// One-line description shown in the panel's package manager next to the package, so an
+    /// operator knows what installing it does without leaving the panel.
+    /// </summary>
+    string? Description = null,
+    /// <summary>Documentation the panel can link to for this package.</summary>
+    [property: JsonPropertyName("docs_url")] string? DocsUrl = null);
 
 public sealed record HostPackageOperationResult(
     bool Success,
