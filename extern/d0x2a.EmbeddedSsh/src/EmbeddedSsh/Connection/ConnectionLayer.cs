@@ -115,7 +115,16 @@ public sealed class ConnectionLayer
             return;
         }
 
-        // Allocate channel
+        if (!_channelManager.HasCapacityForNewChannel())
+        {
+            await SendChannelOpenFailureAsync(
+                open.SenderChannel,
+                ChannelOpenFailureReason.ResourceShortage,
+                "Too many open channels",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var localChannelId = _channelManager.AllocateChannelId();
         var channel = new SshChannel(
             _transport,
@@ -275,13 +284,9 @@ public sealed class ConnectionLayer
         if (request.WantReply)
         {
             if (success)
-            {
-                await SendChannelSuccessAsync(request.RecipientChannel, cancellationToken).ConfigureAwait(false);
-            }
+                await SendChannelSuccessAsync(channel.RemoteChannelId, cancellationToken).ConfigureAwait(false);
             else
-            {
-                await SendChannelFailureAsync(request.RecipientChannel, cancellationToken).ConfigureAwait(false);
-            }
+                await SendChannelFailureAsync(channel.RemoteChannelId, cancellationToken).ConfigureAwait(false);
         }
     }
 

@@ -22,17 +22,15 @@ public sealed class PasswordAuthenticator : IAuthenticator
     public PasswordAuthenticator(IDictionary<string, string> credentials)
     {
         ArgumentNullException.ThrowIfNull(credentials);
+        const string dummyPasswordForUnknownUser = "\u0000dummy-password-for-timing-parity\u0000";
         _validatePassword = (username, password) =>
         {
-            if (credentials.TryGetValue(username, out var storedPassword))
-            {
-                // Use constant-time comparison to prevent timing attacks
-                return ValueTask.FromResult(
-                    System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
-                        System.Text.Encoding.UTF8.GetBytes(password),
-                        System.Text.Encoding.UTF8.GetBytes(storedPassword)));
-            }
-            return ValueTask.FromResult(false);
+            var userExists = credentials.TryGetValue(username, out var storedForUser);
+            var storedPassword = userExists ? storedForUser! : dummyPasswordForUnknownUser;
+            var matches = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                System.Text.Encoding.UTF8.GetBytes(password),
+                System.Text.Encoding.UTF8.GetBytes(storedPassword));
+            return ValueTask.FromResult(userExists && matches);
         };
     }
 

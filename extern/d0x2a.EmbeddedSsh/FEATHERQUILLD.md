@@ -2,10 +2,7 @@
 
 Upstream: https://github.com/d0x2a/EmbeddedSsh (MIT), based on 1.1.0.
 
-## Local delta (1.1.1)
-
-`SshServerOptions.ChannelRequestHandler` is passed into `ConnectionLayer` at
-construction time from `SshConnection.RunAsync`. That removes the post-auth race
-where OpenSSH clients pipeline `channel-open` + `subsystem:sftp` before a
-late `ChannelRequestReceived` subscriber can attach
-(`subsystem request failed on channel 0`).
+Local 1.1.2 changes:
+- `SshServerOptions.ChannelRequestHandler` wired into `ConnectionLayer` at construction
+- Auth ignore/debug handling; channel reply id fix; strict-KEX; auth lockout / channel cap /
+  packet clamp / password timing; constant-time Ed25519 scalar mult

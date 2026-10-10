@@ -433,9 +433,7 @@ public sealed class TransportLayer : IAsyncDisposable
         _sessionId ??= exchangeHash.ToArray();
     }
 
-    /// <summary>
-    /// Resets sequence numbers (for testing).
-    /// </summary>
+    /// <summary>Resets send/receive packet sequence numbers to zero.</summary>
     internal void ResetSequenceNumbers()
     {
         _sendSequence = 0;

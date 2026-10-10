@@ -233,12 +233,11 @@ public static class Ed25519
         var table = GetBasePointTable();
         var result = ExtendedPoint.Neutral();
 
-        // For each bit i, if scalar bit i is set, add [2^i]B
         for (int i = 0; i < 256; i++)
         {
             int bit = (scalar[i >> 3] >> (i & 7)) & 1;
-            if (bit == 1)
-                result = PointAdd(result, table[i]);
+            var sum = PointAdd(result, table[i]);
+            PointCSelect(ref result, sum, bit);
         }
 
         return result;
@@ -252,11 +251,23 @@ public static class Ed25519
         {
             result = PointDouble(result);
             int bit = (scalar[i >> 3] >> (i & 7)) & 1;
-            if (bit == 1)
-                result = PointAdd(result, point);
+            var sum = PointAdd(result, point);
+            PointCSelect(ref result, sum, bit);
         }
 
         return result;
+    }
+
+    private static void PointCSelect(ref ExtendedPoint result, in ExtendedPoint candidate, int select)
+    {
+        long mask = -(long)select;
+        for (int i = 0; i < 10; i++)
+        {
+            result.X[i] ^= mask & (result.X[i] ^ candidate.X[i]);
+            result.Y[i] ^= mask & (result.Y[i] ^ candidate.Y[i]);
+            result.Z[i] ^= mask & (result.Z[i] ^ candidate.Z[i]);
+            result.T[i] ^= mask & (result.T[i] ^ candidate.T[i]);
+        }
     }
 
     private static ExtendedPoint PointAdd(ExtendedPoint p, ExtendedPoint q)

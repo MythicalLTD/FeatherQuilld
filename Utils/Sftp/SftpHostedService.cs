@@ -35,10 +35,6 @@ public sealed class SftpHostedService : IHostedService, IDisposable
     private readonly IEventBus _events;
     private readonly ConcurrentDictionary<string, SftpAuthResult> _authBySession = new();
 
-    // Per-connection attempt accounting for the panel's per-method auth
-    // limits (password / publickey). The library's own MaxAuthAttempts counts
-    // EVERY request (none probe, key probe, password) and must not be used
-    // for these limits.
     private readonly SftpAuthAttemptLimiter _attemptLimiter = new();
 
     private static readonly TimeSpan HandshakeWaitBudget = TimeSpan.FromSeconds(10);
@@ -133,20 +129,9 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         {
             ServerVersion = "SSH-2.0-FeatherQuilld",
             Authenticator = new PanelSftpAuthenticator(this),
-            // Installed on ConnectionLayer at construction — no post-auth race
-            // against OpenSSH's pipelined channel-open + subsystem request.
             ChannelRequestHandler = HandleEmbeddedChannelRequestAsync,
-            // The panel's password-attempt limit (default 3) must NOT be
-            // handed to the library 1:1: the library counts EVERY auth
-            // request against MaxAuthAttempts — the "none" probe, each
-            // publickey probe, and then the password — so a limit of 3 is
-            // exhausted exactly by a successful key-first login, and the
-            // library throws right after sending USERAUTH_SUCCESS, killing
-            // the connection (FileZilla-style key-first clients failed
-            // 100% of the time). Budget for every legitimate request with
-            // headroom; the per-method limits are enforced separately in
-            // PanelSftpAuthenticator via SftpAuthAttemptLimiter, which
-            // counts only the method each limit governs.
+            // Library MaxAuthAttempts counts every auth request (none/pubkey/password);
+            // keep headroom and enforce panel limits in PanelSftpAuthenticator.
             MaxAuthAttempts = Math.Max(20,
                 _config.Sftp.Limits.AuthenticationPubkeyAttempts
                 + _config.Sftp.Limits.AuthenticationPasswordAttempts
@@ -160,8 +145,6 @@ public sealed class SftpHostedService : IHostedService, IDisposable
 
         _embeddedServer.ConnectionAccepted += connection =>
         {
-            // Fire-and-forget: ConnectionAccepted is awaited before RunAsync, so
-            // blocking here would deadlock AcceptChannelAsync against the handshake.
             _ = Task.Run(() => HandleEmbeddedConnectionAsync(connection, ct), ct);
             return Task.CompletedTask;
         };
@@ -182,9 +165,6 @@ public sealed class SftpHostedService : IHostedService, IDisposable
     {
         try
         {
-            // AcceptChannelAsync requires the post-auth connection layer. Sleep-poll
-            // until Connected (or give up) — the sftp subsystem itself is accepted by
-            // ChannelRequestHandler installed at ConnectionLayer construction time.
             var deadline = DateTime.UtcNow + HandshakeWaitBudget;
             while (connection.State != ConnectionState.Connected
                    && connection.State != ConnectionState.Disconnected)
@@ -202,8 +182,6 @@ public sealed class SftpHostedService : IHostedService, IDisposable
             if (connection.State != ConnectionState.Connected)
                 return;
 
-            // Auth is bound via AuthenticatedUser.Properties["sftp_auth"] and/or
-            // conn:{SessionId} — never by username (avoids cross-session confusion).
             try
             {
                 if (connection.User?.Properties is not null
@@ -214,7 +192,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                     _authBySession["conn:" + Convert.ToHexString(sid.ToArray())] = bound;
                 }
             }
-            catch { /* SessionId may not be ready yet; Properties path still works */ }
+            catch { /* ignore */ }
 
             while (!ct.IsCancellationRequested)
             {
@@ -302,28 +280,16 @@ public sealed class SftpHostedService : IHostedService, IDisposable
             _ = OpenSession(transport, auth, auth.User);
             _logger?.Debug(LoggerTypes.Application, $"SFTP subsystem attached root={auth.RootPath}");
 
-            // Only now that the session has subscribed to DataReceived may the
-            // read pump start — starting it earlier would let it consume (and
-            // silently drop) the client's INIT packet, which may already be
-            // buffered on the channel, and the session would wait forever.
+            // Start after OpenSession so INIT isn't dropped before DataReceived is hooked.
             transport.Start();
 
-            // The session ends when the client closes the channel OR sends
-            // channel EOF (the transport pump raises Closed on EOF). Both must
-            // complete the close handshake below.
             while (!ct.IsCancellationRequested && !channel.IsClosed && !sessionEnded.Task.IsCompleted)
                 await Task.Delay(250, ct).ConfigureAwait(false);
 
-            // Session ended: complete the close handshake so the client sees a
-            // clean teardown. Without this nobody ever closes the channel — the
-            // library's ReadAsync ignores EOF, so nothing reacts to the client's
-            // "bye", and one-shot (scripted) logins hang on disconnect for the
-            // client's full timeout.
             try { await channel.CloseAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* ignore */ }
         }
         catch (OperationCanceledException)
         {
-            // shutting down — still attempt the close handshake, best effort
             try { await channel.CloseAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* ignore */ }
         }
         catch (Exception ex)
@@ -565,14 +531,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
                 {
                     if (!context.HasSignature)
                     {
-                        // Signature-less publickey probe. The library turns
-                        // Failure + IsPublicKeyAcceptableAsync() == true into a
-                        // PK_OK reply, prompting the client to send the signed
-                        // request. AuthResult.Continue has NO case in the
-                        // library's dispatch switch — it falls through to the
-                        // default branch, which sends USERAUTH_FAILURE, so the
-                        // client never offers the signature and key-first
-                        // clients (FileZilla, ssh -i) can never authenticate.
+                        // Probe: Failure + IsPublicKeyAcceptableAsync → PK_OK.
                         return ValueTask.FromResult<(AuthResult, AuthenticatedUser?)>((AuthResult.Failure, null));
                     }
 

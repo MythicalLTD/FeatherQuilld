@@ -12,10 +12,14 @@
     <NoWarn>CS1591;CS0675</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="d0x2a.EmbeddedSsh.Tests" />
+  </ItemGroup>
+
   <!-- NuGet Package Metadata -->
   <PropertyGroup>
     <PackageId>d0x2a.EmbeddedSsh</PackageId>
-    <Version>1.1.1</Version>
+    <Version>1.1.2</Version>
     <Authors>d0x2a</Authors>
     <Description>Minimal, embeddable SSH-2 server library for .NET. Zero external dependencies with pure managed cryptographic implementations (ChaCha20-Poly1305, AES-GCM, Curve25519, Ed25519). Features post-quantum hybrid key exchange (mlkem768x25519-sha256) and supports public key and password authentication.</Description>
     <PackageTags>ssh;ssh2;server;embedded;cryptography;security;networking;post-quantum;mlkem</PackageTags>

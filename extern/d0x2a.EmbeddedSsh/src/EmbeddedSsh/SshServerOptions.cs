@@ -27,12 +27,8 @@ public sealed class SshServerOptions
     public IAuthenticator? Authenticator { get; set; }
 
     /// <summary>
-    /// Optional handler for channel requests that the connection layer does not
-    /// handle natively (notably <c>subsystem</c>). Installed on every
-    /// <see cref="ConnectionLayer"/> at construction time so callers do not
-    /// have to race the client's post-auth channel requests.
-    /// Return <c>true</c> to accept the request (CHANNEL_SUCCESS), <c>false</c>
-    /// to reject it (CHANNEL_FAILURE).
+    /// Handler for non-builtin channel requests (e.g. subsystem).
+    /// Return true for CHANNEL_SUCCESS, false for CHANNEL_FAILURE.
     /// </summary>
     public Func<SshChannel, ChannelRequestMessage, CancellationToken, ValueTask<bool>>? ChannelRequestHandler { get; set; }
 

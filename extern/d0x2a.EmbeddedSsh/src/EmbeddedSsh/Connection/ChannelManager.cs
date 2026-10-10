@@ -21,10 +21,16 @@ public sealed class ChannelManager
     /// </summary>
     public const uint DefaultMaxPacketSize = 32 * 1024;
 
+    public const int DefaultMaxChannels = 64;
+
+    public int MaxChannels { get; init; } = DefaultMaxChannels;
+
     /// <summary>
     /// Gets the number of active channels.
     /// </summary>
     public int ActiveChannelCount => _channels.Count;
+
+    public bool HasCapacityForNewChannel() => _channels.Count < MaxChannels;
 
     /// <summary>
     /// Allocates a new channel ID.

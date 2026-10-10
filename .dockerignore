@@ -21,8 +21,9 @@
 **/obj
 **/secrets.dev.yaml
 **/values.dev.yaml
-LICENSE
-README.md
+# Root docs only — keep extern/*/README.md and LICENSE for ProjectReferences.
+/LICENSE
+/README.md
 featherpanel/
 wings/
 FeatherWings/

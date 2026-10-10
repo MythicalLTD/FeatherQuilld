@@ -29,6 +29,7 @@ public sealed class SshConnection : IAsyncDisposable
     private byte[]? _clientKexInit;
     private byte[]? _serverKexInit;
     private KexInitMessage? _clientKexInitMessage;
+    private readonly System.Net.EndPoint? _remoteEndPoint;
 
     /// <summary>
     /// Gets the connection state.
@@ -56,10 +57,16 @@ public sealed class SshConnection : IAsyncDisposable
     public ChannelManager? Channels => _channelManager;
 
     public SshConnection(Stream stream, SshServerOptions options)
+        : this(stream, options, remoteEndPoint: null)
+    {
+    }
+
+    public SshConnection(Stream stream, SshServerOptions options, System.Net.EndPoint? remoteEndPoint)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _transport = new TransportLayer(stream);
+        _remoteEndPoint = remoteEndPoint;
     }
 
     /// <summary>
@@ -84,9 +91,6 @@ public sealed class SshConnection : IAsyncDisposable
             // Authentication
             await PerformAuthenticationAsync(ct).ConfigureAwait(false);
 
-            // Connection layer — pass ChannelRequestHandler at construction so
-            // subsystem (and other non-builtin) requests are handled without a
-            // post-auth race against ChannelRequestReceived subscribers.
             _channelManager = new ChannelManager();
             _connectionLayer = new ConnectionLayer(
                 _transport, _channelManager, _options.ChannelRequestHandler);
@@ -149,6 +153,8 @@ public sealed class SshConnection : IAsyncDisposable
 
         _clientKexInitMessage = clientKexInit;
         _clientKexInit = clientKexInitPayload; // Use raw bytes, not reconstructed
+
+        var strictKexNegotiated = clientKexInit.KexAlgorithms.Contains("kex-strict-c-v00@openssh.com");
 
         // Select algorithms
         var (kexAlg, hostKeyAlg, cipherC2S, cipherS2C) = NegotiateAlgorithms(clientKexInit);
@@ -227,6 +233,9 @@ public sealed class SshConnection : IAsyncDisposable
             throw new SshProtocolException(DisconnectReason.ProtocolError,
                 $"Expected NEWKEYS, got {newKeysMsg.MessageType}");
         }
+
+        if (strictKexNegotiated)
+            _transport.ResetSequenceNumbers();
 
         // Derive keys based on negotiated cipher
         var secretEncoding = kex.SharedSecretEncoding;
@@ -329,7 +338,7 @@ public sealed class SshConnection : IAsyncDisposable
             await _transport.SendMessageAsync(banner, timeoutCts.Token).ConfigureAwait(false);
         }
 
-        var authLayer = new AuthLayer(_transport, _options.Authenticator!, _options.MaxAuthAttempts);
+        var authLayer = new AuthLayer(_transport, _options.Authenticator!, _options.MaxAuthAttempts, _remoteEndPoint);
         _authenticatedUser = await authLayer.AuthenticateAsync(timeoutCts.Token).ConfigureAwait(false);
     }
 
@@ -413,8 +422,8 @@ public sealed class SshConnection : IAsyncDisposable
     private static KexInitMessage CreateKexInit()
     {
         var kexAlgorithms = MLKem.IsSupported
-            ? new List<string> { "mlkem768x25519-sha256", "curve25519-sha256", "curve25519-sha256@libssh.org", "ext-info-s" }
-            : new List<string> { "curve25519-sha256", "curve25519-sha256@libssh.org", "ext-info-s" };
+            ? new List<string> { "mlkem768x25519-sha256", "curve25519-sha256", "curve25519-sha256@libssh.org", "ext-info-s", "kex-strict-s-v00@openssh.com" }
+            : new List<string> { "curve25519-sha256", "curve25519-sha256@libssh.org", "ext-info-s", "kex-strict-s-v00@openssh.com" };
 
         return new KexInitMessage
         {

@@ -12,6 +12,7 @@ ARG INFORMATIONAL_VERSION=0.1.0
 WORKDIR /src
 COPY ["FeatherQuilld.csproj", "./"]
 COPY ["FeatherQuilld.Plugins/FeatherQuilld.Plugins.csproj", "FeatherQuilld.Plugins/"]
+COPY ["extern/d0x2a.EmbeddedSsh/src/EmbeddedSsh/EmbeddedSsh.csproj", "extern/d0x2a.EmbeddedSsh/src/EmbeddedSsh/"]
 RUN dotnet restore "FeatherQuilld.csproj"
 COPY . .
 RUN dotnet publish "./FeatherQuilld.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false \

@@ -111,7 +111,7 @@ public sealed class SshChannel : IAsyncDisposable
     {
         RemoteChannelId = remoteChannelId;
         _remoteWindow = remoteWindow;
-        MaxPacketSize = maxPacketSize;
+        MaxPacketSize = Math.Min(maxPacketSize, (uint)int.MaxValue);
     }
 
     /// <summary>

@@ -162,7 +162,7 @@ public sealed class SshServer : IAsyncDisposable
         try
         {
             var stream = client.GetStream();
-            connection = new SshConnection(stream, _options);
+            connection = new SshConnection(stream, _options, client.Client.RemoteEndPoint);
             _connections[connectionId] = connection;
 
             // Notify about new connection

@@ -25,7 +25,6 @@
 
     <ItemGroup>
         <ProjectReference Include="FeatherQuilld.Plugins\FeatherQuilld.Plugins.csproj" />
-        <!-- Patched 1.1.1: ChannelRequestHandler installed at ConnectionLayer construction. -->
         <ProjectReference Include="extern\d0x2a.EmbeddedSsh\src\EmbeddedSsh\EmbeddedSsh.csproj" />
     </ItemGroup>
 
