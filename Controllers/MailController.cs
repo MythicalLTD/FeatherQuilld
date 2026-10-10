@@ -21,8 +21,11 @@ public sealed class MailController : ControllerBase
 
     private MailManager RequireManager(AppConfig config)
     {
-        if (!MailProbe.ContainerRunning(config))
-            throw new InvalidOperationException("Mail server is not running on this node.");
+        // A mailcow on its own host has no container here, so the stack predicate decides -
+        // ContainerRunning() would report every remote setup as "not running".
+        if (!MailProbe.StackRunning(config))
+            throw new InvalidOperationException(
+                $"Mail server is not running ({MailProbe.StackIdentifier(config)}). Docs: docs/mail-backends.md");
         return new MailManager(config, _events);
     }
 

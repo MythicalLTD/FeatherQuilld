@@ -31,7 +31,8 @@ public sealed class MailManager
         _events = events.OrNoOp();
         _backend = backend ?? MailBackendFactory.Create(config, _events);
         if (!_backend.IsRunning())
-            throw new InvalidOperationException($"{_backend.DisplayName} mail server is not running.");
+            throw new InvalidOperationException(
+                $"{_backend.DisplayName} mail server is not running. {_backend.NotRunningHint()}");
     }
 
     /// <summary>Backend actually in use (also surfaced through the probe payload).</summary>

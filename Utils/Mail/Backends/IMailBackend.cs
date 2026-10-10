@@ -15,6 +15,15 @@ public interface IMailBackend
     string DisplayName { get; }
 
     /// <summary>
+    /// Operator facing hint shown whenever <see cref="IsRunning"/> is false: which
+    /// config keys to set or which host package to install. Default member so
+    /// third-party backends and existing test fakes keep compiling; see
+    /// <c>docs/mail-backends.md</c>.
+    /// </summary>
+    string NotRunningHint() =>
+        $"Install the {DisplayName} package from the host package manager (docs/mail-backends.md).";
+
+    /// <summary>
     /// True when the stack is installed and its containers are running. Used by
     /// <see cref="MailManager"/> as a guard before any mutating operation.
     /// </summary>

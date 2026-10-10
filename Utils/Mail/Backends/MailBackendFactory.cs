@@ -15,8 +15,9 @@ public static class MailBackendFactory
         if (!MailBackendKind.IsKnown(configured))
         {
             throw new InvalidOperationException(
-                $"Unsupported mail backend '{configured}'. Supported: " +
-                $"'{MailBackendKind.DockerMailserver}' (default) and '{MailBackendKind.Mailcow}'.");
+                $"Unsupported mail backend '{configured}'. Valid values for system.mail.backend: " +
+                $"'{MailBackendKind.DockerMailserver}' (default) and '{MailBackendKind.Mailcow}' " +
+                "(aliases: docker, dms, mailcow-dockerized). Docs: docs/mail-backends.md");
         }
 
         return MailBackendKind.IsMailcow(configured)

@@ -30,6 +30,26 @@ public sealed class MailcowBackend : IMailBackend
 
     public bool IsRunning() => MailcowDocker.StackReachable(_config);
 
+    /// <summary>
+    /// A mailcow that is not running is either not installed here yet or lives on
+    /// another host, and the two cases need different answers from the operator.
+    /// </summary>
+    public string NotRunningHint()
+    {
+        var mailcow = _config.System.Mail.Mailcow;
+        if (!string.IsNullOrWhiteSpace(mailcow.Url))
+        {
+            return $"system.mail.mailcow.url is set ({mailcow.Url}) but the mailcow API did not answer: " +
+                "check system.mail.mailcow.api_key and that this node's address is covered by " +
+                "API_ALLOW_FROM in mailcow.conf (skip_ip_check=1 skips that check). " +
+                "Docs: docs/mail-backends.md";
+        }
+
+        return "Either install mailcow on this node (POST /api/system/packages/mailcow/install) " +
+            "or point system.mail.mailcow.url + system.mail.mailcow.api_key at a mailcow on another host. " +
+            "Docs: docs/mail-backends.md";
+    }
+
     public object ProbeStatus()
     {
         var mailHost = string.IsNullOrWhiteSpace(_config.System.Mail.Mailcow.MailHost)

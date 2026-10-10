@@ -437,6 +437,17 @@ public static class StartupSelfTest
                 $"Unknown mail backend '{config.System.Mail.Backend}'",
                 $"Supported: {MailBackendKind.DockerMailserver}, {MailBackendKind.Mailcow}. Install the matching package from the host package manager.");
         }
+        else if (MailBackendKind.IsMailcow(backend) && !string.IsNullOrWhiteSpace(config.System.Mail.Mailcow.Url))
+        {
+            Warn("mailcow is configured as a remote stack but does not answer", logger, reporter);
+            yield return new DiagnosticCheck(
+                "mail.stack",
+                "warn",
+                $"Mail server not reachable ({stackLabel}, remote)",
+                $"system.mail.mailcow.url is set ({config.System.Mail.Mailcow.Url}) but neither the API nor the containers " +
+                $"answered. Check system.mail.mailcow.api_key, this node's address in API_ALLOW_FROM (mailcow.conf) and the " +
+                $"ports 25/{config.System.Mail.SmtpPort}/{config.System.Mail.ImapPort}. Docs: docs/mail-backends.md");
+        }
         else if (MailProbe.DockerOnPath() && File.Exists(MailProbe.ComposePath(config)))
         {
             Warn("Mail stack compose exists but containers are not running", logger, reporter);
@@ -450,7 +461,10 @@ public static class StartupSelfTest
                 "mail.stack",
                 "warn",
                 "Mail server not installed",
-                $"Install the {stackLabel} package from the host package manager.");
+                MailBackendKind.IsMailcow(backend)
+                    ? "Install mailcow with the host package manager (POST /api/system/packages/mailcow/install) or set "
+                        + "system.mail.mailcow.url + api_key for a mailcow on another host. Docs: docs/mail-backends.md"
+                    : $"Install the {stackLabel} package from the host package manager (POST /api/system/packages/mailserver/install).");
         }
 
         if (!running)

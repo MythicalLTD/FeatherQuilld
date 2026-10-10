@@ -27,6 +27,10 @@ public sealed class DockerMailserverBackend : IMailBackend
 
     public bool IsRunning() => MailProbe.ContainerRunning(_config);
 
+    public string NotRunningHint() =>
+        "Install the mailserver package on this node (POST /api/system/packages/mailserver/install); " +
+        "the container is started by that package. Docs: docs/mail-backends.md";
+
     public object ProbeStatus() => new
     {
         available = MailProbe.IsAvailable(_config),
