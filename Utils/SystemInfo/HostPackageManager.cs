@@ -21,6 +21,10 @@ namespace FeatherQuilld.Utils.SystemInfo;
 /// <summary>Install/remove host packages FeatherQuilld depends on (reverse proxies, Docker).</summary>
 public sealed class HostPackageManager
 {
+    /// <summary>Mail backend guide shipped with the daemon, linked from the panel's package manager.</summary>
+    private const string MailDocsUrl =
+        "https://github.com/MythicalLTD/FeatherQuilld/blob/master/docs/mail-backends.md";
+
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
     private static readonly Regex AnsiRegex = new(@"\x1b\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
     private readonly SystemPackageWsHub? _wsHub;
@@ -64,6 +68,7 @@ public sealed class HostPackageManager
         packages.Add(DescribeClamAv());
         packages.Add(DescribeModSecurity());
         packages.Add(DescribeMailServer());
+        packages.Add(DescribeMailcow());
         packages.Add(DescribeWebmail());
         return packages;
     }
@@ -131,6 +136,7 @@ public sealed class HostPackageManager
                     "clamav" => await InstallClamAvAsync(id, logger, innerCt).ConfigureAwait(false),
                     "modsecurity" => await InstallModSecurityAsync(id, logger, innerCt).ConfigureAwait(false),
                     "mailserver" => await InstallMailServerAsync(id, logger, innerCt).ConfigureAwait(false),
+                    "mailcow" => await InstallMailcowAsync(id, logger, innerCt).ConfigureAwait(false),
                     "webmail" => await InstallWebmailAsync(id, logger, innerCt).ConfigureAwait(false),
                     _ => HostPackageOperationResult.Fail($"Unknown package: {packageId}"),
                 };
@@ -162,6 +168,7 @@ public sealed class HostPackageManager
                     "clamav" => await RemoveViaPackageManagerAsync(id, "clamav clamav-daemon", purgeConfig, logger, innerCt).ConfigureAwait(false),
                     "modsecurity" => await RemoveModSecurityAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
                     "mailserver" => await RemoveMailServerAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
+                    "mailcow" => await RemoveMailcowAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
                     "webmail" => await RemoveWebmailAsync(id, purgeConfig, logger, innerCt).ConfigureAwait(false),
                     _ => HostPackageOperationResult.Fail($"Unknown package: {packageId}"),
                 };
@@ -229,6 +236,7 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "docker",
             DisplayName: "Docker",
+            Description: "Container runtime. Every other package on this page needs it.",
             Category: "runtime",
             Installed: binary is not null,
             BinaryPath: binary,
@@ -281,6 +289,10 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "mailserver",
             DisplayName: "Mail server (docker-mailserver)",
+            Description: "One mail container driven through its setup CLI. Install it to give the "
+                + "WebSpaces on this node mailboxes; the panel creates the mail host and its domains "
+                + "through the daemon.",
+            DocsUrl: MailDocsUrl,
             Category: "mail",
             Installed: running,
             BinaryPath: _config is not null ? MailPaths.ComposeFile(_config) : null,
@@ -289,6 +301,31 @@ public sealed class HostPackageManager
             InstallBlocked: FindOnPath("docker") is null,
             BlockedBy: FindOnPath("docker") is null ? "docker" : null,
             BlockedByName: FindOnPath("docker") is null ? "Docker" : null);
+    }
+
+    private HostPackageStatus DescribeMailcow()
+    {
+        var compose = _config is not null ? MailcowPaths.ComposeFile(_config) : null;
+        var composePresent = compose is not null && File.Exists(compose);
+        var running = _config is not null && MailcowDocker.StackRunning(_config);
+        var dockerMissing = FindOnPath("docker") is null;
+
+        return new HostPackageStatus(
+            Id: "mailcow",
+            DisplayName: "Mail server (mailcow: dockerized)",
+            Description: "Full mailcow stack (~15 containers, its own web UI on a loopback port). "
+                + "Install it from here, then set system.mail.backend: mailcow in this node's advanced "
+                + "config overrides - the panel's mail actions, domains and DNS hints work the same for "
+                + "both mail stacks.",
+            DocsUrl: MailDocsUrl,
+            Category: "mail",
+            Installed: running || composePresent,
+            BinaryPath: compose,
+            Version: composePresent ? $"mailcow ({MailcowPaths.ProjectName})" : null,
+            Managed: true,
+            InstallBlocked: dockerMissing,
+            BlockedBy: dockerMissing ? "docker" : null,
+            BlockedByName: dockerMissing ? "Docker" : null);
     }
 
     private HostPackageStatus DescribeWebmail()
@@ -300,6 +337,9 @@ public sealed class HostPackageManager
         return new HostPackageStatus(
             Id: "webmail",
             DisplayName: "Webmail (Roundcube)",
+            Description: "Roundcube webmail for this node's mailboxes, published over HTTPS by the "
+                + "panel proxy. Needs a mail server package.",
+            DocsUrl: MailDocsUrl,
             Category: "mail",
             Installed: running,
             BinaryPath: _config is not null ? WebmailPaths.ComposeFile(_config) : null,
@@ -720,6 +760,194 @@ public sealed class HostPackageManager
         return MailProbe.ContainerRunning(_config)
             ? HostPackageOperationResult.Ok("mailserver installed open ports 25/587/993/tcp on this host")
             : HostPackageOperationResult.Fail("mailserver compose finished but container is not running");
+    }
+
+    private const string MailcowRepoUrl = "https://github.com/mailcow/mailcow-dockerized.git";
+
+    private async Task<HostPackageOperationResult> InstallMailcowAsync(string packageId, AppLogger? logger, CancellationToken ct)
+    {
+        if (_config is null)
+            return HostPackageOperationResult.Fail("FeatherQuilld config is not available.");
+
+        if (FindOnPath("docker") is null)
+            return HostPackageOperationResult.Fail("Install Docker before the mailcow package.");
+
+        if (MailcowDocker.StackRunning(_config))
+            return HostPackageOperationResult.Ok("mailcow is already running");
+
+        var root = MailcowPaths.Root(_config);
+        Directory.CreateDirectory(root);
+
+        if (!File.Exists(MailcowPaths.ComposeFile(_config)))
+        {
+            await EmitOutputAsync(packageId, "Fetching mailcow: dockerized…\n", ct).ConfigureAwait(false);
+            var fetch = FindOnPath("git") is not null
+                ? await RunShellAsync(packageId, $"git clone --depth 1 {MailcowRepoUrl} {Quote(root)}",
+                    logger, ct).ConfigureAwait(false)
+                : await RunShellAsync(packageId,
+                    $"curl -fsSL https://github.com/mailcow/mailcow-dockerized/archive/refs/heads/master.tar.gz | tar -xz -C {Quote(root)} --strip-components=1",
+                    logger, ct).ConfigureAwait(false);
+            if (!fetch.Success)
+                return fetch;
+        }
+
+        var apiKey = MailcowConfigFile.GenerateApiKey();
+        var apiKeyReadOnly = MailcowConfigFile.GenerateApiKey();
+
+        await WriteMailcowConfAsync(packageId, root, apiKey, apiKeyReadOnly, ct).ConfigureAwait(false);
+
+        await File.WriteAllTextAsync(MailcowPaths.ApiKeyFile(_config), apiKey + "\n", ct).ConfigureAwait(false);
+
+        await EmitOutputAsync(packageId, "Pulling mailcow images (this takes a while)…\n", ct).ConfigureAwait(false);
+        var pull = await RunShellAsync(packageId, $"cd {Quote(root)} && docker compose pull", logger, ct).ConfigureAwait(false);
+        if (!pull.Success)
+            return pull;
+
+        await EmitOutputAsync(packageId, "Starting mailcow containers…\n", ct).ConfigureAwait(false);
+        var up = await RunShellAsync(packageId, $"cd {Quote(root)} && docker compose up -d", logger, ct).ConfigureAwait(false);
+        if (!up.Success)
+            return up;
+
+        return MailcowDocker.StackRunning(_config)
+            ? HostPackageOperationResult.Ok(
+                $"mailcow installed (UI/API on https://127.0.0.1:{_config.System.Mail.Mailcow.HttpsPort}, " +
+                "published on loopback because the panel's proxy owns 80/443); " +
+                "the API key lives in mailcow.conf (API_KEY/API_ALLOW_FROM) and feather-api-key — " +
+                "set system.mail.backend: mailcow and /api/mail/* manages the stack, nothing to paste")
+            : HostPackageOperationResult.Fail("mailcow compose finished but the containers are not running (check docker compose logs)");
+    }
+
+    /// <summary>
+    /// Writes mailcow.conf: mailcow's own <c>generate_config.sh</c> creates the file
+    /// (only it knows every key the compose file expects) and the panel then overrides
+    /// the keys it owns — including <c>API_KEY</c>/<c>API_ALLOW_FROM</c>, which is what
+    /// lets <c>/api/mail/*</c> manage the stack without pasting anything into the UI.
+    /// When the script is missing from the checkout a documented fallback config is
+    /// written instead of an empty file.
+    /// </summary>
+    private async Task WriteMailcowConfAsync(
+        string packageId,
+        string root,
+        string apiKey,
+        string apiKeyReadOnly,
+        CancellationToken ct)
+    {
+        var mail = _config!.System.Mail;
+        var hostname = (mail.Mailcow.MailHost ?? string.Empty).Trim();
+        if (hostname.Length == 0)
+            hostname = (mail.Hostname ?? string.Empty).Trim();
+        if (hostname.Length == 0)
+            hostname = "mail." + Environment.MachineName.ToLowerInvariant();
+
+        var timezone = string.IsNullOrWhiteSpace(_config.System.Timezone) ? "UTC" : _config.System.Timezone.Trim();
+        var skipClamd = ResolveSkipClamd();
+
+        var overrides = MailcowConfigFile.BuildOverrides(
+            mail,
+            hostname,
+            timezone,
+            apiKey,
+            apiKeyReadOnly,
+            "127.0.0.1",
+            skipClamd);
+
+        var confPath = MailcowPaths.ConfFile(_config);
+        var scriptPath = Path.Combine(root, "generate_config.sh");
+        var usedScript = false;
+
+        if (File.Exists(scriptPath))
+        {
+            await EmitOutputAsync(packageId, "Running mailcow's generate_config.sh…\n", ct).ConfigureAwait(false);
+            var run = await RunShellAsync(
+                packageId,
+                MailcowConfigFile.BuildGenerateConfigCommand(root, hostname, timezone, skipClamd),
+                null,
+                ct).ConfigureAwait(false);
+            usedScript = run.Success && File.Exists(confPath);
+            if (!usedScript)
+            {
+                await EmitOutputAsync(
+                    packageId,
+                    "generate_config.sh did not produce mailcow.conf, writing the fallback config\n",
+                    ct).ConfigureAwait(false);
+            }
+        }
+
+        List<string> lines;
+        if (usedScript)
+        {
+            var generated = await File.ReadAllLinesAsync(confPath, ct).ConfigureAwait(false);
+            lines = MailcowConfigFile.ApplyOverrides(generated, overrides);
+        }
+        else
+        {
+            lines = MailcowConfigFile.BuildFallbackConf(hostname, timezone, overrides, MailcowConfigFile.GenerateSecret);
+        }
+
+        await File.WriteAllLinesAsync(confPath, lines, ct).ConfigureAwait(false);
+
+        await EmitOutputAsync(packageId,
+            $"Wrote {confPath} ({(usedScript ? "from mailcow's generate_config.sh" : "fallback template")}; " +
+            $"hostname {hostname}, UI/API on 127.0.0.1:{mail.Mailcow.HttpsPort}, " +
+            $"ACME {(mail.Mailcow.SkipAcme ? "skipped, the panel's proxy keeps 80/443" : "by mailcow")}, " +
+            $"API key + API_ALLOW_FROM set{ (skipClamd ? ", ClamAV disabled (low memory)" : "") })\n",
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// ClamAV off below 2.5 GiB, matching what generate_config.sh recommends for small
+    /// hosts — without answering that prompt interactively the install would hang.
+    /// </summary>
+    private static bool ResolveSkipClamd()
+    {
+        try
+        {
+            foreach (var line in File.ReadLines("/proc/meminfo"))
+            {
+                if (!line.StartsWith("MemTotal:", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var digits = new string(line.Where(char.IsDigit).ToArray());
+                if (long.TryParse(digits, out var kb))
+                    return kb <= 2621440;
+            }
+        }
+        catch
+        {
+            // unknown memory: keep mailcow's default (ClamAV on)
+        }
+
+        return false;
+    }
+
+    private async Task<HostPackageOperationResult> RemoveMailcowAsync(
+        string packageId,
+        bool purgeConfig,
+        AppLogger? logger,
+        CancellationToken ct)
+    {
+        if (_config is not null)
+        {
+            var root = MailcowPaths.Root(_config);
+            if (Directory.Exists(root) && File.Exists(MailcowPaths.ComposeFile(_config)))
+            {
+                await RunShellAsync(
+                    packageId,
+                    $"cd {Quote(root)} && docker compose down --remove-orphans 2>/dev/null || true",
+                    logger,
+                    ct).ConfigureAwait(false);
+            }
+
+            if (purgeConfig && Directory.Exists(root))
+            {
+                try { Directory.Delete(root, recursive: true); } catch (Exception ex)
+                {
+                    logger?.Warning(LoggerTypes.Application, $"Failed to purge mailcow dir: {ex.Message}");
+                }
+            }
+        }
+
+        return HostPackageOperationResult.Ok("mailcow removed");
     }
 
     private async Task<HostPackageOperationResult> InstallWebmailAsync(string packageId, AppLogger? logger, CancellationToken ct)
@@ -1329,7 +1557,14 @@ public sealed record HostPackageStatus(
     bool Managed,
     [property: JsonPropertyName("install_blocked")] bool InstallBlocked = false,
     [property: JsonPropertyName("blocked_by")] string? BlockedBy = null,
-    [property: JsonPropertyName("blocked_by_name")] string? BlockedByName = null);
+    [property: JsonPropertyName("blocked_by_name")] string? BlockedByName = null,
+    /// <summary>
+    /// One-line description shown in the panel's package manager next to the package, so an
+    /// operator knows what installing it does without leaving the panel.
+    /// </summary>
+    string? Description = null,
+    /// <summary>Documentation the panel can link to for this package.</summary>
+    [property: JsonPropertyName("docs_url")] string? DocsUrl = null);
 
 public sealed record HostPackageOperationResult(
     bool Success,

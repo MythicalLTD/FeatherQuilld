@@ -54,10 +54,14 @@ public class MailDnsHelperTests
     [Fact]
     public void BuildHints_IncludesMxAndSpfWithoutDkimFile()
     {
+        // A throwaway root: with the default root directory the assertion below reads the mail
+        // state of the machine running the tests, so a single leftover DKIM key for example.com
+        // (e.g. from a live node) turned this into a false negative.
         var config = new AppConfig
         {
             System = new SystemConfig
             {
+                RootDirectory = Path.Combine(Path.GetTempPath(), "fq-mail-hints-" + Guid.NewGuid().ToString("N")),
                 Mail = new MailConfig
                 {
                     Enabled = true,
@@ -84,6 +88,118 @@ public class MailDnsHelperTests
         };
 
         Assert.Equal("mx.example.com.", MailDnsHelper.ResolveMailHostname(config, "other.test"));
+    }
+
+    [Fact]
+    public void BuildHints_IncludesClientAutoconfigurationAsOptional()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "mail.example.com",
+                    ImapPort = 993,
+                    SmtpPort = 587,
+                    Mailcow = new MailcowConfig { MailHost = "mail.example.com" },
+                },
+            },
+        };
+
+        var hints = MailDnsHelper.BuildHints(config, "example.com");
+
+        var autodiscover = hints.Single(h => h.Type == "CNAME" && h.Name == "autodiscover");
+        Assert.Equal("mail.example.com.", autodiscover.Value);
+        Assert.True(autodiscover.Optional);
+
+        var imaps = hints.Single(h => h.Type == "SRV" && h.Name == "_imaps._tcp");
+        Assert.True(imaps.Optional);
+        Assert.Equal("_imaps", imaps.Service);
+        Assert.Equal("_tcp", imaps.Protocol);
+        Assert.Equal(993, imaps.Port);
+        Assert.Equal("mail.example.com.", imaps.Target);
+
+        var submission = hints.Single(h => h.Type == "SRV" && h.Name == "_submission._tcp");
+        Assert.Equal(587, submission.Port);
+
+        // The records a mail domain cannot work without stay required.
+        Assert.False(hints.Single(h => h.Type == "MX").Optional);
+        Assert.False(hints.Single(h => h.Type == "TXT" && h.Name == "@").Optional);
+    }
+
+    [Fact]
+    public void BuildHints_UsesTheConfiguredPorts()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "mail.example.com",
+                    ImapPort = 1993,
+                    SmtpPort = 1587,
+                },
+            },
+        };
+
+        var hints = MailDnsHelper.BuildHints(config, "example.com");
+
+        Assert.Equal(1993, hints.Single(h => h.Name == "_imaps._tcp").Port);
+        Assert.Equal(1587, hints.Single(h => h.Name == "_submission._tcp").Port);
+    }
+
+    [Fact]
+    public void ResolveMailHostname_FallsBackToTheMailcowHost()
+    {
+        // A node that never set mail.hostname must still publish an MX record that resolves:
+        // the remote mailcow knows its own host, so use it before inventing mail.<domain>.
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "",
+                    Mailcow = new MailcowConfig { MailHost = "mail.allo.bet" },
+                },
+            },
+        };
+
+        Assert.Equal("mail.allo.bet.", MailDnsHelper.ResolveMailHostname(config, "example.com"));
+    }
+
+    [Fact]
+    public void ResolveMailHostname_UsesTheMailcowUrlHostAsLastFallback()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig
+                {
+                    Hostname = "",
+                    Mailcow = new MailcowConfig { Url = "https://mail.example.com:8443" },
+                },
+            },
+        };
+
+        Assert.Equal("mail.example.com.", MailDnsHelper.ResolveMailHostname(config, "example.com"));
+    }
+
+    [Fact]
+    public void ResolveMailHostname_OnlyInventsAHostWhenNothingIsConfigured()
+    {
+        var config = new AppConfig
+        {
+            System = new SystemConfig
+            {
+                Mail = new MailConfig { Hostname = "", Mailcow = new MailcowConfig { Url = "", MailHost = "" } },
+            },
+        };
+
+        Assert.Equal("mail.example.com.", MailDnsHelper.ResolveMailHostname(config, "example.com"));
     }
 
     [Fact]

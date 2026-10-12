@@ -94,13 +94,81 @@ public static class MailProbe
         }
     }
 
-    public static bool SmtpReachable(AppConfig? config) =>
-        PortOpen(config?.System.Mail.SmtpPort ?? 587);
+    /// <summary>
+    /// Host the mail ports are checked on.
+    ///
+    /// A mail stack on its own host (remote mailcow) is checked there; probing loopback instead
+    /// reports "not listening" while the mail server is perfectly up.
+    /// </summary>
+    public static string ProbeHost(AppConfig? config)
+    {
+        if (config is null)
+            return "127.0.0.1";
 
-    public static bool ImapReachable(AppConfig? config) =>
-        PortOpen(config?.System.Mail.ImapPort ?? 993);
+        var host = (MailcowDocker.RemoteHost(config) ?? string.Empty).Trim();
+        if (host.Length == 0)
+            host = MailDnsHelper.ResolveConfiguredMailHost(config);
 
-    public static bool MxPortOpen(AppConfig? config) =>
-        PortOpen(config?.System.Mail.SmtpPort ?? 25, "127.0.0.1")
-        || PortOpen(25, "127.0.0.1");
+        return host.Length > 0 ? host : "127.0.0.1";
+    }
+
+    public static bool SmtpReachable(AppConfig? config)
+    {
+        var port = config?.System.Mail.SmtpPort ?? 587;
+
+        return PortOpen(port, ProbeHost(config)) || PortOpen(port);
+    }
+
+    public static bool ImapReachable(AppConfig? config)
+    {
+        var port = config?.System.Mail.ImapPort ?? 993;
+
+        return PortOpen(port, ProbeHost(config)) || PortOpen(port);
+    }
+
+    /// <summary>Port 25 (or the submission port) on the mail host.</summary>
+    public static bool MxPortOpen(AppConfig? config)
+    {
+        var host = ProbeHost(config);
+
+        return PortOpen(25, host) || PortOpen(25) || PortOpen(config?.System.Mail.SmtpPort ?? 25, host);
+    }
+
+    /// <summary>
+    /// True when the mail stack selected in config is running: mailcow resolves its
+    /// containers through compose labels, docker-mailserver through its container name.
+    /// </summary>
+    public static bool StackRunning(AppConfig? config)
+    {
+        if (config is null)
+            return ContainerRunning(null);
+
+        return MailBackendKind.IsMailcow(config.System.Mail.Backend)
+            ? MailcowDocker.StackReachable(config)
+            : ContainerRunning(config);
+    }
+
+    /// <summary>Container/project identifier of the configured stack, for diagnostics.</summary>
+    public static string StackIdentifier(AppConfig? config)
+    {
+        if (config is not null && MailBackendKind.IsMailcow(config.System.Mail.Backend))
+        {
+            var dovecot = MailcowDocker.FindContainer("dovecot-mailcow");
+            if (dovecot is not null)
+                return dovecot;
+
+            // A remote stack has no container here; the host name is what diagnostics need.
+            var remote = MailcowDocker.RemoteHost(config);
+
+            return remote is not null ? $"{remote} (remote)" : MailcowPaths.ProjectName;
+        }
+
+        return MailPaths.ContainerName;
+    }
+
+    /// <summary>Compose file of the configured stack, for diagnostics.</summary>
+    public static string ComposePath(AppConfig config) =>
+        MailBackendKind.IsMailcow(config.System.Mail.Backend)
+            ? MailcowPaths.ComposeFile(config)
+            : MailPaths.ComposeFile(config);
 }
