@@ -26,6 +26,7 @@ public static class WebSpacePhpExtensions
         "gmp",
         "intl",
         "ldap",
+        "mongodb",
         "pdo_pgsql",
         "pgsql",
         "redis",
@@ -36,7 +37,7 @@ public static class WebSpacePhpExtensions
     ];
 
     /// <summary>Extensions installed via PECL rather than docker-php-ext-install.</summary>
-    public static readonly IReadOnlyList<string> PeclExtensions = ["redis", "imagick"];
+    public static readonly IReadOnlyList<string> PeclExtensions = ["redis", "imagick", "mongodb"];
 
     private static readonly HashSet<string> CatalogSet =
         new(Catalog, StringComparer.OrdinalIgnoreCase);
@@ -216,6 +217,9 @@ public static class WebSpacePhpExtensions
                     break;
                 case "imagick":
                     pkgs.Add("libmagickwand-dev");
+                    break;
+                case "mongodb":
+                    pkgs.Add("libssl-dev");
                     break;
             }
         }
