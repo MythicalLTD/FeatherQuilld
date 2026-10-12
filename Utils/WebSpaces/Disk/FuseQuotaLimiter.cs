@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
 using FeatherQuilld.Utils.Config.System;
+using FeatherQuilld.Utils.Native;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 using AppLogger = FeatherQuilld.Utils.Logger.Logger;
 using FeatherQuilld.Utils.Logger;
@@ -231,36 +232,13 @@ public sealed class FuseQuotaLimiter
 
     private async Task UnmountStaleAsync(CancellationToken cancellationToken)
     {
-        try
+        var result = await FqCtl.UmountLazyAsync(_mountPath, _config.System, _logger, cancellationToken)
+            .ConfigureAwait(false);
+        if (!result.Succeeded)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "umount",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            psi.ArgumentList.Add("-l");
-            psi.ArgumentList.Add(_mountPath);
-
-            using var process = Process.Start(psi);
-            if (process is null)
-            {
-                _logger?.Warning(LoggerTypes.Disk, $"could not start umount for {_mountPath}");
-            }
-            else
-            {
-                await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-                if (process.ExitCode != 0)
-                {
-                    _logger?.Warning(LoggerTypes.Disk,
-                        $"umount -l {_mountPath} exited with {process.ExitCode}: {process.StandardError.ReadToEnd().Trim()}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger?.Warning(LoggerTypes.Disk, $"umount -l {_mountPath} failed: {ex.Message}");
+            var detail = string.IsNullOrEmpty(result.Stderr) ? result.Code.ToString() : result.Stderr;
+            _logger?.Warning(LoggerTypes.Disk,
+                $"umount-lazy {_mountPath} failed ({result.Code}): {detail}");
         }
 
         try

@@ -1,6 +1,7 @@
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Dns;
 using FeatherQuilld.Utils.Docker;
+using FeatherQuilld.Utils.Native;
 using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.SystemInfo;
 using FeatherQuilld.Utils.WebSpaces;
@@ -206,6 +207,21 @@ public static class StartupSelfTest
             {
                 yield return new DiagnosticCheck("fusequota_binary", "ok", "fusequota not required", null);
             }
+        }
+
+        if (FqCtl.TryResolveBinaryPath(config.System, out var fqctlPath))
+        {
+            logger.Info(LoggerTypes.Disk, $"fqctl binary → {fqctlPath}");
+            yield return new DiagnosticCheck("fqctl_binary", "ok", "fqctl binary found", fqctlPath);
+        }
+        else
+        {
+            logger.Debug(LoggerTypes.Disk, $"fqctl not found (configured={config.System.FqctlPath}); falling back to umount/chown");
+            yield return new DiagnosticCheck(
+                "fqctl_binary",
+                "warn",
+                "fqctl missing; using system umount/chown",
+                config.System.FqctlPath);
         }
 
         if (mode == DiskLimiterModeKind.FuseQuota && OperatingSystem.IsLinux() && !File.Exists("/dev/fuse"))

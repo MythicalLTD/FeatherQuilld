@@ -85,6 +85,15 @@ echo "Building FeatherQuilld ${VERSION} (${NFPM_NAME}) for: ${ARCHES}"
 
 : > "${OUT_DIR}/.deb-manifest"
 
+# fqctl is a small Linux helper packaged next to the daemon. Build once for the
+# host arch; cross-arch packages reuse it only when arch matches host.
+host_deb_arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "${host_deb_arch}" in
+  x86_64) host_deb_arch=amd64 ;;
+  aarch64) host_deb_arch=arm64 ;;
+esac
+make -C "${ROOT}" build-fqctl
+
 for arch in ${ARCHES}; do
   rid="$(rid_for_arch "${arch}")"
   label="$(binary_arch_label "${arch}")"
@@ -92,6 +101,10 @@ for arch in ${ARCHES}; do
 
   echo ""
   echo "==> ${arch} (${rid})"
+
+  if [[ "${arch}" != "${host_deb_arch}" ]]; then
+    echo "NOTE: bins/fqctl is host-arch (${host_deb_arch}); skip packaging fqctl for ${arch} or cross-build." >&2
+  fi
 
   rm -rf "${publish_dir}"
   mkdir -p "${publish_dir}"
@@ -122,13 +135,26 @@ for arch in ${ARCHES}; do
   cp -f "${OUT_DIR}/featherquilld" "${OUT_DIR}/featherquilld_linux_${label}"
   chmod 755 "${OUT_DIR}/featherquilld_linux_${label}"
 
+  nfpm_cfg="${OUT_DIR}/nfpm-${arch}.yaml"
+  if [[ "${arch}" == "${host_deb_arch}" ]]; then
+    cp -f nfpm.yaml "${nfpm_cfg}"
+  else
+    # Drop host-arch fqctl from cross-arch packages; daemon falls back to umount/chown.
+    awk '
+      $0 ~ /^  - src: bins\/fqctl$/ { skip=1; next }
+      skip && $0 ~ /^  - / { skip=0 }
+      skip { next }
+      { print }
+    ' nfpm.yaml > "${nfpm_cfg}"
+  fi
+
   NFPM_NAME="${NFPM_NAME}" \
   NFPM_CONFLICT="${NFPM_CONFLICT}" \
   NFPM_ARCH="${arch}" \
   NFPM_VERSION="${VERSION}" \
   nfpm pkg \
     --packager deb \
-    --config nfpm.yaml \
+    --config "${nfpm_cfg}" \
     --target "${OUT_DIR}/"
 
   echo "${OUT_DIR}/${NFPM_NAME}_${VERSION}_${arch}.deb" >> "${OUT_DIR}/.deb-manifest"

@@ -4,6 +4,7 @@ obj/
 /bins/
 /dist/
 /publish/
+native/fqctl/build/
 packaging/changelog.yaml
 packaging/featherquilld.metainfo.xml
 riderModule.iml

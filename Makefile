@@ -5,7 +5,7 @@ PORT         ?= 8989
 DOCKER_IMAGE ?= featherquilld
 DOCKER_TAG   ?= latest
 
-.PHONY: help restore build build-plugins ensure-fusequota build-fusequota build-fusequota-source run watch stop publish publish-linux deb deb-dev package clean docker docker-run test fmt configure
+.PHONY: help restore build build-plugins build-fqctl ensure-fusequota build-fusequota build-fusequota-source run watch stop publish publish-linux deb deb-dev package clean docker docker-run test fmt configure
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -27,7 +27,11 @@ build-fusequota-source: ## Build fusequota from submodule (contributors / unsupp
 	cp -f fusequota/build/fusequota bins/fusequota
 	chmod +x bins/fusequota
 
+build-fqctl: ## Build native fqctl helper → bins/fqctl
+	$(MAKE) -C native/fqctl install
+
 build: build-plugins ## Build host + plugins (fusequota auto-downloads at runtime on Linux)
+	@if [ "$$(uname -s)" = Linux ]; then $(MAKE) build-fqctl; fi
 	dotnet build FeatherQuilld.csproj -c $(CONFIG) --nologo
 
 build-plugins: ## Build and deploy sample plugins
@@ -53,7 +57,9 @@ stop: ## Kill whatever is listening on PORT (default 8989)
 	kill -9 $$pids 2>/dev/null || true
 
 publish: build-plugins ## Publish single FeatherQuilld binary (fusequota fetched on first boot)
+	@if [ "$$(uname -s)" = Linux ]; then $(MAKE) build-fqctl; fi
 	dotnet publish FeatherQuilld.csproj -c Release -o ./publish --nologo
+	@if [ -f bins/fqctl ]; then cp -f bins/fqctl ./publish/fqctl && chmod 755 ./publish/fqctl; fi
 
 publish-linux: ## Publish self-contained linux-x64 + linux-arm64 binaries to dist/
 	PACKAGE_CHANNEL=dev ARCHES="amd64 arm64" bash scripts/build-deb.sh --binaries-only 2>/dev/null || \
@@ -77,6 +83,7 @@ package: deb ## Build prod .deb and optionally upload to Nexus (set NEXUS_USERNA
 clean: ## Remove build artifacts
 	dotnet clean FeatherQuilld.slnx --nologo
 	rm -rf ./bin ./obj ./publish ./bins ./dist
+	-$(MAKE) -C native/fqctl clean
 	-[ -d fusequota ] && $(MAKE) -C fusequota clean
 
 docker: ## Build Docker image

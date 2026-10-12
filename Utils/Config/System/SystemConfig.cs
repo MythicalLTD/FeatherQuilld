@@ -24,6 +24,13 @@ public class SystemConfig
     public string VmountDirectory { get; set; } = "/var/lib/featherquilld/vmounts";
     public string FusequotaPath { get; set; } = "fusequota";
 
+    /// <summary>
+    /// Path to the <c>fqctl</c> helper (umount-lazy / chown-r / mount-bind).
+    /// Override with env <c>FQCTL_BIN</c>. Falls back to system umount/chown when missing.
+    /// </summary>
+    [YamlMember(Alias = "fqctl_path")]
+    public string FqctlPath { get; set; } = "fqctl";
+
     /// <summary><c>none</c> or <c>fuse_quota</c>. Default is FuseQuota. Explicit <c>none</c>/<c>off</c>/<c>disabled</c> hard-disables FUSE.</summary>
     public string DiskLimiterMode { get; set; } = "fuse_quota";
 

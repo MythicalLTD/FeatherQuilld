@@ -43,6 +43,10 @@ contents:
   - src: /usr/local/bin/featherquilld
     dst: /usr/local/bin/quilld
     type: symlink
+  - src: bins/fqctl
+    dst: /usr/local/bin/fqctl
+    file_info:
+      mode: 0755
   - src: packaging/featherquilld.service
     dst: /lib/systemd/system/featherquilld.service
     file_info:

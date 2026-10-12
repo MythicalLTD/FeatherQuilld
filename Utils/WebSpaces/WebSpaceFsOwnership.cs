@@ -1,5 +1,6 @@
-using System.Diagnostics;
+using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Logger;
+using FeatherQuilld.Utils.Native;
 using AppLogger = FeatherQuilld.Utils.Logger.Logger;
 
 namespace FeatherQuilld.Utils.WebSpaces;
@@ -41,7 +42,11 @@ public static class WebSpaceFsOwnership
     /// host, otherwise the application has no write access at all (WordPress cannot
     /// create wp-config.php, no uploads, no plugin or core updates).
     /// </summary>
-    public static void EnsureWebServerOwnership(WebSpace space, string fsPath, AppLogger? logger = null)
+    public static void EnsureWebServerOwnership(
+        WebSpace space,
+        string fsPath,
+        AppLogger? logger = null,
+        SystemConfig? system = null)
     {
         if (!IsWebServerRuntime(space.Runtime))
             return;
@@ -50,39 +55,17 @@ public static class WebSpaceFsOwnership
         if (!Directory.Exists(source))
             return;
 
-        try
+        var result = FqCtl.ChownRecursive(WebServerUid, WebServerGid, source, system, logger);
+        if (result.Succeeded)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "chown",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            };
-            psi.ArgumentList.Add("-R");
-            psi.ArgumentList.Add($"{WebServerUid}:{WebServerGid}");
-            psi.ArgumentList.Add("--");
-            psi.ArgumentList.Add(source);
-
-            using var process = Process.Start(psi);
-            if (process is null)
-            {
-                logger?.Warning(LoggerTypes.WebSpaces, $"chown for {space.Uuid} could not be started");
-                return;
-            }
-
-            process.WaitForExit(120_000);
-            if (process.ExitCode == 0)
-                logger?.Debug(LoggerTypes.WebSpaces,
-                    $"chown {WebServerUid}:{WebServerGid} applied to {source} ({space.Uuid})");
-            else
-                logger?.Warning(LoggerTypes.WebSpaces,
-                    $"chown for {space.Uuid} exited with {process.ExitCode}: {process.StandardError.ReadToEnd().Trim()}");
+            logger?.Debug(LoggerTypes.WebSpaces,
+                $"chown {WebServerUid}:{WebServerGid} applied to {source} ({space.Uuid})");
+            return;
         }
-        catch (Exception ex)
-        {
-            logger?.Warning(LoggerTypes.WebSpaces, $"chown for {space.Uuid} failed: {ex.Message}");
-        }
+
+        var detail = string.IsNullOrEmpty(result.Stderr) ? result.Code.ToString() : result.Stderr;
+        logger?.Warning(LoggerTypes.WebSpaces,
+            $"chown for {space.Uuid} failed ({result.Code}): {detail}");
     }
 
     /// <summary>

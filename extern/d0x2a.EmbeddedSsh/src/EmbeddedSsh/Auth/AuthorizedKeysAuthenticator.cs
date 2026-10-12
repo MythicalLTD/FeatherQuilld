@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
 using d0x2a.EmbeddedSsh.Crypto;
@@ -187,7 +188,7 @@ public sealed class AuthorizedKeysAuthenticator : IAuthenticator
     /// <summary>
     /// Checks if the given algorithm is supported for authentication.
     /// </summary>
-    private static bool IsSupportedAlgorithm(string? algorithm)
+    private static bool IsSupportedAlgorithm([NotNullWhen(true)] string? algorithm)
     {
         return algorithm == "ssh-ed25519" || IsRsaAlgorithm(algorithm);
     }
