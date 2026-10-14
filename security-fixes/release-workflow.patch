@@ -1,0 +1,32 @@
+commit 551f39e3bf57cddb656ffeb008bcc9a25b3bff54
+Author: Lennard Wilmer <216711799+redstonerthebest@users.noreply.github.com>
+Date:   Wed Oct 14 10:36:16 2026 +0000
+
+    ci: pass release tag through env instead of shell interpolation
+    
+    Workflow-Dateien lassen sich mit dem aktuellen Token-Scope nicht pushen
+    (gh auth refresh -s workflow noetig); der Fix liegt im Patch-Bundle.
+
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 2279b71..55e8e4d 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -170,11 +170,15 @@ jobs:
+ 
+       - name: Resolve release tag
+         id: tag
++        env:
++          EVENT_NAME: ${{ github.event_name }}
++          INPUT_TAG: ${{ inputs.tag }}
++          RELEASE_TAG: ${{ github.event.release.tag_name }}
+         run: |
+-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+-            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
++          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
++            echo "name=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+           else
+-            echo "name=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
++            echo "name=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+           fi
+ 
+       - name: Download .deb release assets

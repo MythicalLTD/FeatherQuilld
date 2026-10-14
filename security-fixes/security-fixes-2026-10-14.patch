@@ -1,0 +1,826 @@
+diff --git a/Controllers/HomeController.cs b/Controllers/HomeController.cs
+index 65960c1..bb02c10 100644
+--- a/Controllers/HomeController.cs
++++ b/Controllers/HomeController.cs
+@@ -1,6 +1,7 @@
+ using FeatherQuilld.Utils.Config;
+ using FeatherQuilld.Utils.Startup;
+ using FeatherQuilld.Utils.Web;
++using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.Mvc;
+ 
+ namespace FeatherQuilld.Controllers;
+@@ -11,6 +12,7 @@ namespace FeatherQuilld.Controllers;
+ public sealed class HomeController : ControllerBase
+ {
+     /// <summary>Serves the main page at <c>/</c>.</summary>
++    [AllowAnonymous]
+     [HttpGet("/")]
+     [Produces("text/html")]
+     public ContentResult Index([FromServices] Config config) =>
+diff --git a/Controllers/WebSpacesController.cs b/Controllers/WebSpacesController.cs
+index a1a006a..e3c8481 100644
+--- a/Controllers/WebSpacesController.cs
++++ b/Controllers/WebSpacesController.cs
+@@ -105,6 +105,7 @@ public sealed class WebSpacesController : ControllerBase
+ 
+     [HttpGet("{uuid:guid}/proxy-logs")]
+     [ProducesResponseType(StatusCodes.Status200OK)]
++    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+     [ProducesResponseType(StatusCodes.Status404NotFound)]
+     public IActionResult ProxyLogs(
+         Guid uuid,
+@@ -119,6 +120,10 @@ public sealed class WebSpacesController : ControllerBase
+         {
+             return Ok(_spaces.GetProxyLogs(uuid, domain, lines, days, q, regex, scan_lines));
+         }
++        catch (ArgumentException ex)
++        {
++            return BadRequest(new { error = ex.Message });
++        }
+         catch (InvalidOperationException)
+         {
+             return NotFound(new { error = "WebSpace not found." });
+@@ -128,6 +133,7 @@ public sealed class WebSpacesController : ControllerBase
+     [HttpPost("{uuid:guid}/proxy-logs/rotate")]
+     [EnableRateLimiting("expensive")]
+     [ProducesResponseType(StatusCodes.Status200OK)]
++    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+     [ProducesResponseType(StatusCodes.Status404NotFound)]
+     public IActionResult RotateProxyLogs(Guid uuid, [FromQuery] string? domain = null)
+     {
+@@ -136,6 +142,10 @@ public sealed class WebSpacesController : ControllerBase
+             _spaces.RotateProxyLogs(uuid, domain);
+             return Ok(new { ok = true, domain = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().ToLowerInvariant() });
+         }
++        catch (ArgumentException ex)
++        {
++            return BadRequest(new { error = ex.Message });
++        }
+         catch (InvalidOperationException)
+         {
+             return NotFound(new { error = "WebSpace not found." });
+diff --git a/FeatherQuilld.Tests/Security/SecurityHardeningTests.cs b/FeatherQuilld.Tests/Security/SecurityHardeningTests.cs
+new file mode 100644
+index 0000000..2bb5350
+--- /dev/null
++++ b/FeatherQuilld.Tests/Security/SecurityHardeningTests.cs
+@@ -0,0 +1,105 @@
++using FeatherQuilld.Middleware;
++using FeatherQuilld.Utils.Config.System;
++using FeatherQuilld.Utils.Mail;
++using FeatherQuilld.Utils.WebSpaces;
++using AppConfig = FeatherQuilld.Utils.Config.Config;
++
++namespace FeatherQuilld.Tests.Security;
++
++/// <summary>
++/// Regression tests for the hardenings from the 2026-10 security review:
++/// token masking in the request log, path-traversal guards for mail/spam file
++/// names and the Apache document-root allowlist.
++/// </summary>
++public class SecurityHardeningTests : IDisposable
++{
++    private readonly string _root;
++
++    public SecurityHardeningTests()
++    {
++        _root = Path.Combine(Path.GetTempPath(), "fq-sec-" + Guid.NewGuid().ToString("N"));
++        Directory.CreateDirectory(_root);
++    }
++
++    public void Dispose()
++    {
++        try { Directory.Delete(_root, true); } catch { /* ignore */ }
++    }
++
++    private AppConfig Config() => new()
++    {
++        System = new SystemConfig
++        {
++            RootDirectory = _root,
++            Mail = new MailConfig { DataPath = Path.Combine(_root, "mail") },
++        },
++    };
++
++    [Theory]
++    [InlineData("/api/x?token=secret&y=1", "/api/x?token=***&y=1")]
++    [InlineData("/api/x?a=1&token=secret", "/api/x?a=1&token=***")]
++    [InlineData("/api/x?token=", "/api/x?token=***")]
++    [InlineData("/api/x?tokens=secret", "/api/x?tokens=secret")]
++    [InlineData("/api/x?a=1", "/api/x?a=1")]
++    public void MaskSecrets_hides_token_but_keeps_the_rest(string input, string expected) =>
++        Assert.Equal(expected, RequestResponseLoggingMiddleware.MaskSecrets(input));
++
++    [Theory]
++    [InlineData("public/site", "public/site")]
++    [InlineData("public", "public")]
++    [InlineData("", "")]
++    [InlineData("../etc", "")]
++    [InlineData("public\n  ServerName evil.example.com", "")]
++    [InlineData("public\"</Directory>", "")]
++    [InlineData("public/../etc", "")]
++    public void SanitizeRelativeDocumentRoot_accepts_only_plain_relative_paths(string input, string expected) =>
++        Assert.Equal(expected, WebSpaceSiteFiles.SanitizeRelativeDocumentRoot(input));
++
++    [Theory]
++    [InlineData("user@example.com", true)]
++    [InlineData("first.last+tag@sub.example.com", true)]
++    [InlineData("user@localhost", true)]
++    [InlineData("../evil@example.com", false)]
++    [InlineData("user@../../etc", false)]
++    [InlineData("a/b@example.com", false)]
++    [InlineData("..@example.com", false)]
++    [InlineData("mail.txt", false)]
++    [InlineData("", false)]
++    public void MailAddressRules_only_accept_plain_addresses(string address, bool expected) =>
++        Assert.Equal(expected, MailAddressRules.IsValidAddress(address));
++
++    [Fact]
++    public void ConfigSievePath_rejects_traversal_but_keeps_valid_addresses()
++    {
++        var config = Config();
++
++        Assert.Equal(string.Empty, MailVacationHelper.ConfigSievePath(config, "../../escape"));
++        Assert.Equal(string.Empty, MailVacationHelper.ConfigSievePath(config, "not-an-address"));
++
++        MailVacationHelper.WriteAutorespond(config, "../evil", "Away", "nope");
++        // Old behaviour would have written this outside the config dir.
++        Assert.False(File.Exists(Path.Combine(_root, "mail", "evil.dovecot.sieve")));
++        Assert.False(File.Exists(Path.Combine(_root, "evil.dovecot.sieve")));
++
++        MailVacationHelper.WriteAutorespond(config, "alice@example.com", "Away", "Back soon");
++        var path = MailVacationHelper.ConfigSievePath(config, "alice@example.com");
++        Assert.StartsWith(Path.Combine(_root, "mail", "config"), path);
++        Assert.True(File.Exists(path));
++    }
++
++    [Fact]
++    public void SpamFilterState_rejects_traversal_but_keeps_valid_addresses()
++    {
++        var config = Config();
++
++        MailSpamHelper.SetSpamFilterEnabled(config, "../../escape", enabled: false);
++        Assert.False(File.Exists(Path.Combine(_root, "mail", "config", "escape.json")));
++
++        Assert.True(MailSpamHelper.GetSpamFilterEnabled(config, "../../escape"));
++
++        MailSpamHelper.SetSpamFilterEnabled(config, "user@example.com", enabled: false);
++        Assert.False(MailSpamHelper.GetSpamFilterEnabled(config, "user@example.com"));
++        Assert.True(File.Exists(Path.Combine(
++            MailSpamHelper.SpamFilterDir(config), "user_example.com.json")));
++    }
++}
+diff --git a/FeatherQuilld.Tests/WebSpaces/FuseQuotaBinaryProvisionerTests.cs b/FeatherQuilld.Tests/WebSpaces/FuseQuotaBinaryProvisionerTests.cs
+index df4326c..c3f3c3d 100644
+--- a/FeatherQuilld.Tests/WebSpaces/FuseQuotaBinaryProvisionerTests.cs
++++ b/FeatherQuilld.Tests/WebSpaces/FuseQuotaBinaryProvisionerTests.cs
+@@ -9,12 +9,21 @@ public class FuseQuotaBinaryProvisionerTests
+     [InlineData("fusequota-aarch64-linux")]
+     [InlineData("fusequota-ppc64le-linux")]
+     [InlineData("fusequota-riscv64-linux")]
+-    public void BuildDownloadUrl_uses_expected_asset_name(string asset)
++    public void BuildDownloadUrl_uses_pinned_release_and_expected_asset_name(string asset)
+     {
+-        var url = FuseQuotaBinaryProvisioner.BuildDownloadUrl(asset);
++        // The release is pinned to a fixed tag instead of the moving "latest".
++        Assert.DoesNotContain("/releases/latest/", FuseQuotaBinaryProvisioner.DefaultReleaseBase);
+         Assert.Equal(
+-            $"https://github.com/calagopus/fusequota/releases/latest/download/{asset}",
+-            url);
++            "https://github.com/calagopus/fusequota/releases/download/"
++            + FuseQuotaBinaryProvisioner.DefaultReleaseTag,
++            FuseQuotaBinaryProvisioner.DefaultReleaseBase);
++
++        var url = FuseQuotaBinaryProvisioner.BuildDownloadUrl(asset, FuseQuotaBinaryProvisioner.DefaultReleaseBase);
++        Assert.Equal($"{FuseQuotaBinaryProvisioner.DefaultReleaseBase}/{asset}", url);
++
++        // Every shipped asset of the pinned release carries a known SHA-256.
++        Assert.NotNull(FuseQuotaBinaryProvisioner.ExpectedSha256(asset));
++        Assert.False(string.IsNullOrWhiteSpace(FuseQuotaBinaryProvisioner.ExpectedSha256(asset)));
+     }
+ 
+     [Fact]
+@@ -31,5 +40,8 @@ public class FuseQuotaBinaryProvisionerTests
+             "fusequota-x86_64-linux",
+             "https://example.com/releases");
+         Assert.Equal("https://example.com/releases/fusequota-x86_64-linux", url);
++        // A custom source cannot be hash-pinned.
++        Assert.Null(FuseQuotaBinaryProvisioner.ExpectedSha256(
++            "fusequota-x86_64-linux", "https://example.com/releases"));
+     }
+ }
+diff --git a/Middleware/BearerTokenAuthenticationHandler.cs b/Middleware/BearerTokenAuthenticationHandler.cs
+index 0a0d0d4..29e54bc 100644
+--- a/Middleware/BearerTokenAuthenticationHandler.cs
++++ b/Middleware/BearerTokenAuthenticationHandler.cs
+@@ -53,8 +53,11 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
+                 return header["Bearer ".Length..].Trim();
+         }
+ 
+-        // WebSocket clients often pass the bearer via ?token=
+-        if (Request.Query.TryGetValue("token", out var queryToken))
++        // WebSocket clients often pass the bearer via ?token= (browsers cannot set
++        // an Authorization header on the upgrade request). Restrict the query token
++        // to the console WebSocket route so the node bearer does not end up in
++        // request logs / proxy logs for every other endpoint.
++        if (Request.Query.TryGetValue("token", out var queryToken) && IsWebSocketRoute(Request.Path))
+         {
+             var value = queryToken.ToString().Trim();
+             if (!string.IsNullOrEmpty(value))
+@@ -64,6 +67,18 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
+         return null;
+     }
+ 
++    /// <summary>
++    /// True for the console WebSocket route (<c>.../{uuid}/ws</c>), the only place
++    /// where a browser client cannot send the bearer as a header.
++    /// </summary>
++    private static bool IsWebSocketRoute(PathString path)
++    {
++        var value = path.HasValue ? path.Value! : string.Empty;
++        var lastSlash = value.LastIndexOf('/');
++        var lastSegment = lastSlash >= 0 ? value[(lastSlash + 1)..] : value;
++        return lastSegment.Equals("ws", StringComparison.OrdinalIgnoreCase);
++    }
++
+     /// <summary>
+     /// Constant-time string comparison (UTF-8 byte-wise) to prevent timing
+     /// side-channels when comparing against a secret token.
+diff --git a/Middleware/RequestResponseLoggingMiddleware.cs b/Middleware/RequestResponseLoggingMiddleware.cs
+index 4c26b57..f7cd3cb 100644
+--- a/Middleware/RequestResponseLoggingMiddleware.cs
++++ b/Middleware/RequestResponseLoggingMiddleware.cs
+@@ -1,4 +1,5 @@
+ using System.Diagnostics;
++using System.Text.RegularExpressions;
+ using FeatherQuilld.Utils.Logger;
+ using AppLogger = FeatherQuilld.Utils.Logger.Logger;
+ 
+@@ -7,13 +8,13 @@ namespace FeatherQuilld.Middleware;
+ /// <summary>
+ /// Logs each HTTP request and its response when the app logger has debug enabled.
+ /// </summary>
+-public sealed class RequestResponseLoggingMiddleware(RequestDelegate next, AppLogger logger)
++public sealed partial class RequestResponseLoggingMiddleware(RequestDelegate next, AppLogger logger)
+ {
+     public async Task InvokeAsync(HttpContext context)
+     {
+         var req = context.Request;
+         var path = req.Path.HasValue ? req.Path.Value! : "/";
+-        var query = req.QueryString.HasValue ? req.QueryString.Value : null;
++        var query = req.QueryString.HasValue ? MaskSecrets(req.QueryString.Value!) : null;
+         var target = query is null ? path : path + query;
+         var remote = context.Connection.RemoteIpAddress?.ToString() ?? "-";
+ 
+@@ -33,4 +34,16 @@ public sealed class RequestResponseLoggingMiddleware(RequestDelegate next, AppLo
+                 $"→ {req.Method} {path} {status} {sw.ElapsedMilliseconds}ms");
+         }
+     }
++
++    /// <summary>
++    /// Masks bearer/upload token values in a query string before logging so the
++    /// node bearer never lands in request logs, proxy logs or shell history.
++    /// The rest of the query is left untouched.
++    /// </summary>
++    internal static string MaskSecrets(string queryString) =>
++        TokenQueryRegex().Replace(queryString, "${prefix}***");
++
++    [GeneratedRegex(@"(?<prefix>(?:^|[?&])token=)[^&]*",
++        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
++    private static partial Regex TokenQueryRegex();
+ }
+diff --git a/SECURITY-FIXES-2026-10-14.md b/SECURITY-FIXES-2026-10-14.md
+new file mode 100644
+index 0000000..eedb2b0
+--- /dev/null
++++ b/SECURITY-FIXES-2026-10-14.md
+@@ -0,0 +1,89 @@
++# Security fixes — FeatherQuilld (branch `security-fixes-2026-10-14`)
++
++Base commit: `e116e39` (upstream `master`). 16 files changed, no new NuGet packages,
++no schema change, no new mandatory configuration. The panel protocol is unchanged.
++
++## FQ-1 — Node bearer token in query strings and logs
++
++* `Middleware/BearerTokenAuthenticationHandler.cs` accepted `?token=` on **every**
++  endpoint, while `Middleware/RequestResponseLoggingMiddleware.cs` logged path **and** query
++  string — the node-wide token ended up in logs, proxy logs and shell histories.
++* Now the query token is only accepted when the last path segment is `ws`
++  (`/api/webspaces/{uuid}/ws`, `/api/system/packages/ws`), and the logged line masks
++  `token=<value>` as `token=***`.
++
++## FQ-2 — Authorization was opt-in per controller
++
++* `Utils/Startup/DaemonHost.cs` called `AddAuthorization()` without a `FallbackPolicy`, so
++  every new controller/action was public unless someone remembered `[Authorize]`
++  (`GET /` already was).
++* Now the fallback policy is `RequireAuthenticatedUser`. The three endpoints that must stay
++  anonymous carry `[AllowAnonymous]` explicitly and were verified: `GET /`
++  (landing page), `GET /api/webspaces/{uuid}/ws` (browser WebSocket upgrade — auth happens
++  after the upgrade via the JWT event), `POST .../files/upload-signed` (own HMAC token via
++  `WebSpaceUploadToken.TryValidate`). `/metrics` and the plugin routes keep their existing
++  `RequireAuthorization()`. `/openapi.json` + `/scalar` now require the bearer when
++  `api.docs.enabled=true` (default off).
++
++## FQ-3 — One token for everything (documented, not changed)
++
++* The identity has no roles/scopes; the bearer may trigger self-update, package installs,
++  plugin deletion and wipes. A real fix needs the panel to issue purpose-scoped tokens at
++  the same time, i.e. a protocol change on both sides — documented here as deliberately
++  open instead of breaking the running installation.
++
++## FQ-5/FQ-7/FQ-8/FQ-9 — Path traversal from panel-supplied values
++
++Four places interpolated request values into filesystem paths under the root account:
++
++| Location | Value | Fix |
++|---|---|---|
++| `Utils/Mail/MailDnsHelper.cs` (`TryGetDkimRecord`) with `Controllers/MailController.cs` (`GET /api/mail/dns-hints/{domain}`) | route `domain` | validated with `WebSpaceValidation.IsValidDomain`, otherwise no DKIM lookup (hints without DKIM instead of an error) |
++| `Utils/Mail/MailVacationHelper.cs` (`ConfigSievePath`, `MaildirSievePaths`) | mailbox address from `POST /api/mail/provision` (`set_autorespond`) | new `MailAddressRules` whitelist plus `RootedPath.IsUnderRoot` against the config dir; invalid address = no-op |
++| `Utils/Mail/MailSpamHelper.cs` (`StatePath` — only replaced `@` before) | address from `set_spam_filter` | same validation; invalid address writes nothing, read returns the default |
++| `Utils/Proxy/ProxyAccessLogs.cs` (`AccessLogPath`/`ErrorLogPath`/`RotateSpace`) via `Utils/WebSpaces/WebSpaceStore.cs` and `Controllers/WebSpacesController.cs` | `?domain=` on `/proxy-logs` and `/proxy-logs/rotate` | checked against `WebSpaceValidation.IsValidDomain` **and** `space.Domains`, otherwise HTTP 400 (empty parameter still means "all domains of the space") |
++
++## FQ-10 — Apache config injection (`Utils/WebSpaces/WebSpaceSiteFiles.cs`)
++
++* The panel-supplied `document_root` (previously only stripped of `.`/`..`) was written
++  unescaped into `DocumentRoot`/`<Directory>` directives, so a newline or quote could inject
++  directives into the PHP container. Now only `[A-Za-z0-9._/-]` is allowed (no empty, `.` or
++  `..` segments, no control characters/quotes); invalid values fall back to `/var/www/html`.
++
++## FQ-11 — Unverified binary download (`Utils/WebSpaces/Disk/FuseQuotaBinaryProvisioner.cs`)
++
++* `fusequota` was fetched from `releases/latest` (overridable by environment), installed and
++  executed as root without any integrity check.
++* Now the release is pinned (`DefaultReleaseTag = a39bc56`) and the SHA-256 of all four
++  assets is verified before install (mismatch aborts). The hashes were computed from the
++  published release assets. A custom `FUSEQUOTA_RELEASE_BASE` still skips verification —
++  the pin has to be bumped when upstream publishes a new release.
++
++## FQ-13 — Shell injection in the release workflow
++
++* `.github/workflows/release.yml` interpolated `github.event.release.tag_name` and the
++  workflow input directly into a `run:` step. The values are now passed through `env:` and
++  quoted in the shell; no `${{ }}` remains inside the shell block.
++
++## Additional hardening
++
++* `WebSpaceBackupService.ExtractTarGz` uses a `TarReader` loop and skips
++  symlink/hardlink/device/FIFO/PAX entries instead of aborting the restore with an
++  exception (defence in depth; the previous code was already protected by the BCL).
++* New regression tests: `FeatherQuilld.Tests/Security/SecurityHardeningTests.cs` (23 tests).
++
++## Verification
++
++* `dotnet build FeatherQuilld.csproj -c Release` → Build succeeded, 0 warnings, 0 errors.
++* `dotnet test FeatherQuilld.Tests/FeatherQuilld.Tests.csproj` → 515 passed, 0 failed.
++* Patch applies cleanly on a fresh clone of `e116e39` (`git apply --check --3way`, 16 files).
++* The pinned fusequota hash was re-verified against the published release asset
++  (`fusequota-x86_64-linux`, SHA-256 `b339e7d8…9992`).
++
++## Intentionally not changed
++
++* **FQ-3** scope separation (needs a simultaneous panel change, see above).
++* `ServerName` in the generated Apache config keeps using the raw domain: domains are
++  validated by the panel when a WebSpace is created.
++* `WebSpaceInstaller.cs:51` (`Path.Combine(dataPath, …)`, flagged by Semgrep) is not
++  user-controlled — `dataPath` is derived from the WebSpace UUID.
+diff --git a/Utils/Mail/MailAddressRules.cs b/Utils/Mail/MailAddressRules.cs
+new file mode 100644
+index 0000000..5c80c28
+--- /dev/null
++++ b/Utils/Mail/MailAddressRules.cs
+@@ -0,0 +1,20 @@
++using System.Text.RegularExpressions;
++
++namespace FeatherQuilld.Utils.Mail;
++
++/// <summary>
++/// Whitelist validation for mailbox addresses that end up as file-name or
++/// path components (Sieve scripts, spam-filter state). Only plain
++/// <c>local-part@host</c> addresses pass, so a crafted address cannot contain
++/// path separators or <c>..</c> segments and escape the mail config directory.
++/// </summary>
++internal static partial class MailAddressRules
++{
++    [GeneratedRegex(
++        @"^(?!\.)(?!.*\.\.)(?=.{1,254}$)[a-z0-9.!#$%&'*+=?^_`{|}~-]+@(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))*$",
++        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
++    private static partial Regex AddressRegex();
++
++    public static bool IsValidAddress(string? email) =>
++        !string.IsNullOrWhiteSpace(email) && AddressRegex().IsMatch(email.Trim());
++}
+diff --git a/Utils/Mail/MailDnsHelper.cs b/Utils/Mail/MailDnsHelper.cs
+index 0334148..b7a1260 100644
+--- a/Utils/Mail/MailDnsHelper.cs
++++ b/Utils/Mail/MailDnsHelper.cs
+@@ -1,5 +1,6 @@
+ using System.Text;
+ using System.Text.RegularExpressions;
++using FeatherQuilld.Utils.WebSpaces;
+ using AppConfig = FeatherQuilld.Utils.Config.Config;
+ 
+ namespace FeatherQuilld.Utils.Mail;
+@@ -173,6 +174,10 @@ public static class MailDnsHelper
+     public static (string Selector, string Value)? TryGetDkimRecord(AppConfig config, string domain, IMailcowApi? mailcowApi = null)
+     {
+         domain = NormalizeDomain(domain);
++        // The domain becomes a directory name below; reject anything that is not a
++        // plain hostname so ".." (or a slash) cannot escape the key directory.
++        if (!WebSpaceValidation.IsValidDomain(domain))
++            return null;
+         var selector = (config.System.Mail.DkimSelector ?? "mail").Trim();
+         if (selector.Length == 0)
+             selector = "mail";
+diff --git a/Utils/Mail/MailSpamHelper.cs b/Utils/Mail/MailSpamHelper.cs
+index c237e37..24c607f 100644
+--- a/Utils/Mail/MailSpamHelper.cs
++++ b/Utils/Mail/MailSpamHelper.cs
+@@ -1,4 +1,5 @@
+ using System.Text.Json;
++using FeatherQuilld.Utils.IO;
+ using AppConfig = FeatherQuilld.Utils.Config.Config;
+ 
+ namespace FeatherQuilld.Utils.Mail;
+@@ -12,7 +13,7 @@ public static class MailSpamHelper
+     {
+         email = NormalizeEmail(email);
+         var path = StatePath(config, email);
+-        if (!File.Exists(path))
++        if (path.Length == 0 || !File.Exists(path))
+             return true;
+ 
+         try
+@@ -32,8 +33,11 @@ public static class MailSpamHelper
+     public static void SetSpamFilterEnabled(AppConfig config, string email, bool enabled)
+     {
+         email = NormalizeEmail(email);
+-        Directory.CreateDirectory(SpamFilterDir(config));
+         var path = StatePath(config, email);
++        if (path.Length == 0)
++            return; // invalid address: nothing to store
++
++        Directory.CreateDirectory(SpamFilterDir(config));
+         if (enabled)
+         {
+             TryDelete(path);
+@@ -85,8 +89,18 @@ public static class MailSpamHelper
+     public static string BypassMapPath(AppConfig config) =>
+         Path.Combine(MailPaths.ConfigDir(config), "rspamd", "custom", "feather-spam-bypass.map");
+ 
+-    private static string StatePath(AppConfig config, string email) =>
+-        Path.Combine(SpamFilterDir(config), SanitizeEmail(email) + ".json");
++    private static string StatePath(AppConfig config, string email)
++    {
++        var normalized = NormalizeEmail(email);
++        if (!MailAddressRules.IsValidAddress(normalized))
++            return string.Empty;
++
++        var dir = SpamFilterDir(config);
++        var path = Path.Combine(dir, SanitizeEmail(normalized) + ".json");
++        // Belt and braces: the address is already whitelisted, but never build a
++        // path that leaves the spam-filter directory.
++        return RootedPath.IsUnderRoot(dir, path) ? path : string.Empty;
++    }
+ 
+     private static string NormalizeEmail(string email) =>
+         (email ?? "").Trim().ToLowerInvariant();
+diff --git a/Utils/Mail/MailVacationHelper.cs b/Utils/Mail/MailVacationHelper.cs
+index d3d609d..aa4a2b2 100644
+--- a/Utils/Mail/MailVacationHelper.cs
++++ b/Utils/Mail/MailVacationHelper.cs
+@@ -1,4 +1,5 @@
+ using System.Text;
++using FeatherQuilld.Utils.IO;
+ using AppConfig = FeatherQuilld.Utils.Config.Config;
+ 
+ namespace FeatherQuilld.Utils.Mail;
+@@ -29,13 +30,26 @@ public static class MailVacationHelper
+         return sb.ToString();
+     }
+ 
+-    public static string ConfigSievePath(AppConfig config, string email) =>
+-        Path.Combine(MailPaths.ConfigDir(config), SanitizeEmail(email) + ".dovecot.sieve");
++    public static string ConfigSievePath(AppConfig config, string email)
++    {
++        var normalized = SanitizeEmail(email);
++        if (!MailAddressRules.IsValidAddress(normalized))
++            return string.Empty;
++
++        var configDir = MailPaths.ConfigDir(config);
++        var path = Path.Combine(configDir, normalized + ".dovecot.sieve");
++        // Belt and braces: the address is already whitelisted, but never build a
++        // path that leaves the mail config directory.
++        return RootedPath.IsUnderRoot(configDir, path) ? path : string.Empty;
++    }
+ 
+     /// <summary>Possible live maildir locations for an active sieve script.</summary>
+     public static IReadOnlyList<string> MaildirSievePaths(AppConfig config, string email)
+     {
+         email = SanitizeEmail(email);
++        if (!MailAddressRules.IsValidAddress(email))
++            return Array.Empty<string>();
++
+         var at = email.LastIndexOf('@');
+         if (at <= 0 || at >= email.Length - 1)
+             return Array.Empty<string>();
+@@ -54,6 +68,9 @@ public static class MailVacationHelper
+     {
+         var script = BuildSieveScript(email, subject, body);
+         var configPath = ConfigSievePath(config, email);
++        if (configPath.Length == 0)
++            return; // invalid address: nothing to write
++
+         Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+         File.WriteAllText(configPath, script);
+ 
+diff --git a/Utils/Startup/DaemonHost.cs b/Utils/Startup/DaemonHost.cs
+index 4d29262..9233598 100644
+--- a/Utils/Startup/DaemonHost.cs
++++ b/Utils/Startup/DaemonHost.cs
+@@ -10,6 +10,7 @@ using FeatherQuilld.Utils.Sentry;
+ using FeatherQuilld.Utils.WebSpaces;
+ using FeatherQuilld.Utils.WebSpaces.Disk;
+ using Microsoft.AspNetCore.Authentication;
++using Microsoft.AspNetCore.Authorization;
+ using Microsoft.AspNetCore.HttpOverrides;
+ using Microsoft.AspNetCore.RateLimiting;
+ using Microsoft.OpenApi;
+@@ -319,7 +320,14 @@ public sealed class DaemonHost
+         builder.Services
+             .AddAuthentication(BearerScheme)
+             .AddScheme<AuthenticationSchemeOptions, BearerTokenAuthenticationHandler>(BearerScheme, null);
+-        builder.Services.AddAuthorization();
++        // Deny by default: endpoints without an explicit [Authorize] now require an
++        // authenticated caller. Deliberately public endpoints carry [AllowAnonymous].
++        builder.Services.AddAuthorization(options =>
++        {
++            options.FallbackPolicy = new AuthorizationPolicyBuilder()
++                .RequireAuthenticatedUser()
++                .Build();
++        });
+     }
+ 
+     private static void ConfigureKestrel(WebApplicationBuilder builder, AppConfig config)
+diff --git a/Utils/WebSpaces/Disk/FuseQuotaBinaryProvisioner.cs b/Utils/WebSpaces/Disk/FuseQuotaBinaryProvisioner.cs
+index 15b8595..a856bd4 100644
+--- a/Utils/WebSpaces/Disk/FuseQuotaBinaryProvisioner.cs
++++ b/Utils/WebSpaces/Disk/FuseQuotaBinaryProvisioner.cs
+@@ -12,8 +12,29 @@ namespace FeatherQuilld.Utils.WebSpaces.Disk;
+ /// </summary>
+ public static class FuseQuotaBinaryProvisioner
+ {
++    /// <summary>
++    /// Pinned fusequota release tag. Files are downloaded as root and executed, so
++    /// the build is pinned instead of tracking the moving <c>releases/latest</c>.
++    /// </summary>
++    public const string DefaultReleaseTag = "a39bc56";
++
+     public const string DefaultReleaseBase =
+-        "https://github.com/calagopus/fusequota/releases/latest/download";
++        "https://github.com/calagopus/fusequota/releases/download/" + DefaultReleaseTag;
++
++    /// <summary>
++    /// SHA-256 of the pinned release assets (computed from the published binaries of
++    /// tag <see cref="DefaultReleaseTag"/>). A mismatch aborts the install. When the
++    /// operator points <c>FUSEQUOTA_RELEASE_BASE</c> at their own build, no hash is
++    /// known and verification is skipped.
++    /// </summary>
++    private static readonly IReadOnlyDictionary<string, string> PinnedSha256 =
++        new Dictionary<string, string>(StringComparer.Ordinal)
++        {
++            ["fusequota-x86_64-linux"] = "b339e7d89fccc97c85e8575df61b55564f77091da822b421f23f07631d189992",
++            ["fusequota-aarch64-linux"] = "e5a8702c91c43e10377bfaadb856f0d8c8e6d7eb4e8f54a0fbde7a3066f8554a",
++            ["fusequota-ppc64le-linux"] = "6fc60ccaf86d143486a56343dd09c4d7a739a85606ad4d9cb2de5503cf89001a",
++            ["fusequota-riscv64-linux"] = "574c6fbfbda83ee04cd4b870d3dd0e405d185c7f68524c0a81edfeb287b020b2",
++        };
+ 
+     private static readonly SemaphoreSlim Gate = new(1, 1);
+     private static readonly HttpClient Http = new()
+@@ -55,6 +76,26 @@ public static class FuseQuotaBinaryProvisioner
+         return $"{root}/{assetName}";
+     }
+ 
++    /// <summary>Release base actually in effect (env override or the pinned default).</summary>
++    internal static string ResolveReleaseBase() =>
++        (Environment.GetEnvironmentVariable("FUSEQUOTA_RELEASE_BASE") ?? DefaultReleaseBase).TrimEnd('/');
++
++    /// <summary>
++    /// Expected SHA-256 for an asset, or null when the download source is not the
++    /// pinned release (then nothing is known to compare against).
++    /// </summary>
++    internal static string? ExpectedSha256(string assetName, string? releaseBase = null)
++    {
++        var custom = releaseBase ?? Environment.GetEnvironmentVariable("FUSEQUOTA_RELEASE_BASE");
++        if (!string.IsNullOrWhiteSpace(custom) &&
++            !string.Equals(custom.TrimEnd('/'), DefaultReleaseBase, StringComparison.OrdinalIgnoreCase))
++        {
++            return null;
++        }
++
++        return PinnedSha256.TryGetValue(assetName, out var hash) ? hash : null;
++    }
++
+     /// <summary>
+     /// Returns a usable fusequota path, downloading from GitHub releases when missing.
+     /// </summary>
+@@ -102,6 +143,7 @@ public static class FuseQuotaBinaryProvisioner
+         var url = BuildDownloadUrl(asset);
+         var dest = CachePath;
+         var temp = dest + ".download";
++        var expectedHash = ExpectedSha256(asset, ResolveReleaseBase());
+ 
+         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+ 
+@@ -121,6 +163,19 @@ public static class FuseQuotaBinaryProvisioner
+                 await remote.CopyToAsync(local, cancellationToken).ConfigureAwait(false);
+             }
+ 
++            if (expectedHash is not null)
++            {
++                var actualHash = await ComputeSha256Async(temp, cancellationToken).ConfigureAwait(false);
++                if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
++                {
++                    logger?.Error(
++                        LoggerTypes.Disk,
++                        $"fusequota checksum mismatch for {asset} ({url}): expected {expectedHash}, got {actualHash} — refusing to install.");
++                    TryDeleteFile(temp);
++                    return null;
++                }
++            }
++
+             if (File.Exists(dest))
+                 File.Delete(dest);
+ 
+@@ -147,6 +202,28 @@ public static class FuseQuotaBinaryProvisioner
+         }
+     }
+ 
++    private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
++    {
++        await using var stream = File.OpenRead(path);
++        var hash = await System.Security.Cryptography.SHA256
++            .HashDataAsync(stream, cancellationToken)
++            .ConfigureAwait(false);
++        return Convert.ToHexString(hash).ToLowerInvariant();
++    }
++
++    private static void TryDeleteFile(string path)
++    {
++        try
++        {
++            if (File.Exists(path))
++                File.Delete(path);
++        }
++        catch
++        {
++            // best-effort
++        }
++    }
++
+     private static void TryMarkExecutable(string path)
+     {
+         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+diff --git a/Utils/WebSpaces/WebSpaceBackupService.cs b/Utils/WebSpaces/WebSpaceBackupService.cs
+index 02cc7f5..52cacfe 100644
+--- a/Utils/WebSpaces/WebSpaceBackupService.cs
++++ b/Utils/WebSpaces/WebSpaceBackupService.cs
+@@ -443,11 +443,47 @@ public sealed class WebSpaceBackupService
+     private static void ExtractTarGz(string archivePath, string destDir)
+     {
+         Directory.CreateDirectory(destDir);
++        var destFull = Path.GetFullPath(destDir) + Path.DirectorySeparatorChar;
+         using var file = File.OpenRead(archivePath);
+         using var gzip = new GZipStream(file, CompressionMode.Decompress);
+-        TarFile.ExtractToDirectory(gzip, destDir, overwriteFiles: true);
++        using var reader = new TarReader(gzip);
++        while (reader.GetNextEntry() is { } entry)
++        {
++            var name = NormalizeEntryName(entry.Name);
++            if (name.Length == 0)
++                continue;
++
++            // Links and special entries cannot be written by ExtractToFile and would
++            // abort the whole restore with an exception; skip them instead.
++            if (IsSkippedEntryType(entry.EntryType))
++                continue;
++
++            var target = Path.GetFullPath(Path.Combine(destDir, name.Replace('/', Path.DirectorySeparatorChar)));
++            if (!target.StartsWith(destFull, StringComparison.Ordinal) &&
++                !string.Equals(target.TrimEnd(Path.DirectorySeparatorChar), destFull.TrimEnd(Path.DirectorySeparatorChar), StringComparison.Ordinal))
++            {
++                throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
++            }
++
++            if (entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList)
++            {
++                Directory.CreateDirectory(target);
++                continue;
++            }
++
++            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
++            entry.ExtractToFile(target, overwrite: true);
++        }
+     }
+ 
++    private static bool IsSkippedEntryType(TarEntryType type) => type is
++        TarEntryType.SymbolicLink or TarEntryType.HardLink or
++        TarEntryType.CharacterDevice or TarEntryType.BlockDevice or TarEntryType.Fifo or
++        TarEntryType.GlobalExtendedAttributes or TarEntryType.ExtendedAttributes or
++        TarEntryType.LongLink or TarEntryType.LongPath or
++        TarEntryType.MultiVolume or TarEntryType.RenamedOrSymlinked or
++        TarEntryType.SparseFile or TarEntryType.TapeVolume;
++
+     internal static void ExtractTarGzSelected(string archivePath, string destDir, IReadOnlyList<string> paths)
+     {
+         Directory.CreateDirectory(destDir);
+diff --git a/Utils/WebSpaces/WebSpaceSiteFiles.cs b/Utils/WebSpaces/WebSpaceSiteFiles.cs
+index dbeb444..3b85fe2 100644
+--- a/Utils/WebSpaces/WebSpaceSiteFiles.cs
++++ b/Utils/WebSpaces/WebSpaceSiteFiles.cs
+@@ -60,6 +60,7 @@ public static class WebSpaceSiteFiles
+             var rel = !string.IsNullOrWhiteSpace(route.DocumentRoot)
+                 ? route.DocumentRoot.Trim().Trim('/')
+                 : (space.DocumentRoot ?? "").Trim().Trim('/');
++            rel = SanitizeRelativeDocumentRoot(rel);
+             var doc = string.IsNullOrEmpty(rel) ? "/var/www/html" : "/var/www/html/" + rel;
+ 
+             sb.AppendLine("<VirtualHost *:80>");
+@@ -76,4 +77,34 @@ public static class WebSpaceSiteFiles
+ 
+         return sb.ToString();
+     }
++
++    /// <summary>
++    /// Document roots are interpolated into Apache directives. Only plain
++    /// relative paths are accepted; anything with control characters, quotes or
++    /// other directive-breaking characters is rejected (empty result) so a
++    /// crafted value cannot inject configuration.
++    /// </summary>
++    internal static string SanitizeRelativeDocumentRoot(string? relative)
++    {
++        var rel = (relative ?? "").Trim().Trim('/');
++        if (rel.Length == 0)
++            return "";
++
++        foreach (var ch in rel)
++        {
++            if (ch is not ((>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9'))
++                && ch is not ('.' or '_' or '-' or '/'))
++            {
++                return "";
++            }
++        }
++
++        foreach (var segment in rel.Split('/'))
++        {
++            if (segment is "" or "." or "..")
++                return "";
++        }
++
++        return rel;
++    }
+ }
+diff --git a/Utils/WebSpaces/WebSpaceStore.cs b/Utils/WebSpaces/WebSpaceStore.cs
+index a872b6d..7606bd0 100644
+--- a/Utils/WebSpaces/WebSpaceStore.cs
++++ b/Utils/WebSpaces/WebSpaceStore.cs
+@@ -1131,6 +1131,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
+         int searchScanLines = ProxyAccessLogs.DefaultSearchScanLines)
+     {
+         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
++        domain = ValidateProxyLogDomain(space, domain);
+         return ProxyAccessLogs.Read(
+             _config.System.RootDirectory,
+             space,
+@@ -1145,9 +1146,29 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
+     public void RotateProxyLogs(Guid uuid, string? domain = null)
+     {
+         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
++        domain = ValidateProxyLogDomain(space, domain);
+         ProxyAccessLogs.RotateSpace(_config.System.RootDirectory, space, domain);
+     }
+ 
++    /// <summary>
++    /// The domain query parameter is used as a log file name; only domains that
++    /// actually belong to the WebSpace are accepted. An empty value keeps the
++    /// previous behaviour (all domains of the space).
++    /// </summary>
++    private static string? ValidateProxyLogDomain(WebSpace space, string? domain)
++    {
++        if (string.IsNullOrWhiteSpace(domain))
++            return null;
++
++        var normalized = domain.Trim().TrimEnd('.').ToLowerInvariant();
++        if (!WebSpaceValidation.IsValidDomain(normalized) ||
++            !space.Domains.Any(d => !string.IsNullOrWhiteSpace(d) &&
++                string.Equals(d.Trim().TrimEnd('.'), normalized, StringComparison.OrdinalIgnoreCase)))
++            throw new ArgumentException($"Domain '{domain}' is not part of this WebSpace.");
++
++        return normalized;
++    }
++
+     private static string TailText(string text, int lines)
+     {
+         if (string.IsNullOrEmpty(text))
