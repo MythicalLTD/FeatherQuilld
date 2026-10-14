@@ -10,6 +10,7 @@ using FeatherQuilld.Utils.Sentry;
 using FeatherQuilld.Utils.WebSpaces;
 using FeatherQuilld.Utils.WebSpaces.Disk;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.OpenApi;
@@ -319,7 +320,14 @@ public sealed class DaemonHost
         builder.Services
             .AddAuthentication(BearerScheme)
             .AddScheme<AuthenticationSchemeOptions, BearerTokenAuthenticationHandler>(BearerScheme, null);
-        builder.Services.AddAuthorization();
+        // Deny by default: endpoints without an explicit [Authorize] now require an
+        // authenticated caller. Deliberately public endpoints carry [AllowAnonymous].
+        builder.Services.AddAuthorization(options =>
+        {
+            options.FallbackPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .Build();
+        });
     }
 
     private static void ConfigureKestrel(WebApplicationBuilder builder, AppConfig config)

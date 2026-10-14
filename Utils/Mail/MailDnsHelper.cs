@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using FeatherQuilld.Utils.WebSpaces;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 
 namespace FeatherQuilld.Utils.Mail;
@@ -173,6 +174,10 @@ public static class MailDnsHelper
     public static (string Selector, string Value)? TryGetDkimRecord(AppConfig config, string domain, IMailcowApi? mailcowApi = null)
     {
         domain = NormalizeDomain(domain);
+        // The domain becomes a directory name below; reject anything that is not a
+        // plain hostname so ".." (or a slash) cannot escape the key directory.
+        if (!WebSpaceValidation.IsValidDomain(domain))
+            return null;
         var selector = (config.System.Mail.DkimSelector ?? "mail").Trim();
         if (selector.Length == 0)
             selector = "mail";

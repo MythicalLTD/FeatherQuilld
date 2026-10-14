@@ -1131,6 +1131,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
         int searchScanLines = ProxyAccessLogs.DefaultSearchScanLines)
     {
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        domain = ValidateProxyLogDomain(space, domain);
         return ProxyAccessLogs.Read(
             _config.System.RootDirectory,
             space,
@@ -1145,7 +1146,27 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     public void RotateProxyLogs(Guid uuid, string? domain = null)
     {
         var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        domain = ValidateProxyLogDomain(space, domain);
         ProxyAccessLogs.RotateSpace(_config.System.RootDirectory, space, domain);
+    }
+
+    /// <summary>
+    /// The domain query parameter is used as a log file name; only domains that
+    /// actually belong to the WebSpace are accepted. An empty value keeps the
+    /// previous behaviour (all domains of the space).
+    /// </summary>
+    private static string? ValidateProxyLogDomain(WebSpace space, string? domain)
+    {
+        if (string.IsNullOrWhiteSpace(domain))
+            return null;
+
+        var normalized = domain.Trim().TrimEnd('.').ToLowerInvariant();
+        if (!WebSpaceValidation.IsValidDomain(normalized) ||
+            !space.Domains.Any(d => !string.IsNullOrWhiteSpace(d) &&
+                string.Equals(d.Trim().TrimEnd('.'), normalized, StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException($"Domain '{domain}' is not part of this WebSpace.");
+
+        return normalized;
     }
 
     private static string TailText(string text, int lines)

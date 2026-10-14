@@ -9,12 +9,21 @@ public class FuseQuotaBinaryProvisionerTests
     [InlineData("fusequota-aarch64-linux")]
     [InlineData("fusequota-ppc64le-linux")]
     [InlineData("fusequota-riscv64-linux")]
-    public void BuildDownloadUrl_uses_expected_asset_name(string asset)
+    public void BuildDownloadUrl_uses_pinned_release_and_expected_asset_name(string asset)
     {
-        var url = FuseQuotaBinaryProvisioner.BuildDownloadUrl(asset);
+        // The release is pinned to a fixed tag instead of the moving "latest".
+        Assert.DoesNotContain("/releases/latest/", FuseQuotaBinaryProvisioner.DefaultReleaseBase);
         Assert.Equal(
-            $"https://github.com/calagopus/fusequota/releases/latest/download/{asset}",
-            url);
+            "https://github.com/calagopus/fusequota/releases/download/"
+            + FuseQuotaBinaryProvisioner.DefaultReleaseTag,
+            FuseQuotaBinaryProvisioner.DefaultReleaseBase);
+
+        var url = FuseQuotaBinaryProvisioner.BuildDownloadUrl(asset, FuseQuotaBinaryProvisioner.DefaultReleaseBase);
+        Assert.Equal($"{FuseQuotaBinaryProvisioner.DefaultReleaseBase}/{asset}", url);
+
+        // Every shipped asset of the pinned release carries a known SHA-256.
+        Assert.NotNull(FuseQuotaBinaryProvisioner.ExpectedSha256(asset));
+        Assert.False(string.IsNullOrWhiteSpace(FuseQuotaBinaryProvisioner.ExpectedSha256(asset)));
     }
 
     [Fact]
@@ -31,5 +40,8 @@ public class FuseQuotaBinaryProvisionerTests
             "fusequota-x86_64-linux",
             "https://example.com/releases");
         Assert.Equal("https://example.com/releases/fusequota-x86_64-linux", url);
+        // A custom source cannot be hash-pinned.
+        Assert.Null(FuseQuotaBinaryProvisioner.ExpectedSha256(
+            "fusequota-x86_64-linux", "https://example.com/releases"));
     }
 }

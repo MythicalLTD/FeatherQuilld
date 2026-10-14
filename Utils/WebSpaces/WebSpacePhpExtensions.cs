@@ -12,7 +12,7 @@ public static class WebSpacePhpExtensions
 {
     public const string RelativePath = ".featherquilld/php-extensions.json";
 
-    /// <summary>Always installed for PHP Apache WebSpaces.</summary>
+    /// <summary>Always installed for PHP Apache WebSpaces (unless overridden via JSON <c>baseline</c>).</summary>
     public static readonly IReadOnlyList<string> Baseline = ["mysqli", "pdo_mysql", "opcache"];
 
     /// <summary>User-selectable extensions (docker-php-ext-install names, plus PECL <c>redis</c>).</summary>
@@ -41,6 +41,9 @@ public static class WebSpacePhpExtensions
 
     private static readonly HashSet<string> CatalogSet =
         new(Catalog, StringComparer.OrdinalIgnoreCase);
+
+    private static readonly HashSet<string> BaselineSet =
+        new(Baseline, StringComparer.OrdinalIgnoreCase);
 
     private static readonly HashSet<string> PeclSet =
         new(PeclExtensions, StringComparer.OrdinalIgnoreCase);
@@ -73,6 +76,31 @@ public static class WebSpacePhpExtensions
 
         result.Sort(StringComparer.Ordinal);
         return result;
+    }
+
+    /// <summary>
+    /// Sanitize a baseline override: only known baseline names (or empty to disable all baseline).
+    /// Unknown names are dropped.
+    /// </summary>
+    public static List<string> SanitizeBaseline(IEnumerable<string>? names)
+    {
+        var result = new List<string>();
+        if (names is null)
+            return result;
+
+        foreach (var raw in names)
+        {
+            var name = (raw ?? "").Trim().ToLowerInvariant();
+            if (name.Length == 0 || name.Length > 32)
+                continue;
+            if (!BaselineSet.Contains(name))
+                continue;
+            if (!result.Contains(name, StringComparer.Ordinal))
+                result.Add(name);
+        }
+
+        // Preserve default Baseline order for stability.
+        return Baseline.Where(b => result.Contains(b, StringComparer.Ordinal)).ToList();
     }
 
     public static List<string> Read(string dataPath)
@@ -108,12 +136,72 @@ public static class WebSpacePhpExtensions
         return [];
     }
 
-    public static void Write(string dataPath, IEnumerable<string> names)
+    /// <summary>
+    /// Effective baseline for a WebSpace: JSON <c>baseline</c> when present (may be empty),
+    /// otherwise the built-in <see cref="Baseline"/>.
+    /// </summary>
+    public static IReadOnlyList<string> ReadBaseline(string dataPath)
+    {
+        var path = HostPath(dataPath);
+        if (!File.Exists(path))
+            return Baseline;
+
+        try
+        {
+            var json = File.ReadAllText(path);
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return Baseline;
+
+            if (!doc.RootElement.TryGetProperty("baseline", out var baseline) ||
+                baseline.ValueKind != JsonValueKind.Array)
+                return Baseline;
+
+            return SanitizeBaseline(baseline.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString() ?? ""));
+        }
+        catch
+        {
+            return Baseline;
+        }
+    }
+
+    public static void Write(string dataPath, IEnumerable<string> names, IEnumerable<string>? baseline = null)
     {
         Directory.CreateDirectory(Path.Combine(dataPath, ".featherquilld"));
         var sanitized = Sanitize(names);
         var payload = new PhpExtensionsFile { Extensions = sanitized };
+        if (baseline is not null)
+        {
+            payload.Baseline = SanitizeBaseline(baseline);
+        }
+        else if (HasExplicitBaseline(dataPath))
+        {
+            // Preserve an existing baseline override when only extras are rewritten.
+            payload.Baseline = ReadBaseline(dataPath).ToList();
+        }
+
         File.WriteAllText(HostPath(dataPath), JsonSerializer.Serialize(payload, JsonOptions) + "\n");
+    }
+
+    private static bool HasExplicitBaseline(string dataPath)
+    {
+        var path = HostPath(dataPath);
+        if (!File.Exists(path))
+            return false;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            return doc.RootElement.ValueKind == JsonValueKind.Object &&
+                   doc.RootElement.TryGetProperty("baseline", out var b) &&
+                   b.ValueKind == JsonValueKind.Array;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static void EnsureFile(string dataPath)
@@ -128,7 +216,8 @@ public static class WebSpacePhpExtensions
     public static string BuildBootstrap(string dataPath)
     {
         var extras = Read(dataPath);
-        var all = Baseline.Concat(extras).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var baseline = ReadBaseline(dataPath);
+        var all = baseline.Concat(extras).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var core = all.Where(e => !PeclSet.Contains(e)).ToList();
         var pecl = all.Where(e => PeclSet.Contains(e)).ToList();
         var apt = AptPackagesFor(all);
@@ -141,24 +230,48 @@ public static class WebSpacePhpExtensions
                 "docker-php-ext-configure gd >/dev/null 2>&1 || true");
         }
 
-        if (core.Count > 0)
-            configure.AppendLine($"  docker-php-ext-install -j\"$(nproc)\" {string.Join(" ", core)} >/dev/null");
+        // Install each core extension independently so a single failure (e.g. already-built
+        // Zend OPcache on stock php:*-apache) cannot abort the entrypoint under set -e.
+        foreach (var ext in core)
+        {
+            configure.AppendLine($"  if ! php_has_ext {ext}; then");
+            configure.AppendLine(
+                $"    docker-php-ext-install -j\"$(nproc)\" {ext} >/dev/null 2>&1 || " +
+                $"echo \"featherquilld: warning: failed to install PHP extension {ext}\" >&2");
+            configure.AppendLine("  fi");
+        }
 
         foreach (var ext in pecl)
         {
+            configure.AppendLine($"  if ! php_has_ext {ext}; then");
             configure.AppendLine(
-                $"  if ! php -m 2>/dev/null | grep -qi \"^{ext}$\"; then pecl install -o -f {ext} >/dev/null && docker-php-ext-enable {ext}; fi");
+                $"    pecl install -o -f {ext} >/dev/null 2>&1 && docker-php-ext-enable {ext} || " +
+                $"echo \"featherquilld: warning: failed to install PECL extension {ext}\" >&2");
+            configure.AppendLine("  fi");
         }
 
         var aptList = string.Join(" ", apt);
         var needCheck = string.Join(" ", all);
         var installBody = configure.ToString().TrimEnd();
 
+        // php_has_ext: stock php:*-apache reports OPcache as "Zend OPcache" under [Zend Modules],
+        // so grepping php -m for ^opcache$ never matches even when the module is loaded.
         return $$"""
             set -e
+            php_has_ext() {
+              local ext="$1"
+              case "$ext" in
+                opcache)
+                  php -r 'exit(extension_loaded("Zend OPcache")||extension_loaded("opcache")?0:1);' 2>/dev/null
+                  ;;
+                *)
+                  php -r "exit(extension_loaded('$ext')?0:1);" 2>/dev/null
+                  ;;
+              esac
+            }
             NEED_INSTALL=0
             for ext in {{needCheck}}; do
-              if ! php -m 2>/dev/null | grep -qi "^${ext}$"; then
+              if ! php_has_ext "$ext"; then
                 NEED_INSTALL=1
                 break
               fi
@@ -231,5 +344,13 @@ public static class WebSpacePhpExtensions
     {
         [JsonPropertyName("extensions")]
         public List<string> Extensions { get; set; } = [];
+
+        /// <summary>
+        /// Optional override of the built-in baseline. When serialized as null, the property
+        /// is omitted and the default baseline applies. An empty array disables baseline installs.
+        /// </summary>
+        [JsonPropertyName("baseline")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<string>? Baseline { get; set; }
     }
 }

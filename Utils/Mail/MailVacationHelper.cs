@@ -1,4 +1,5 @@
 using System.Text;
+using FeatherQuilld.Utils.IO;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 
 namespace FeatherQuilld.Utils.Mail;
@@ -29,13 +30,26 @@ public static class MailVacationHelper
         return sb.ToString();
     }
 
-    public static string ConfigSievePath(AppConfig config, string email) =>
-        Path.Combine(MailPaths.ConfigDir(config), SanitizeEmail(email) + ".dovecot.sieve");
+    public static string ConfigSievePath(AppConfig config, string email)
+    {
+        var normalized = SanitizeEmail(email);
+        if (!MailAddressRules.IsValidAddress(normalized))
+            return string.Empty;
+
+        var configDir = MailPaths.ConfigDir(config);
+        var path = Path.Combine(configDir, normalized + ".dovecot.sieve");
+        // Belt and braces: the address is already whitelisted, but never build a
+        // path that leaves the mail config directory.
+        return RootedPath.IsUnderRoot(configDir, path) ? path : string.Empty;
+    }
 
     /// <summary>Possible live maildir locations for an active sieve script.</summary>
     public static IReadOnlyList<string> MaildirSievePaths(AppConfig config, string email)
     {
         email = SanitizeEmail(email);
+        if (!MailAddressRules.IsValidAddress(email))
+            return Array.Empty<string>();
+
         var at = email.LastIndexOf('@');
         if (at <= 0 || at >= email.Length - 1)
             return Array.Empty<string>();
@@ -54,6 +68,9 @@ public static class MailVacationHelper
     {
         var script = BuildSieveScript(email, subject, body);
         var configPath = ConfigSievePath(config, email);
+        if (configPath.Length == 0)
+            return; // invalid address: nothing to write
+
         Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
         File.WriteAllText(configPath, script);
 

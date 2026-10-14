@@ -105,6 +105,7 @@ public sealed class WebSpacesController : ControllerBase
 
     [HttpGet("{uuid:guid}/proxy-logs")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public IActionResult ProxyLogs(
         Guid uuid,
@@ -119,6 +120,10 @@ public sealed class WebSpacesController : ControllerBase
         {
             return Ok(_spaces.GetProxyLogs(uuid, domain, lines, days, q, regex, scan_lines));
         }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
         catch (InvalidOperationException)
         {
             return NotFound(new { error = "WebSpace not found." });
@@ -128,6 +133,7 @@ public sealed class WebSpacesController : ControllerBase
     [HttpPost("{uuid:guid}/proxy-logs/rotate")]
     [EnableRateLimiting("expensive")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public IActionResult RotateProxyLogs(Guid uuid, [FromQuery] string? domain = null)
     {
@@ -135,6 +141,10 @@ public sealed class WebSpacesController : ControllerBase
         {
             _spaces.RotateProxyLogs(uuid, domain);
             return Ok(new { ok = true, domain = string.IsNullOrWhiteSpace(domain) ? null : domain.Trim().ToLowerInvariant() });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
         }
         catch (InvalidOperationException)
         {

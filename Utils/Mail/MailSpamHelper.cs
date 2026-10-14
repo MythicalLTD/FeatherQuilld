@@ -1,4 +1,5 @@
 using System.Text.Json;
+using FeatherQuilld.Utils.IO;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
 
 namespace FeatherQuilld.Utils.Mail;
@@ -12,7 +13,7 @@ public static class MailSpamHelper
     {
         email = NormalizeEmail(email);
         var path = StatePath(config, email);
-        if (!File.Exists(path))
+        if (path.Length == 0 || !File.Exists(path))
             return true;
 
         try
@@ -32,8 +33,11 @@ public static class MailSpamHelper
     public static void SetSpamFilterEnabled(AppConfig config, string email, bool enabled)
     {
         email = NormalizeEmail(email);
-        Directory.CreateDirectory(SpamFilterDir(config));
         var path = StatePath(config, email);
+        if (path.Length == 0)
+            return; // invalid address: nothing to store
+
+        Directory.CreateDirectory(SpamFilterDir(config));
         if (enabled)
         {
             TryDelete(path);
@@ -85,8 +89,18 @@ public static class MailSpamHelper
     public static string BypassMapPath(AppConfig config) =>
         Path.Combine(MailPaths.ConfigDir(config), "rspamd", "custom", "feather-spam-bypass.map");
 
-    private static string StatePath(AppConfig config, string email) =>
-        Path.Combine(SpamFilterDir(config), SanitizeEmail(email) + ".json");
+    private static string StatePath(AppConfig config, string email)
+    {
+        var normalized = NormalizeEmail(email);
+        if (!MailAddressRules.IsValidAddress(normalized))
+            return string.Empty;
+
+        var dir = SpamFilterDir(config);
+        var path = Path.Combine(dir, SanitizeEmail(normalized) + ".json");
+        // Belt and braces: the address is already whitelisted, but never build a
+        // path that leaves the spam-filter directory.
+        return RootedPath.IsUnderRoot(dir, path) ? path : string.Empty;
+    }
 
     private static string NormalizeEmail(string email) =>
         (email ?? "").Trim().ToLowerInvariant();

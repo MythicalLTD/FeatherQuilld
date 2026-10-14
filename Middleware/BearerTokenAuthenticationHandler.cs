@@ -53,8 +53,11 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
                 return header["Bearer ".Length..].Trim();
         }
 
-        // WebSocket clients often pass the bearer via ?token=
-        if (Request.Query.TryGetValue("token", out var queryToken))
+        // WebSocket clients often pass the bearer via ?token= (browsers cannot set
+        // an Authorization header on the upgrade request). Restrict the query token
+        // to the console WebSocket route so the node bearer does not end up in
+        // request logs / proxy logs for every other endpoint.
+        if (Request.Query.TryGetValue("token", out var queryToken) && IsWebSocketRoute(Request.Path))
         {
             var value = queryToken.ToString().Trim();
             if (!string.IsNullOrEmpty(value))
@@ -62,6 +65,18 @@ public sealed class BearerTokenAuthenticationHandler : AuthenticationHandler<Aut
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// True for the console WebSocket route (<c>.../{uuid}/ws</c>), the only place
+    /// where a browser client cannot send the bearer as a header.
+    /// </summary>
+    private static bool IsWebSocketRoute(PathString path)
+    {
+        var value = path.HasValue ? path.Value! : string.Empty;
+        var lastSlash = value.LastIndexOf('/');
+        var lastSegment = lastSlash >= 0 ? value[(lastSlash + 1)..] : value;
+        return lastSegment.Equals("ws", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

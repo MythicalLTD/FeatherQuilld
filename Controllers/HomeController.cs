@@ -1,6 +1,7 @@
 using FeatherQuilld.Utils.Config;
 using FeatherQuilld.Utils.Startup;
 using FeatherQuilld.Utils.Web;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FeatherQuilld.Controllers;
@@ -11,6 +12,7 @@ namespace FeatherQuilld.Controllers;
 public sealed class HomeController : ControllerBase
 {
     /// <summary>Serves the main page at <c>/</c>.</summary>
+    [AllowAnonymous]
     [HttpGet("/")]
     [Produces("text/html")]
     public ContentResult Index([FromServices] Config config) =>

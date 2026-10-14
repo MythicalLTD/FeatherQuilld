@@ -60,6 +60,7 @@ public static class WebSpaceSiteFiles
             var rel = !string.IsNullOrWhiteSpace(route.DocumentRoot)
                 ? route.DocumentRoot.Trim().Trim('/')
                 : (space.DocumentRoot ?? "").Trim().Trim('/');
+            rel = SanitizeRelativeDocumentRoot(rel);
             var doc = string.IsNullOrEmpty(rel) ? "/var/www/html" : "/var/www/html/" + rel;
 
             sb.AppendLine("<VirtualHost *:80>");
@@ -75,5 +76,35 @@ public static class WebSpaceSiteFiles
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Document roots are interpolated into Apache directives. Only plain
+    /// relative paths are accepted; anything with control characters, quotes or
+    /// other directive-breaking characters is rejected (empty result) so a
+    /// crafted value cannot inject configuration.
+    /// </summary>
+    internal static string SanitizeRelativeDocumentRoot(string? relative)
+    {
+        var rel = (relative ?? "").Trim().Trim('/');
+        if (rel.Length == 0)
+            return "";
+
+        foreach (var ch in rel)
+        {
+            if (ch is not ((>= 'a' and <= 'z') or (>= 'A' and <= 'Z') or (>= '0' and <= '9'))
+                && ch is not ('.' or '_' or '-' or '/'))
+            {
+                return "";
+            }
+        }
+
+        foreach (var segment in rel.Split('/'))
+        {
+            if (segment is "" or "." or "..")
+                return "";
+        }
+
+        return rel;
     }
 }

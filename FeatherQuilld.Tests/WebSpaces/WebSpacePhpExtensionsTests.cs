@@ -53,6 +53,76 @@ public class WebSpacePhpExtensionsTests
     }
 
     /// <summary>
+    /// Stock php:*-apache ships Zend OPcache compiled in; php -m lists it as
+    /// "Zend OPcache", which never matches ^opcache$. The bootstrap must detect
+    /// OPcache via extension_loaded and must not let a failed opcache install
+    /// abort the entrypoint (restart loop).
+    /// </summary>
+    [Fact]
+    public void BuildBootstrap_DetectsZendOpcacheAndGuardsPerExtensionInstall()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fq-phpext-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            WebSpacePhpExtensions.Write(dir, []);
+            var bootstrap = WebSpacePhpExtensions.BuildBootstrap(dir);
+
+            Assert.Contains("php_has_ext()", bootstrap);
+            Assert.Contains("extension_loaded(\"Zend OPcache\")", bootstrap);
+            Assert.Contains("extension_loaded(\"opcache\")", bootstrap);
+            Assert.Contains("if ! php_has_ext \"$ext\"; then", bootstrap);
+
+            // Per-ext install with soft failure (not a single batch install of all core exts).
+            Assert.Contains("if ! php_has_ext opcache; then", bootstrap);
+            Assert.Contains("if ! php_has_ext mysqli; then", bootstrap);
+            Assert.Contains("if ! php_has_ext pdo_mysql; then", bootstrap);
+            Assert.Contains("featherquilld: warning: failed to install PHP extension opcache", bootstrap);
+            Assert.DoesNotContain("docker-php-ext-install -j\"$(nproc)\" mysqli pdo_mysql opcache", bootstrap);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
+    [Fact]
+    public void ReadBaseline_DefaultsAndOptionalOverride()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fq-phpext-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            WebSpacePhpExtensions.Write(dir, ["gd"]);
+            Assert.Equal(WebSpacePhpExtensions.Baseline, WebSpacePhpExtensions.ReadBaseline(dir));
+
+            // Drop opcache from baseline (derived image already has Zend OPcache).
+            WebSpacePhpExtensions.Write(dir, ["gd"], baseline: ["mysqli", "pdo_mysql"]);
+            Assert.Equal(["mysqli", "pdo_mysql"], WebSpacePhpExtensions.ReadBaseline(dir));
+
+            var bootstrap = WebSpacePhpExtensions.BuildBootstrap(dir);
+            Assert.Contains("for ext in mysqli pdo_mysql gd; do", bootstrap);
+            Assert.DoesNotContain("php_has_ext opcache", bootstrap);
+
+            // Rewriting extras alone must preserve the baseline override.
+            WebSpacePhpExtensions.Write(dir, ["zip"]);
+            Assert.Equal(["mysqli", "pdo_mysql"], WebSpacePhpExtensions.ReadBaseline(dir));
+            Assert.Equal(["zip"], WebSpacePhpExtensions.Read(dir));
+
+            // Explicit empty baseline disables all baseline installs.
+            WebSpacePhpExtensions.Write(dir, ["zip"], baseline: []);
+            Assert.Empty(WebSpacePhpExtensions.ReadBaseline(dir));
+            var noBaseline = WebSpacePhpExtensions.BuildBootstrap(dir);
+            Assert.Contains("for ext in zip; do", noBaseline);
+            Assert.DoesNotContain("php_has_ext mysqli", noBaseline);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>
     /// Regression for the "$$" raw-string escaping bug: BuildBootstrap used to emit
     /// "$$NEED_INSTALL" / "$${ext}" / "$$ADDONS" / "$$PHPIZE_DEPS" literally (two dollar
     /// signs each, from a `$$"""..."""` C# raw string where `$$` is NOT the interpolation
@@ -112,15 +182,34 @@ public class WebSpacePhpExtensionsTests
             var syntax = RunBash($"-n \"{scriptPath}\"");
             Assert.True(syntax.ExitCode == 0, $"bash -n failed: {syntax.Output}");
 
-            // Drive just the guard logic with a fake, always-missing `php` shim on PATH
-            // so `php -m | grep -qi "^mysqli$"` fails and NEED_INSTALL must become 1 -
-            // proving the "$NEED_INSTALL" comparison (not "$<pid>NEED_INSTALL") is what
-            // gets evaluated.
-            var guardScript = """
+            // Drive the guard with a fake php that always reports extensions missing, so
+            // NEED_INSTALL must become 1 — proving "$NEED_INSTALL" (not "$<pid>NEED_INSTALL")
+            // is evaluated. A host PHP with mysqli/opcache installed would otherwise make
+            // this assertion pass for the wrong reason.
+            var bin = Path.Combine(dir, "bin");
+            Directory.CreateDirectory(bin);
+            var phpShim = Path.Combine(bin, "php");
+            File.WriteAllText(phpShim, "#!/bin/bash\nexit 1\n");
+            MakeExecutable(phpShim);
+
+            var guardScript = $$"""
                 set -e
+                export PATH="{{bin}}:$PATH"
+                hash -r
+                php_has_ext() {
+                  local ext="$1"
+                  case "$ext" in
+                    opcache)
+                      php -r 'exit(extension_loaded("Zend OPcache")||extension_loaded("opcache")?0:1);' 2>/dev/null
+                      ;;
+                    *)
+                      php -r "exit(extension_loaded('$ext')?0:1);" 2>/dev/null
+                      ;;
+                  esac
+                }
                 NEED_INSTALL=0
                 for ext in mysqli pdo_mysql opcache; do
-                  if ! php -m 2>/dev/null | grep -qi "^${ext}$"; then
+                  if ! php_has_ext "$ext"; then
                     NEED_INSTALL=1
                     break
                   fi
@@ -139,7 +228,87 @@ public class WebSpacePhpExtensionsTests
         }
     }
 
+    /// <summary>
+    /// When php reports Zend OPcache as loaded, php_has_ext opcache must succeed so
+    /// NEED_INSTALL is not forced solely by the opcache name mismatch.
+    /// </summary>
+    [Fact]
+    public void PhpHasExt_TreatsZendOpcacheAsLoaded()
+    {
+        if (!IsBashAvailable())
+            return;
+
+        var dir = Path.Combine(Path.GetTempPath(), "fq-phpext-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            // Fake php that reports Zend OPcache loaded and mysqli missing.
+            var bin = Path.Combine(dir, "bin");
+            Directory.CreateDirectory(bin);
+            var phpShim = Path.Combine(bin, "php");
+            File.WriteAllText(phpShim, """
+                #!/bin/bash
+                if [[ "$*" == *Zend\ OPcache* ]] || [[ "$*" == *"'opcache'"* ]] || [[ "$*" == *'"opcache"'* ]]; then
+                  exit 0
+                fi
+                exit 1
+                """.ReplaceLineEndings("\n"));
+            MakeExecutable(phpShim);
+
+            var script = $$"""
+                set -e
+                export PATH="{{bin}}:$PATH"
+                hash -r
+                command -v php
+                php_has_ext() {
+                  local ext="$1"
+                  case "$ext" in
+                    opcache)
+                      php -r 'exit(extension_loaded("Zend OPcache")||extension_loaded("opcache")?0:1);' 2>/dev/null
+                      ;;
+                    *)
+                      php -r "exit(extension_loaded('$ext')?0:1);" 2>/dev/null
+                      ;;
+                  esac
+                }
+                if php_has_ext opcache; then echo "OPCACHE=ok"; else echo "OPCACHE=missing"; fi
+                if php_has_ext mysqli; then echo "MYSQLI=ok"; else echo "MYSQLI=missing"; fi
+                NEED_INSTALL=0
+                for ext in mysqli pdo_mysql opcache; do
+                  if ! php_has_ext "$ext"; then
+                    NEED_INSTALL=1
+                    break
+                  fi
+                done
+                echo "NEED_INSTALL=$NEED_INSTALL"
+                """.ReplaceLineEndings("\n");
+            var scriptPath = Path.Combine(dir, "opcache-guard.sh");
+            File.WriteAllText(scriptPath, script);
+            var run = RunBash($"\"{scriptPath}\"");
+            Assert.Equal(0, run.ExitCode);
+            Assert.Contains(bin, run.Output); // shim must win over host php
+            Assert.Contains("OPCACHE=ok", run.Output);
+            Assert.Contains("MYSQLI=missing", run.Output);
+            // Still need install for mysqli, but not because opcache falsely failed.
+            Assert.Contains("NEED_INSTALL=1", run.Output);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { /* ignore */ }
+        }
+    }
+
     private static bool IsBashAvailable() => RunBash("--version").ExitCode == 0;
+
+    private static void MakeExecutable(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        File.SetUnixFileMode(path,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+    }
 
     private static (int ExitCode, string Output) RunBash(string arguments)
     {

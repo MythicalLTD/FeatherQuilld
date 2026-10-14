@@ -443,10 +443,46 @@ public sealed class WebSpaceBackupService
     private static void ExtractTarGz(string archivePath, string destDir)
     {
         Directory.CreateDirectory(destDir);
+        var destFull = Path.GetFullPath(destDir) + Path.DirectorySeparatorChar;
         using var file = File.OpenRead(archivePath);
         using var gzip = new GZipStream(file, CompressionMode.Decompress);
-        TarFile.ExtractToDirectory(gzip, destDir, overwriteFiles: true);
+        using var reader = new TarReader(gzip);
+        while (reader.GetNextEntry() is { } entry)
+        {
+            var name = NormalizeEntryName(entry.Name);
+            if (name.Length == 0)
+                continue;
+
+            // Links and special entries cannot be written by ExtractToFile and would
+            // abort the whole restore with an exception; skip them instead.
+            if (IsSkippedEntryType(entry.EntryType))
+                continue;
+
+            var target = Path.GetFullPath(Path.Combine(destDir, name.Replace('/', Path.DirectorySeparatorChar)));
+            if (!target.StartsWith(destFull, StringComparison.Ordinal) &&
+                !string.Equals(target.TrimEnd(Path.DirectorySeparatorChar), destFull.TrimEnd(Path.DirectorySeparatorChar), StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
+            }
+
+            if (entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList)
+            {
+                Directory.CreateDirectory(target);
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            entry.ExtractToFile(target, overwrite: true);
+        }
     }
+
+    private static bool IsSkippedEntryType(TarEntryType type) => type is
+        TarEntryType.SymbolicLink or TarEntryType.HardLink or
+        TarEntryType.CharacterDevice or TarEntryType.BlockDevice or TarEntryType.Fifo or
+        TarEntryType.GlobalExtendedAttributes or TarEntryType.ExtendedAttributes or
+        TarEntryType.LongLink or TarEntryType.LongPath or
+        TarEntryType.MultiVolume or TarEntryType.RenamedOrSymlinked or
+        TarEntryType.SparseFile or TarEntryType.TapeVolume;
 
     internal static void ExtractTarGzSelected(string archivePath, string destDir, IReadOnlyList<string> paths)
     {
