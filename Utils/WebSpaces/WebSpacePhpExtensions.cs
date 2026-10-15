@@ -288,6 +288,13 @@ public static class WebSpacePhpExtensions
             if [ -f "$ADDONS" ]; then
               cp "$ADDONS" /etc/apache2/sites-enabled/zzz-featherquilld-addons.conf
             fi
+            # Log real client IPs behind the FeatherQuilld reverse proxy. The proxy
+            # always sends X-Forwarded-For, but without mod_remoteip Apache logs only
+            # the docker-gateway address — breaking per-IP rate limits, WAF rules and
+            # any consumer of the access log (security scanners included).
+            a2enmod remoteip >/dev/null 2>&1 || true
+            printf 'RemoteIPHeader X-Forwarded-For\nRemoteIPInternalProxy 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16\n' \
+              > /etc/apache2/conf-enabled/zzz-featherquilld-remoteip.conf
             # Apache/PHP laeuft als www-data (uid 33), der Installer/Uploader aber als root.
             # Ohne chown kann die App nichts schreiben (WordPress kann wp-config.php nicht
             # anlegen, keine Uploads, keine Plugin-/Core-Updates).
