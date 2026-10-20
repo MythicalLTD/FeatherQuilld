@@ -71,6 +71,52 @@ public sealed class SftpListenSmokeTests : IDisposable
         service.Dispose();
     }
 
+    [Fact]
+    public async Task SftpHostedService_PortBusy_DoesNotThrowAndStaysDegraded()
+    {
+        var panel = new StubPanel();
+        using var blocker = new TcpListener(IPAddress.Any, _config.Sftp.Port);
+        blocker.Start();
+
+        var service = new SftpHostedService(_config, CreateStore(panel), panel);
+        await service.StartAsync(CancellationToken.None);
+
+        Assert.False(service.IsListening);
+
+        await service.StopAsync(CancellationToken.None);
+        service.Dispose();
+    }
+
+    [Fact]
+    public async Task SftpHostedService_PortFreedDuringStartup_BindsAfterRetry()
+    {
+        var panel = new StubPanel();
+        var blocker = new TcpListener(IPAddress.Any, _config.Sftp.Port);
+        blocker.Start();
+
+        var service = new SftpHostedService(_config, CreateStore(panel), panel);
+        var start = service.StartAsync(CancellationToken.None);
+        await Task.Delay(300);
+        blocker.Stop();
+        await start;
+
+        Assert.True(service.IsListening);
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, _config.Sftp.Port).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.True(client.Connected);
+
+        await service.StopAsync(CancellationToken.None);
+        service.Dispose();
+    }
+
+    private WebSpaceStore CreateStore(StubPanel panel) => new(
+        _config,
+        panel,
+        new ReverseProxyManager(_config),
+        new PortAllocator(_config.System.Proxy),
+        new WebSpaceInstaller(_config.Docker),
+        new WebSpaceRuntime(_config.Docker));
+
     private static int GetFreePort()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
