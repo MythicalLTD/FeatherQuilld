@@ -41,6 +41,14 @@ public sealed class SftpHostedService : IHostedService, IDisposable
     private FxSshServer? _fxServer;
     private EmbeddedSshServer? _embeddedServer;
     private CancellationTokenSource? _embeddedCts;
+    private CancellationTokenSource? _lifetimeCts;
+    private Task? _retryTask;
+    private SftpHostKeys.HostKeyMaterial? _material;
+    private readonly object _startGate = new();
+
+    private static readonly TimeSpan[] InitialBindDelays =
+        [TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(500), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2)];
+    private static readonly TimeSpan BackgroundRetryInterval = TimeSpan.FromSeconds(15);
 
     public SftpHostedService(
         AppConfig config,
@@ -56,28 +64,49 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         _events = events.OrNoOp();
     }
 
-    public Task StartAsync(CancellationToken cancellationToken)
+    public async Task StartAsync(CancellationToken cancellationToken)
     {
         if (!_config.Sftp.Enabled)
         {
             _logger?.Info(LoggerTypes.Application, "SFTP disabled");
-            return Task.CompletedTask;
+            return;
         }
 
-        var material = SftpHostKeys.EnsureHostKey(_config, _logger);
-        if (material.Algorithm == SftpHostKeys.AlgoEd25519)
-            StartEmbeddedEd25519(material);
-        else
-            StartFxSshRsa(material);
+        _material = SftpHostKeys.EnsureHostKey(_config, _logger);
+        _lifetimeCts = new CancellationTokenSource();
 
-        _logger?.Info(LoggerTypes.Application,
-            $"SFTP listening on 0.0.0.0:{_config.Sftp.Port} host_key={material.Algorithm}" +
-            (material.FingerprintSha256 is null ? "" : $" fingerprint={material.FingerprintSha256}"));
-        return Task.CompletedTask;
+        // Covers restarts where the previous daemon is still releasing the port.
+        foreach (var delay in InitialBindDelays)
+        {
+            if (TryStartListener(_material))
+                return;
+            try { await Task.Delay(delay, cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+
+        if (TryStartListener(_material))
+            return;
+
+        // Don't take the whole daemon (API, WebSpaces) down because SFTP can't bind.
+        var owner = TcpPortOwner.Describe(_config.Sftp.Port);
+        _logger?.Error(LoggerTypes.Application,
+            $"SFTP port {_config.Sftp.Port} is already in use{(owner.Length > 0 ? $" ({owner})" : "")}. " +
+            $"SFTP is unavailable; retrying every {BackgroundRetryInterval.TotalSeconds:0}s. " +
+            "Stop the other process or change sftp.port in config.yml.");
+
+        var token = _lifetimeCts.Token;
+        _retryTask = Task.Run(() => RetryBindLoopAsync(_material, token), token);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        try { _lifetimeCts?.Cancel(); } catch { /* ignore */ }
+        if (_retryTask is not null)
+        {
+            try { await _retryTask.WaitAsync(cancellationToken).ConfigureAwait(false); } catch { /* ignore */ }
+            _retryTask = null;
+        }
+
         try { _fxServer?.Stop(); } catch { /* ignore */ }
         try { _embeddedCts?.Cancel(); } catch { /* ignore */ }
 
@@ -91,6 +120,8 @@ public sealed class SftpHostedService : IHostedService, IDisposable
 
     public void Dispose()
     {
+        try { _lifetimeCts?.Cancel(); } catch { /* ignore */ }
+        _lifetimeCts?.Dispose();
         try { _fxServer?.Stop(); } catch { /* ignore */ }
         _fxServer?.Dispose();
         try { _embeddedCts?.Cancel(); } catch { /* ignore */ }
@@ -98,6 +129,88 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         if (_embeddedServer is not null)
         {
             try { _embeddedServer.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { /* ignore */ }
+        }
+    }
+
+    /// <summary>True when SFTP is bound and accepting connections.</summary>
+    public bool IsListening { get; private set; }
+
+    private async Task RetryBindLoopAsync(SftpHostKeys.HostKeyMaterial material, CancellationToken ct)
+    {
+        var attempt = 0;
+        while (!ct.IsCancellationRequested)
+        {
+            try { await Task.Delay(BackgroundRetryInterval, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+
+            attempt++;
+            try
+            {
+                if (TryStartListener(material))
+                    return;
+            }
+            catch (Exception ex)
+            {
+                _logger?.Error(LoggerTypes.Application, "SFTP listener failed to start", ex);
+                return;
+            }
+
+            // ~every 5 minutes at the default interval, so the log isn't flooded.
+            if (attempt % 20 == 0)
+            {
+                var owner = TcpPortOwner.Describe(_config.Sftp.Port);
+                _logger?.Warning(LoggerTypes.Application,
+                    $"SFTP port {_config.Sftp.Port} still in use{(owner.Length > 0 ? $" ({owner})" : "")}; still retrying.");
+            }
+        }
+    }
+
+    /// <summary>Starts the listener; returns false (and cleans up) if the port is taken.</summary>
+    private bool TryStartListener(SftpHostKeys.HostKeyMaterial material)
+    {
+        lock (_startGate)
+        {
+            if (IsListening)
+                return true;
+
+            try
+            {
+                if (material.Algorithm == SftpHostKeys.AlgoEd25519)
+                    StartEmbeddedEd25519(material);
+                else
+                    StartFxSshRsa(material);
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+            {
+                CleanupFailedListener();
+                return false;
+            }
+
+            IsListening = true;
+            _logger?.Info(LoggerTypes.Application,
+                $"SFTP listening on 0.0.0.0:{_config.Sftp.Port} host_key={material.Algorithm}" +
+                (material.FingerprintSha256 is null ? "" : $" fingerprint={material.FingerprintSha256}"));
+            return true;
+        }
+    }
+
+    private void CleanupFailedListener()
+    {
+        if (_fxServer is not null)
+        {
+            _fxServer.ConnectionAccepted -= OnFxConnectionAccepted;
+            try { _fxServer.Dispose(); } catch { /* ignore */ }
+            _fxServer = null;
+        }
+
+        try { _embeddedCts?.Cancel(); } catch { /* ignore */ }
+        _embeddedCts?.Dispose();
+        _embeddedCts = null;
+
+        if (_embeddedServer is not null)
+        {
+            try { _embeddedServer.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { /* ignore */ }
+            _embeddedServer = null;
         }
     }
 
@@ -110,16 +223,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
         _fxServer.ConnectionAccepted += OnFxConnectionAccepted;
         _fxServer.ExceptionRasied += (_, ex) =>
             _logger?.Warning(LoggerTypes.Application, $"SFTP exception: {ex.Message}");
-        try
-        {
-            _fxServer.Start();
-        }
-        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
-        {
-            throw new InvalidOperationException(
-                $"SFTP port {_config.Sftp.Port} is already in use. Stop the other process or change sftp.port in config.yml.",
-                ex);
-        }
+        _fxServer.Start();
     }
 
     private void StartEmbeddedEd25519(SftpHostKeys.HostKeyMaterial material)
@@ -149,16 +253,7 @@ public sealed class SftpHostedService : IHostedService, IDisposable
             return Task.CompletedTask;
         };
 
-        try
-        {
-            _embeddedServer.Start();
-        }
-        catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
-        {
-            throw new InvalidOperationException(
-                $"SFTP port {_config.Sftp.Port} is already in use. Stop the other process or change sftp.port in config.yml.",
-                ex);
-        }
+        _embeddedServer.Start();
     }
 
     private async Task HandleEmbeddedConnectionAsync(SshConnection connection, CancellationToken ct)
