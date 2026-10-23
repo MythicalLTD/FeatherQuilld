@@ -1361,6 +1361,11 @@ public sealed class WebSpaceFileService
     {
         if (!RootedPath.IsUnderRoot(root, Path.GetFullPath(path)))
             throw new UnauthorizedAccessException("Path escapes WebSpace root.");
+
+        // The prefix check above is string-only. A symlinked parent directory
+        // inside the webspace (typically created by the tenant's own application)
+        // still pointed the write outside the jail.
+        RootedPath.ThrowIfSymlinkEscapes(root, path);
     }
 
     private static string NormalizeArchiveExtension(string? extension)

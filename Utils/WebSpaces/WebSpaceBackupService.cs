@@ -2,6 +2,7 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using FeatherQuilld.Plugins.Events;
+using FeatherQuilld.Utils.IO;
 using FeatherQuilld.Utils.Logger;
 using FeatherQuilld.Utils.WebSpaces.Backups;
 using AppConfig = FeatherQuilld.Utils.Config.Config;
@@ -465,6 +466,10 @@ public sealed class WebSpaceBackupService
                 throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
             }
 
+            // Same guard as the file service: a symlinked parent directory would
+            // pass the string check and still redirect the restore outside.
+            RootedPath.ThrowIfSymlinkEscapes(destFull, target);
+
             if (entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList)
             {
                 Directory.CreateDirectory(target);
@@ -505,6 +510,10 @@ public sealed class WebSpaceBackupService
             {
                 throw new UnauthorizedAccessException("Archive entry escapes WebSpace root.");
             }
+
+            // Same guard as the file service: a symlinked parent directory would
+            // pass the string check and still redirect the restore outside.
+            RootedPath.ThrowIfSymlinkEscapes(destFull, target);
 
             if (entry.EntryType is TarEntryType.Directory or TarEntryType.DirectoryList)
             {

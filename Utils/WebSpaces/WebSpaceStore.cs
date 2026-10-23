@@ -1794,8 +1794,26 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             var value = (raw ?? "").Trim();
             if (value.Length == 0 || value.Length > 64)
                 continue;
-            if (!System.Net.IPAddress.TryParse(value.Split('/')[0], out _))
+            // Accept only "ip" or "ip/prefix". The old code validated just the part
+            // before the slash and then kept the whole string, so
+            // "1.1.1.1/0\n  proxy_pass http://10.0.0.5:80;" reached the generated
+            // nginx/Caddy config verbatim.
+            var parts = value.Split('/');
+            if (parts.Length > 2 || !System.Net.IPAddress.TryParse(parts[0], out var address))
                 continue;
+            if (parts.Length == 2)
+            {
+                if (!int.TryParse(parts[1], out var prefixLength))
+                    continue;
+                var maxPrefix = address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128;
+                if (prefixLength < 0 || prefixLength > maxPrefix)
+                    continue;
+                value = parts[0] + "/" + prefixLength;
+            }
+            else
+            {
+                value = parts[0];
+            }
             if (!result.Contains(value, StringComparer.OrdinalIgnoreCase))
                 result.Add(value);
         }

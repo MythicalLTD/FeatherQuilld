@@ -93,6 +93,35 @@ public static class RootedPath
     }
 
     /// <summary>
+    /// Throws <see cref="UnauthorizedAccessException"/> when the path — after
+    /// resolving every symlink that already exists on its way — leaves the root.
+    /// String-only prefix checks cannot see a symlinked parent directory
+    /// (<c>&lt;root&gt;/etc -&gt; /etc</c>), which is how an archive entry or a link
+    /// created by the tenant redirects a write outside the jail.
+    /// </summary>
+    public static void ThrowIfSymlinkEscapes(string root, string path)
+    {
+        var canonical = CanonicalizeRoot(root);
+        var full = Path.GetFullPath(path);
+
+        var existing = full;
+        while (!Directory.Exists(existing) && !File.Exists(existing))
+        {
+            var parent = Path.GetDirectoryName(existing);
+            if (string.IsNullOrEmpty(parent) || string.Equals(parent, existing, StringComparison.Ordinal))
+                break;
+            existing = parent;
+        }
+
+        var resolvedAncestor = ResolveExisting(existing);
+        if (!IsUnderRoot(canonical, resolvedAncestor))
+            throw new UnauthorizedAccessException("Path escapes WebSpace root.");
+
+        if ((File.Exists(full) || Directory.Exists(full)) && !IsUnderRoot(canonical, ResolveExisting(full)))
+            throw new UnauthorizedAccessException("Path escapes WebSpace root.");
+    }
+
+    /// <summary>
     /// Resolve a virtual path under <paramref name="root"/>.
     /// Throws <see cref="UnauthorizedAccessException"/> if the result escapes the root.
     /// </summary>
