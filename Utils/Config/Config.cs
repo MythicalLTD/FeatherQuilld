@@ -305,6 +305,18 @@ public class Config
 
         var yaml = SerializeYaml(this);
         File.WriteAllText(FilePath, yaml);
+
+        // The file carries the node bearer token. Default file modes are 0644,
+        // which let every local user on the node read it.
+        try
+        {
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch
+        {
+            // Best effort: a read-only filesystem must not break the save.
+        }
     }
 
     public void EnsureDirectories()
@@ -367,7 +379,14 @@ public class Config
     {
         try
         {
+            var existed = Directory.Exists(path);
             Directory.CreateDirectory(path);
+            if (!existed && !OperatingSystem.IsWindows())
+            {
+                // Config, state and data directories hold secrets or tenant files.
+                try { File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
+                catch { /* best effort */ }
+            }
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
