@@ -352,4 +352,19 @@ public class WebSpaceSanitizeDenyPathsTests
         ]);
         Assert.Equal(["/xmlrpc.php", "/wp-config.php", "/admin"], got);
     }
+
+    [Fact]
+    public void SanitizeDenyPaths_RejectsConfigInjection()
+    {
+        var got = WebSpaceStore.SanitizeDenyPaths([
+            "/admin\n  proxy_pass http://10.0.0.5:80;",
+            "/a\"b",
+            "/x`) || Host(`evil",
+            "/a b",
+            "/x;y",
+            "/{z}",
+            "/wp-admin/*.php",
+        ]);
+        Assert.Equal(["/wp-admin/*.php"], got);
+    }
 }
