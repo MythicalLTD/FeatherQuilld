@@ -760,6 +760,35 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    /// <summary>Utilization samples (one per minute, last 24h kept in memory) for usage graphs.</summary>
+    [HttpGet("{uuid:guid}/utilization/history")]
+    public IActionResult UtilizationHistory(
+        Guid uuid,
+        [FromServices] WebSpaceStore spaces,
+        [FromServices] WebSpaceUsageHistory history,
+        [FromQuery] int minutes = 60)
+    {
+        if (spaces.Get(uuid) is null)
+            return NotFound(new { error = "WebSpace not found." });
+        minutes = Math.Clamp(minutes, 1, 1440);
+        var since = DateTimeOffset.UtcNow.AddMinutes(-minutes);
+        return Ok(new
+        {
+            uuid,
+            minutes,
+            samples = history.Get(uuid, since).Select(s => new
+            {
+                at = s.At.ToUnixTimeSeconds(),
+                cpu_percent = s.CpuPercent,
+                memory_used_bytes = s.MemoryUsedBytes,
+                disk_used_bytes = s.DiskUsedBytes,
+                network_rx_bytes = s.NetworkRxBytes,
+                network_tx_bytes = s.NetworkTxBytes,
+                bandwidth_used_bytes = s.BandwidthUsedBytes,
+            }),
+        });
+    }
+
     [HttpPost("{uuid:guid}/bandwidth/reset")]
     public IActionResult ResetBandwidth(Guid uuid, [FromServices] WebSpaceBandwidthMeter bandwidthMeter)
     {

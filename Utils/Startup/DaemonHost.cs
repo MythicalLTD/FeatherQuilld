@@ -274,6 +274,8 @@ public sealed class DaemonHost
                 sp.GetRequiredService<ReverseProxyManager>(),
                 sp.GetService<AppLogger>()));
         builder.Services.AddHostedService<Utils.WebSpaces.WebSpaceScheduleHostedService>();
+        builder.Services.AddSingleton(_ => new Utils.WebSpaces.WebSpaceUsageHistory());
+        builder.Services.AddHostedService<Utils.WebSpaces.WebSpaceUsageSamplerHostedService>();
         builder.Services.AddHostedService(sp =>
             new Utils.WebSpaces.WebSpaceMountHealthHostedService(
                 sp.GetRequiredService<WebSpaceStore>(),

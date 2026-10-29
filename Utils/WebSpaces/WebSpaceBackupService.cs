@@ -19,6 +19,7 @@ public sealed class WebSpaceBackupService
     private readonly BackupJobProgressService? _jobs;
     private readonly AppLogger? _logger;
     private readonly IEventBus _events;
+    private readonly WebSpaceActivityReporter? _activity;
 
     public WebSpaceBackupService(
         AppConfig config,
@@ -26,8 +27,10 @@ public sealed class WebSpaceBackupService
         IBackupObjectStore store,
         AppLogger? logger = null,
         BackupJobProgressService? jobs = null,
-        IEventBus? events = null)
+        IEventBus? events = null,
+        WebSpaceActivityReporter? activity = null)
     {
+        _activity = activity;
         _config = config;
         _spaces = spaces;
         _store = store;
@@ -68,10 +71,12 @@ public sealed class WebSpaceBackupService
                 var bytes = result.GetType().GetProperty("bytes")?.GetValue(result) as long?;
                 var checksum = result.GetType().GetProperty("checksum")?.GetValue(result) as string;
                 jobs.MarkCompleted(job.JobId, backupUuid == Guid.Empty ? null : backupUuid, bytes, checksum);
+                _activity?.Report(uuid, "backup_completed", new { backup_uuid = backupUuid, bytes });
             }
             catch (Exception ex)
             {
                 jobs.MarkFailed(job.JobId, ex.Message);
+                _activity?.Report(uuid, "backup_failed", new { error = ex.Message });
             }
         });
         return job;
@@ -88,10 +93,12 @@ public sealed class WebSpaceBackupService
             {
                 Restore(uuid, backupUuid, selected);
                 jobs.MarkCompleted(job.JobId, backupUuid);
+                _activity?.Report(uuid, "backup_restored", new { backup_uuid = backupUuid });
             }
             catch (Exception ex)
             {
                 jobs.MarkFailed(job.JobId, ex.Message);
+                _activity?.Report(uuid, "backup_restore_failed", new { backup_uuid = backupUuid, error = ex.Message });
             }
         });
         return job;
