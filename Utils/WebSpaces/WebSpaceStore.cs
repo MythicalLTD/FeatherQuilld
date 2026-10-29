@@ -1821,6 +1821,9 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
     }
 
     /// <summary>Normalize URI path denylist; rejects traversal and ACME challenge paths.</summary>
+    private static readonly System.Text.RegularExpressions.Regex SafeDenyPathPattern =
+        new(@"^/[A-Za-z0-9._~\-/%*+@=]{0,255}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     internal static List<string> SanitizeDenyPaths(IEnumerable<string>? paths)
     {
         var result = new List<string>();
@@ -1843,6 +1846,11 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             while (value.Contains("//", StringComparison.Ordinal))
                 value = value.Replace("//", "/", StringComparison.Ordinal);
             if (value is "/" or "")
+                continue;
+            // Paths are written into nginx, Caddy and Traefik configs. Only allow a
+            // safe URL character set so a value can never add config lines or
+            // break out of a quoted matcher.
+            if (!SafeDenyPathPattern.IsMatch(value))
                 continue;
             if (!result.Contains(value, StringComparer.OrdinalIgnoreCase))
                 result.Add(value);
