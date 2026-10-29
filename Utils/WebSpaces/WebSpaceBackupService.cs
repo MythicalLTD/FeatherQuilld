@@ -161,6 +161,31 @@ public sealed class WebSpaceBackupService
     
     }
 
+    /// <summary>Parses a schedule backup payload such as "keep=7"; 0 means keep everything.</summary>
+    public static int ParseRetention(string? payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+            return 0;
+        var m = System.Text.RegularExpressions.Regex.Match(payload, @"keep\s*=\s*(\d+)");
+        if (!m.Success || !int.TryParse(m.Groups[1].Value, out var keep))
+            return 0;
+        return Math.Clamp(keep, 0, 100);
+    }
+
+    /// <summary>Deletes the oldest backups so only the newest <paramref name="keep"/> remain.</summary>
+    public int Prune(Guid uuid, int keep)
+    {
+        if (keep <= 0)
+            return 0;
+        var removed = 0;
+        foreach (var old in _store.List(uuid).OrderByDescending(x => x.CreatedAt).Skip(keep).ToList())
+        {
+            if (Delete(uuid, old.Uuid))
+                removed++;
+        }
+        return removed;
+    }
+
     public bool Delete(Guid uuid, Guid backupUuid) =>
         _events.WithHooks(
             new BackupDeleteBeforeEvent { WebSpaceUuid = uuid, BackupUuid = backupUuid },

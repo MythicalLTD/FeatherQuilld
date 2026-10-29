@@ -323,6 +323,15 @@ public sealed class WebSpaceScheduleManager(
                 break;
             case "backup":
                 backupService.Create(uuid, stopDuringBackup: true);
+                var keep = WebSpaceBackupService.ParseRetention(task.Payload);
+                if (keep > 0)
+                {
+                    var pruned = backupService.Prune(uuid, keep);
+                    if (pruned > 0)
+                        logger.LogInformation(
+                            "Pruned {Count} old backups for webspace {Uuid} (keep {Keep})",
+                            pruned, webSpaceUuid, keep);
+                }
                 break;
             case "malware_scan":
             case "scan":
