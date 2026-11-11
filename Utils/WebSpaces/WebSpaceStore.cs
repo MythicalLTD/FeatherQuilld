@@ -215,6 +215,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
                 WafEnabled = remote.WafEnabled,
                 WafDenyIps = SanitizeDenyIps(remote.WafDenyIps),
                 WafDenyPaths = SanitizeDenyPaths(remote.WafDenyPaths),
+                WafSettings = remote.WafSettings is null ? null : WafSettingsSanitizer.Sanitize(remote.WafSettings),
                 BackendPort = remote.BackendPort,
                 BackendHost = NormalizeBackendHost(remote.BackendHost),
                 ContainerPort = containerPort,
@@ -591,6 +592,7 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             space.WafEnabled = remote.WafEnabled;
             space.WafDenyIps = SanitizeDenyIps(remote.WafDenyIps);
             space.WafDenyPaths = SanitizeDenyPaths(remote.WafDenyPaths);
+            space.WafSettings = remote.WafSettings is null ? null : WafSettingsSanitizer.Sanitize(remote.WafSettings);
             space.DiskLimitBytes = diskBytes;
             space.CpuLimit = cpuLimit;
             space.MemoryLimitMiB = memoryLimitMiB;
@@ -729,6 +731,10 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             {
                 _logger?.Warning(LoggerTypes.WebSpaces, $"Failed to delete WebSpace data {dataPath}: {ex.Message}");
             }
+
+            // The firewall history and block page of a deleted WebSpace must not outlive it.
+            WafStats.Delete(_config.System.RootDirectory, uuid);
+            WafBlockPageFiles.Sync(_config.System.RootDirectory, new WebSpace { Uuid = uuid, WafEnabled = false });
 
             RebuildProxy();
             _logger?.Info(LoggerTypes.WebSpaces, $"Deleted WebSpace {uuid}");
@@ -1141,6 +1147,22 @@ public sealed class WebSpaceStore : IWebSpaceFsAccess
             query,
             regex,
             searchScanLines);
+    }
+
+    /// <summary>Rewrite the proxy config when the on-disk OWASP rules were updated since the last check.</summary>
+    public void RefreshProxyIfRulesChanged()
+    {
+        if (CorazaFiles.CrsChanged(_config.System.RootDirectory))
+        {
+            _logger?.Info(LoggerTypes.Proxy, "OWASP CRS on disk changed, rebuilding proxy config");
+            RebuildProxy();
+        }
+    }
+
+    public object GetWafStats(Guid uuid, string? range, int events)
+    {
+        var space = Get(uuid) ?? throw new InvalidOperationException($"WebSpace {uuid} not found.");
+        return WafStats.Compute(_config.System.RootDirectory, space, range, events);
     }
 
     public void RotateProxyLogs(Guid uuid, string? domain = null)

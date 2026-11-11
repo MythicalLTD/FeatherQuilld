@@ -27,6 +27,9 @@ public sealed class WebSpace
     [JsonPropertyName("acme_email")]
     public string AcmeEmail { get; set; } = "";
     public bool WafEnabled { get; set; }
+    /// <summary>Layer-7 firewall settings from the panel. Null = legacy behaviour (fixed headers + deny lists).</summary>
+    [JsonPropertyName("waf_settings")]
+    public WafSettings? WafSettings { get; set; }
     public int BackendPort { get; set; }
     /// <summary>Optional per-space proxy upstream override (empty = node proxy default).</summary>
     public string BackendHost { get; set; } = "";

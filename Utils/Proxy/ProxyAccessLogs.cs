@@ -132,6 +132,9 @@ public static class ProxyAccessLogs
                 // best-effort retention
             }
         }
+
+        // Every WebSpace has just taken over what it needs from the node-wide attack log, so it can be emptied when large.
+        CorazaFiles.RotateAuditLog(rootDirectory);
     }
 
     public static void RotateSpace(string rootDirectory, WebSpace space, string? domain = null)
@@ -142,6 +145,16 @@ public static class ProxyAccessLogs
                 .Select(d => d.Trim().ToLowerInvariant())
                 .Distinct()
             : [domain.Trim().ToLowerInvariant()];
+
+        // Take the firewall dashboard's numbers out of the logs before they are emptied.
+        try
+        {
+            WafStats.Absorb(rootDirectory, space);
+        }
+        catch
+        {
+            // best-effort: the logs are still emptied
+        }
 
         foreach (var host in hosts)
         {
@@ -193,6 +206,9 @@ public static class ProxyAccessLogs
 
         return lines.Where(line => line.Contains(query, StringComparison.OrdinalIgnoreCase)).ToList();
     }
+
+    /// <summary>The last <paramref name="maxLines"/> lines of a file (empty when it does not exist).</summary>
+    public static List<string> TailLines(string path, int maxLines) => ReadLastLines(path, maxLines, out _);
 
     private static List<string> ReadLastLines(string path, int maxLines, out bool truncated)
     {

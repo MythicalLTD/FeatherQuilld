@@ -127,6 +127,12 @@ public sealed class ReverseProxyManager
             var path = ResolveConfigPath();
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
+            if (provider == "caddy")
+            {
+                CorazaFiles.Sync(_config.System.RootDirectory, list, msg => _logger?.Warning(LoggerTypes.Proxy, msg));
+                WafGeoData.Sync(_config.System.RootDirectory, list, msg => _logger?.Warning(LoggerTypes.Proxy, msg));
+            }
+
             var body = provider switch
             {
                 "nginx" => BuildNginx(list),
@@ -144,6 +150,7 @@ public sealed class ReverseProxyManager
             foreach (var space in list)
             {
                 ProxyAccessLogs.EnsureDir(_config.System.RootDirectory, space.Uuid);
+                WafBlockPageFiles.Sync(_config.System.RootDirectory, space);
                 if (string.Equals(space.Runtime, "php", StringComparison.OrdinalIgnoreCase))
                     WebSpaceSiteFiles.WriteApacheAddons(WebSpaceDataPath(space), space);
             }
@@ -261,10 +268,18 @@ public sealed class ReverseProxyManager
     {
         var sb = new StringBuilder();
         var email = _config.System.Proxy.AcmeEmail?.Trim();
-        if (!string.IsNullOrWhiteSpace(email))
+        spaces = spaces.ToList();
+        var coraza = spaces.Any(CaddyWafBuilder.UsesCoraza);
+        var rateLimit = spaces.Any(CaddyWafBuilder.UsesRateLimit);
+        if (!string.IsNullOrWhiteSpace(email) || coraza || rateLimit)
         {
             sb.AppendLine("{");
-            sb.AppendLine($"\temail {email}");
+            if (!string.IsNullOrWhiteSpace(email))
+                sb.AppendLine($"\temail {email}");
+            if (coraza)
+                sb.AppendLine("\torder coraza_waf first");
+            if (rateLimit)
+                sb.AppendLine("\torder rate_limit before basic_auth");
             sb.AppendLine("}");
             sb.AppendLine();
         }
@@ -306,7 +321,7 @@ public sealed class ReverseProxyManager
                     sb.AppendLine($"\ttls {space.AcmeEmail.Trim()}");
                 }
 
-                AppendCaddyWaf(sb, space);
+                AppendCaddyWaf(sb, space, routes.Select(r => r.Domain).ToList());
                 AppendCaddyBandwidthQuota(sb, space);
 
                 var accessLog = ProxyAccessLogs.AccessLogPath(_config.System.RootDirectory, space.Uuid, route.Domain);
@@ -325,7 +340,11 @@ public sealed class ReverseProxyManager
                 if (space.BackendPort > 0)
                 {
                     var upstream = BackendHostResolver.ResolveUpstream(_config.System.Proxy, space);
-                    sb.AppendLine($"\treverse_proxy {upstream}:{space.BackendPort}");
+                    // The backend (Apache/PHP/Node...) tells visitors its software and version; nobody needs that except attackers.
+                    sb.AppendLine($"\treverse_proxy {upstream}:{space.BackendPort} {{");
+                    sb.AppendLine("\t\theader_down -Server");
+                    sb.AppendLine("\t\theader_down -X-Powered-By");
+                    sb.AppendLine("\t}");
                 }
                 else
                 {
@@ -995,10 +1014,16 @@ public sealed class ReverseProxyManager
         sb.AppendLine("\trespond \"Bandwidth quota exceeded\" 503");
     }
 
-    private static void AppendCaddyWaf(StringBuilder sb, WebSpace space)
+    private void AppendCaddyWaf(StringBuilder sb, WebSpace space, IReadOnlyList<string> domains)
     {
         if (!space.WafEnabled)
             return;
+
+        if (space.WafSettings is not null)
+        {
+            CaddyWafBuilder.Append(sb, space, domains, _config.System.RootDirectory);
+            return;
+        }
 
         sb.AppendLine("\theader {");
         sb.AppendLine("\t\tStrict-Transport-Security \"max-age=31536000;\"");

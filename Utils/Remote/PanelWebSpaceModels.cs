@@ -32,6 +32,10 @@ public sealed class PanelWebSpaceConfig
     [JsonPropertyName("waf_deny_paths")]
     public List<string> WafDenyPaths { get; set; } = [];
 
+    /// <summary>Layer-7 firewall settings; null from panels that predate them (legacy WAF behaviour).</summary>
+    [JsonPropertyName("waf_settings")]
+    public FeatherQuilld.Utils.WebSpaces.WafSettings? WafSettings { get; set; }
+
     [JsonPropertyName("backend_port")]
     public int BackendPort { get; set; }
 

@@ -130,6 +130,22 @@ public sealed class WebSpacesController : ControllerBase
         }
     }
 
+    [HttpGet("{uuid:guid}/waf/stats")]
+    [EnableRateLimiting("expensive")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult WafStats(Guid uuid, [FromQuery] string? range = "24h", [FromQuery] int events = 50)
+    {
+        try
+        {
+            return Ok(_spaces.GetWafStats(uuid, range, events));
+        }
+        catch (InvalidOperationException)
+        {
+            return NotFound(new { error = "WebSpace not found." });
+        }
+    }
+
     [HttpPost("{uuid:guid}/proxy-logs/rotate")]
     [EnableRateLimiting("expensive")]
     [ProducesResponseType(StatusCodes.Status200OK)]
