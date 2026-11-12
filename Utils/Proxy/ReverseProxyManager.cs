@@ -1197,11 +1197,26 @@ public sealed class ReverseProxyManager
         if (RunReloadProcess(reloadPsi, "caddy", out var reloadOutput))
             return;
 
-        var combined = reloadOutput.ToLowerInvariant();
-        if (!combined.Contains("connection refused", StringComparison.Ordinal) &&
-            !combined.Contains("no such file", StringComparison.Ordinal) &&
-            !combined.Contains("not running", StringComparison.Ordinal))
+        if (!ReloadFailureMeansNotRunning(reloadOutput))
             return;
+
+        // The admin API can refuse a connection for a moment while Caddy is busy applying a config.
+        // Starting a second Caddy then leaves two processes sharing the listen ports and the admin port
+        // (newer Caddy releases bind with SO_REUSEPORT): every later reload reaches only one of them and
+        // the other keeps serving an outdated config.
+        for (var attempt = 1; attempt <= 3 && CountRunningCaddyProcesses() > 0; attempt++)
+        {
+            _logger?.Warning(LoggerTypes.Proxy, $"Caddy reload was refused but a Caddy process is running retrying reload ({attempt}/3)");
+            Thread.Sleep(2_000 * attempt);
+            if (RunReloadProcess(reloadPsi, "caddy", out reloadOutput))
+                return;
+        }
+
+        if (!ShouldStartCaddy(reloadOutput, CountRunningCaddyProcesses()))
+        {
+            _logger?.Error(LoggerTypes.Proxy, "Caddy is running but its admin API does not accept reloads; not starting a second instance");
+            return;
+        }
 
         _logger?.Info(LoggerTypes.Proxy, "Caddy admin API unavailable starting Caddy with FeatherQuilld config");
         var startPsi = new System.Diagnostics.ProcessStartInfo
@@ -1214,6 +1229,35 @@ public sealed class ReverseProxyManager
         };
 
         RunReloadProcess(startPsi, "caddy start", out _);
+    }
+
+    /// <summary>True when the output of a failed <c>caddy reload</c> says the admin API could not be reached.</summary>
+    internal static bool ReloadFailureMeansNotRunning(string reloadOutput)
+    {
+        var combined = (reloadOutput ?? "").ToLowerInvariant();
+        return combined.Contains("connection refused", StringComparison.Ordinal) ||
+               combined.Contains("no such file", StringComparison.Ordinal) ||
+               combined.Contains("not running", StringComparison.Ordinal);
+    }
+
+    /// <summary>A new Caddy may only be started when the reload failed for "not running" reasons and no Caddy process exists.</summary>
+    internal static bool ShouldStartCaddy(string reloadOutput, int runningCaddyProcesses) =>
+        runningCaddyProcesses == 0 && ReloadFailureMeansNotRunning(reloadOutput);
+
+    private static int CountRunningCaddyProcesses()
+    {
+        try
+        {
+            var procs = System.Diagnostics.Process.GetProcessesByName("caddy");
+            var n = procs.Length;
+            foreach (var p in procs)
+                p.Dispose();
+            return n;
+        }
+        catch
+        {
+            return 0;
+        }
     }
 
     private bool RunReloadProcess(System.Diagnostics.ProcessStartInfo psi, string label, out string output)
