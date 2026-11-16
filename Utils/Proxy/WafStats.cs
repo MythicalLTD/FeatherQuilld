@@ -147,6 +147,7 @@ public static class WafStats
 
             if (newEvents.Count > 0)
             {
+                Observability.QuilldMetrics.RecordWafEvents(space.Uuid, newEvents.Select(e => (e.Category ?? "", e.Action ?? "")));
                 history.Events.AddRange(newEvents);
                 changed = true;
             }

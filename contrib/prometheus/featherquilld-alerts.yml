@@ -1,0 +1,57 @@
+groups:
+  - name: featherquilld
+    rules:
+      - alert: FeatherQuilldDown
+        expr: up{job=~"featherquilld.*"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "FeatherQuilld on {{ $labels.instance }} is not answering scrapes"
+
+      - alert: FeatherQuilldReverseProxyDown
+        expr: featherquilld_proxy_enabled == 1 and featherquilld_proxy_running == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.provider }} is not running on {{ $labels.instance }}"
+
+      - alert: FeatherQuilldProxyReloadFailing
+        expr: featherquilld_proxy_last_reload_success == 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Last {{ $labels.provider }} reload failed on {{ $labels.instance }}; sites may serve an old config"
+
+      - alert: FeatherQuilldPanelUnreachable
+        expr: featherquilld_panel_reachable == 0
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.instance }} cannot reach FeatherPanel"
+
+      - alert: FeatherQuilldDataDiskLow
+        expr: featherquilld_data_disk_free_bytes / featherquilld_data_disk_total_bytes < 0.10
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Less than 10% free on {{ $labels.path }} ({{ $labels.instance }})"
+
+      - alert: FeatherQuilldWebSpaceInstallFailed
+        expr: featherquilld_webspaces_by_status{status="failed"} > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} WebSpace install(s) failed on {{ $labels.instance }}"
+
+      - alert: FeatherQuilldFirewallBlockSpike
+        expr: sum by (instance, webspace) (rate(featherquilld_waf_events_total{action="blocked"}[5m])) * 60 > 100
+        for: 10m
+        labels: { severity: info }
+        annotations:
+          summary: "WebSpace {{ $labels.webspace }} on {{ $labels.instance }} blocks >100 requests/min"
+
+      - alert: FeatherQuilldSftpBruteForce
+        expr: increase(featherquilld_sftp_lockouts_total[15m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "Repeated SFTP lockouts on {{ $labels.instance }}"

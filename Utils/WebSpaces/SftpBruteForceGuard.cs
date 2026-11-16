@@ -62,8 +62,13 @@ internal static class SftpBruteForceGuard
             }
 
             state.Count++;
+            Observability.QuilldMetrics.SftpAuthFailures.Inc();
             if (state.Count >= MaxAttempts)
+            {
+                if (state.LockedUntil is not { } until || until <= now)
+                    Observability.QuilldMetrics.SftpLockouts.Inc();
                 state.LockedUntil = now + LockoutDuration;
+            }
         }
     }
 

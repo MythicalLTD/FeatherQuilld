@@ -41,6 +41,20 @@ public sealed class ReverseProxyManager
     public void Rebuild(IEnumerable<WebSpace> spaces)
     {
         var snapshot = spaces as IList<WebSpace> ?? spaces.ToList();
+        var result = "failure";
+        try
+        {
+            RebuildWithHooks(snapshot);
+            result = "success";
+        }
+        finally
+        {
+            Observability.QuilldMetrics.ProxyRebuilds.WithLabels(NormalizedProvider, result).Inc();
+        }
+    }
+
+    private void RebuildWithHooks(IList<WebSpace> snapshot)
+    {
         _events.WithHooks(
             new ProxyRebuildBeforeEvent
             {
@@ -1261,6 +1275,21 @@ public sealed class ReverseProxyManager
     }
 
     private bool RunReloadProcess(System.Diagnostics.ProcessStartInfo psi, string label, out string output)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var ok = false;
+        try
+        {
+            ok = RunReloadProcessCore(psi, label, out output);
+            return ok;
+        }
+        finally
+        {
+            Observability.QuilldMetrics.RecordProxyCommand(label, ok, sw.Elapsed);
+        }
+    }
+
+    private bool RunReloadProcessCore(System.Diagnostics.ProcessStartInfo psi, string label, out string output)
     {
         output = "";
         using var proc = System.Diagnostics.Process.Start(psi);

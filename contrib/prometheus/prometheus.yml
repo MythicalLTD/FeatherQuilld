@@ -1,0 +1,49 @@
+# Example Prometheus scrape config for FeatherQuilld nodes.
+# Put the scrape token (api.metrics.token in /etc/featherquilld/config.yml) in a file
+# readable only by Prometheus, e.g. /etc/prometheus/featherquilld.token (chmod 600).
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - featherquilld-alerts.yml
+
+scrape_configs:
+  # Option A: dedicated metrics listener (api.metrics.port: 9464, plain HTTP).
+  - job_name: featherquilld
+    metrics_path: /metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/featherquilld.token
+    static_configs:
+      - targets:
+          - node1.example.com:9464
+          - node2.example.com:9464
+        labels:
+          region: eu-central
+
+  # Option B: scrape through the main API port (api.metrics.port: 0). Use https when api.ssl is on.
+  # - job_name: featherquilld-api
+  #   metrics_path: /metrics
+  #   scheme: https
+  #   authorization:
+  #     type: Bearer
+  #     credentials_file: /etc/prometheus/featherquilld.token
+  #   static_configs:
+  #     - targets: ['node1.example.com:8989']
+
+  # Readiness as a probe via blackbox_exporter (needs a module with valid_status_codes: [200]).
+  # - job_name: featherquilld-ready
+  #   metrics_path: /probe
+  #   params: { module: [http_2xx] }
+  #   static_configs:
+  #     - targets: ['http://node1.example.com:9464/health/ready']
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       target_label: __param_target
+  #     - source_labels: [__param_target]
+  #       target_label: instance
+  #     - target_label: __address__
+  #       replacement: blackbox-exporter:9115

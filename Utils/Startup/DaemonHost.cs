@@ -2,6 +2,7 @@ using FeatherQuilld.Controllers;
 using FeatherQuilld.Middleware;
 using FeatherQuilld.Utils.Config.System;
 using FeatherQuilld.Utils.Ftp;
+using FeatherQuilld.Utils.Observability;
 using FeatherQuilld.Utils.Plugins;
 using FeatherQuilld.Utils.Proxy;
 using FeatherQuilld.Utils.Remote;
@@ -157,6 +158,17 @@ public sealed class DaemonHost
         if (spaces is not null)
             Logger.Info(LoggerTypes.WebSpaces, $"{spaces.List().Count} WebSpace(s) loaded");
 
+        if (config.Api.Metrics.Enabled)
+        {
+            var where = ObservabilitySetup.DedicatedListenUrl(config) ?? "API port";
+            var access = config.Api.Metrics.AllowAnonymous ? "no token" : "bearer token";
+            Logger.Info(LoggerTypes.WebServer,
+                $"Prometheus metrics → {ObservabilityAccess.NormalizedMetricsPath(config.Api.Metrics)} on {where} ({access}{(config.Api.Metrics.AllowedIps.Count > 0 ? ", IP allowlist" : "")})");
+        }
+
+        if (config.Api.Health.Enabled)
+            Logger.Info(LoggerTypes.WebServer, $"Health probes → {ObservabilityAccess.LivePath}, {ObservabilityAccess.ReadyPath}");
+
         if (config.Sftp.Enabled)
             Logger.Info(LoggerTypes.Application, $"SFTP → 0.0.0.0:{config.Sftp.Port}");
         else
@@ -302,6 +314,8 @@ public sealed class DaemonHost
         builder.Services.AddSingleton<Utils.Proxy.NginxAcmeService>();
         builder.Services.AddHostedService<Utils.Proxy.AcmeRenewalHostedService>();
 
+        builder.Services.AddFeatherQuilldObservability(config);
+
         builder.Services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -357,7 +371,11 @@ public sealed class DaemonHost
             ? $"https://{config.Api.Host}:{config.Api.Port}"
             : $"http://{config.Api.Host}:{config.Api.Port}";
 
-        builder.WebHost.UseUrls(url);
+        var metricsUrl = ObservabilitySetup.DedicatedListenUrl(config);
+        if (metricsUrl is null)
+            builder.WebHost.UseUrls(url);
+        else
+            builder.WebHost.UseUrls(url, metricsUrl);
     }
 
     private static AppLogger ConfigureLogging(WebApplicationBuilder builder, AppConfig config)
@@ -438,13 +456,20 @@ public sealed class DaemonHost
     {
         app.UseForwardedHeaders();
         app.UseExceptionHandler();
+        app.UseFeatherQuilldObservabilityGuard();
 
         // Match ConfigureLogging: Development or config.debug → per-request traces.
         if (app.Environment.IsDevelopment() || config.Debug)
             app.UseMiddleware<RequestResponseLoggingMiddleware>();
 
         if (config.Api.Ssl.Enabled)
-            app.UseHttpsRedirection();
+        {
+            // The dedicated metrics listener is plain HTTP: never redirect scrapes / probes to HTTPS.
+            if (ObservabilityAccess.HasDedicatedPort(config.Api))
+                app.UseWhen(ctx => ctx.Connection.LocalPort != config.Api.Metrics.Port, b => b.UseHttpsRedirection());
+            else
+                app.UseHttpsRedirection();
+        }
 
         app.UseCors();
         app.UseRateLimiter();
@@ -453,7 +478,7 @@ public sealed class DaemonHost
         app.UseAuthorization();
 
         app.UseHttpMetrics();
-        app.MapMetrics().RequireAuthorization();
+        app.MapFeatherQuilldObservability(config);
 
         pluginManager.ConfigurePipeline(app);
 
