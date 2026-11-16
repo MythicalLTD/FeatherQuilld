@@ -179,7 +179,10 @@ public static class QuilldMetrics
         if (sampler is not null)
         {
             var snap = sampler.Capture(config.System.Data);
-            HostCpu.Set(snap.CpuPercent);
+            // The shared sampler reports 0 when sampled again within 100 ms (e.g. right after /api/system/health);
+            // keep the previous value instead of exporting a false idle reading.
+            if (snap.CpuPercent > 0)
+                HostCpu.Set(snap.CpuPercent);
             HostCpuCount.Set(snap.CpuCount);
             HostMemTotal.Set(snap.MemoryTotalBytes);
             HostMemUsed.Set(snap.MemoryUsedBytes);
@@ -310,18 +313,23 @@ public static class ProxyCommandTracker
 {
     private static readonly object Gate = new();
 
-    public static (string Provider, bool Ok, DateTimeOffset At)? Last { get; private set; }
+    private static (string Provider, bool Ok, DateTimeOffset At)? _last;
+
+    public static (string Provider, bool Ok, DateTimeOffset At)? Last
+    {
+        get { lock (Gate) return _last; }
+    }
 
     public static void Record(string provider, bool ok)
     {
         lock (Gate)
-            Last = (provider, ok, DateTimeOffset.UtcNow);
+            _last = (provider, ok, DateTimeOffset.UtcNow);
     }
 
     internal static void Reset()
     {
         lock (Gate)
-            Last = null;
+            _last = null;
     }
 }
 

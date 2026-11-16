@@ -23,9 +23,12 @@ public static class ObservabilityAccess
     public static bool HasDedicatedPort(ApiConfig api) =>
         api.Metrics.Enabled && api.Metrics.Port > 0 && api.Metrics.Port != api.Port;
 
-    public static bool IsHealthPath(PathString path) =>
-        path.Equals(LivePath, StringComparison.OrdinalIgnoreCase) ||
-        path.Equals(ReadyPath, StringComparison.OrdinalIgnoreCase);
+    public static bool IsHealthPath(PathString path)
+    {
+        var value = path.HasValue ? path.Value!.TrimEnd('/') : "";
+        return value.Equals(LivePath, StringComparison.OrdinalIgnoreCase) ||
+               value.Equals(ReadyPath, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>Bearer from the Authorization header (never from the query string, so it stays out of logs).</summary>
     public static string? ExtractBearer(HttpRequest request)
@@ -113,7 +116,7 @@ public sealed class ObservabilityAccessMiddleware
     {
         var api = _config.Api;
         var path = context.Request.Path;
-        var isMetrics = api.Metrics.Enabled && path.Equals(_metricsPath, StringComparison.OrdinalIgnoreCase);
+        var isMetrics = api.Metrics.Enabled && IsMetricsPath(path, _metricsPath);
 
         if (ObservabilityAccess.HasDedicatedPort(api))
         {
@@ -141,6 +144,15 @@ public sealed class ObservabilityAccessMiddleware
         }
 
         return _next(context);
+    }
+
+    /// <summary>Routing also matches a trailing slash (<c>/metrics/</c>), so the guard must too.</summary>
+    internal static bool IsMetricsPath(PathString path, string metricsPath)
+    {
+        var value = path.HasValue ? path.Value! : "";
+        if (value.Length > 1)
+            value = value.TrimEnd('/');
+        return value.Equals(metricsPath, StringComparison.OrdinalIgnoreCase);
     }
 
     private static Task NotFound(HttpContext context)

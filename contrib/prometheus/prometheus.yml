@@ -11,6 +11,8 @@ rule_files:
 
 scrape_configs:
   # Option A: dedicated metrics listener (api.metrics.port: 9464, plain HTTP).
+  # It binds to api.metrics.host (default 127.0.0.1): for remote scrapes set e.g.
+  # api.metrics.host: 0.0.0.0 (or the private IP) and restrict api.metrics.allowed_ips to Prometheus.
   - job_name: featherquilld
     metrics_path: /metrics
     scheme: http

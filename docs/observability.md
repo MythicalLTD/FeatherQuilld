@@ -41,7 +41,7 @@ api:
     enabled: true            # serve /metrics (a token is still required unless allow_anonymous)
     path: /metrics
     port: 0                  # 0 = main API port; e.g. 9464 = separate plain-HTTP listener for metrics + /health/*
-    host: 127.0.0.1          # bind address of the separate listener
+    host: 127.0.0.1          # bind address of the separate listener (0.0.0.0 / private IP for remote Prometheus)
     token: ""                # scrape-only token; the node token also works. Generate one: openssl rand -hex 32
     allow_anonymous: false   # skip the token check (only with allowed_ips or a loopback listener)
     allowed_ips: []          # e.g. [10.0.0.5, 10.10.0.0/16]; empty = any address

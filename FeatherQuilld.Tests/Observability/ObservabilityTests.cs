@@ -94,6 +94,17 @@ public class ObservabilityMiddlewareTests
         Assert.Equal(200, await Run(config, "/metrics", "Bearer t0k"));
     }
 
+    [Theory]
+    [InlineData("/metrics/")]
+    [InlineData("/METRICS")]
+    [InlineData("/metrics//")]
+    public async Task Metrics_PathVariantsAreGuardedToo(string path)
+    {
+        var config = new AppConfig();
+        config.Api.Metrics.Token = "t0k";
+        Assert.Equal(401, await Run(config, path));
+    }
+
     [Fact]
     public async Task Metrics_AllowlistIsCheckedEvenWithToken()
     {
@@ -137,6 +148,7 @@ public class ObservabilityMiddlewareTests
     }
 }
 
+[Collection("ProxyCommandTracker")]
 public class HealthTests
 {
     [Fact]
@@ -217,6 +229,7 @@ public class HealthTests
     }
 }
 
+[Collection("ProxyCommandTracker")]
 public class QuilldMetricsTests
 {
     private static async Task<string> Scrape()

@@ -185,7 +185,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_build_info{instance=~\"$instance\"}",
+          "expr": "featherquilld_build_info{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{version}}",
           "datasource": {
             "type": "prometheus",
@@ -239,7 +239,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_uptime_seconds{instance=~\"$instance\"}",
+          "expr": "featherquilld_uptime_seconds{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -293,7 +293,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_panel_reachable{instance=~\"$instance\"}",
+          "expr": "featherquilld_panel_reachable{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -361,7 +361,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_maintenance_mode{instance=~\"$instance\"}",
+          "expr": "featherquilld_maintenance_mode{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -429,7 +429,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_proxy_running{instance=~\"$instance\"}",
+          "expr": "featherquilld_proxy_running{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{provider}}",
           "datasource": {
             "type": "prometheus",
@@ -510,7 +510,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspaces{instance=~\"$instance\"}",
+          "expr": "featherquilld_webspaces{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -564,7 +564,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspaces_by_state{instance=~\"$instance\",state=\"running\"}",
+          "expr": "featherquilld_webspaces_by_state{job=~\"$job\",instance=~\"$instance\",state=\"running\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -618,7 +618,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspaces_suspended{instance=~\"$instance\"}",
+          "expr": "featherquilld_webspaces_suspended{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -672,7 +672,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspaces_by_status{instance=~\"$instance\",status=\"failed\"}",
+          "expr": "featherquilld_webspaces_by_status{job=~\"$job\",instance=~\"$instance\",status=\"failed\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -730,7 +730,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspaces_waf_enabled{instance=~\"$instance\"}",
+          "expr": "featherquilld_webspaces_waf_enabled{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -784,7 +784,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_domains{instance=~\"$instance\"}",
+          "expr": "featherquilld_domains{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -838,7 +838,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspaces_by_state{instance=~\"$instance\"}",
+          "expr": "featherquilld_webspaces_by_state{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{state}}",
           "datasource": {
             "type": "prometheus",
@@ -890,7 +890,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_webspace_info{instance=~\"$instance\"}",
+          "expr": "featherquilld_webspace_info{job=~\"$job\",instance=~\"$instance\"}",
           "format": "table",
           "instant": true,
           "datasource": {
@@ -900,7 +900,7 @@
         },
         {
           "refId": "B",
-          "expr": "featherquilld_webspace_bandwidth_used_bytes{instance=~\"$instance\"}",
+          "expr": "featherquilld_webspace_bandwidth_used_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "format": "table",
           "instant": true,
           "datasource": {
@@ -965,7 +965,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, featherquilld_webspace_bandwidth_used_bytes{instance=~\"$instance\"}) * on(webspace) group_left(name) featherquilld_webspace_info{instance=~\"$instance\"}",
+          "expr": "topk(10, featherquilld_webspace_bandwidth_used_bytes{job=~\"$job\",instance=~\"$instance\"}) * on(job, instance, webspace) group_left(name) featherquilld_webspace_info{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{name}}",
           "datasource": {
             "type": "prometheus",
@@ -1030,7 +1030,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider, action, result) (rate(featherquilld_proxy_reloads_total{instance=~\"$instance\"}[$__rate_interval])) * 60",
+          "expr": "sum by (provider, action, result) (rate(featherquilld_proxy_reloads_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])) * 60",
           "legendFormat": "{{provider}} {{action}} {{result}}",
           "datasource": {
             "type": "prometheus",
@@ -1082,7 +1082,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(featherquilld_proxy_reload_duration_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(featherquilld_proxy_reload_duration_seconds_bucket{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])))",
           "legendFormat": "{{provider}}",
           "datasource": {
             "type": "prometheus",
@@ -1134,7 +1134,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_proxy_last_reload_success{instance=~\"$instance\"}",
+          "expr": "featherquilld_proxy_last_reload_success{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{provider}}",
           "datasource": {
             "type": "prometheus",
@@ -1202,7 +1202,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(featherquilld_proxy_config_rebuilds_total{instance=~\"$instance\",result=\"failure\"}[24h]))",
+          "expr": "sum(increase(featherquilld_proxy_config_rebuilds_total{job=~\"$job\",instance=~\"$instance\",result=\"failure\"}[24h]))",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -1260,7 +1260,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(featherquilld_waf_events_total{instance=~\"$instance\",action=\"blocked\"}[24h]))",
+          "expr": "sum(increase(featherquilld_waf_events_total{job=~\"$job\",instance=~\"$instance\",action=\"blocked\"}[24h]))",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -1314,7 +1314,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(featherquilld_sftp_lockouts_total{instance=~\"$instance\"}[24h]))",
+          "expr": "sum(increase(featherquilld_sftp_lockouts_total{job=~\"$job\",instance=~\"$instance\"}[24h]))",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -1372,7 +1372,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(featherquilld_sftp_auth_failures_total{instance=~\"$instance\"}[24h]))",
+          "expr": "sum(increase(featherquilld_sftp_auth_failures_total{job=~\"$job\",instance=~\"$instance\"}[24h]))",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -1426,7 +1426,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (category, action) (rate(featherquilld_waf_events_total{instance=~\"$instance\"}[$__rate_interval])) * 60",
+          "expr": "sum by (category, action) (rate(featherquilld_waf_events_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])) * 60",
           "legendFormat": "{{category}} {{action}}",
           "datasource": {
             "type": "prometheus",
@@ -1478,7 +1478,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(10, sum by (webspace) (rate(featherquilld_waf_events_total{instance=~\"$instance\",action=\"blocked\"}[$__rate_interval])) * 60) * on(webspace) group_left(name) max by (webspace, name) (featherquilld_webspace_info{instance=~\"$instance\"})",
+          "expr": "topk(10, sum by (job, instance, webspace) (rate(featherquilld_waf_events_total{job=~\"$job\",instance=~\"$instance\",action=\"blocked\"}[$__rate_interval])) * 60) * on(job, instance, webspace) group_left(name) max by (job, instance, webspace, name) (featherquilld_webspace_info{job=~\"$job\",instance=~\"$instance\"})",
           "legendFormat": "{{name}}",
           "datasource": {
             "type": "prometheus",
@@ -1543,7 +1543,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_host_cpu_percent{instance=~\"$instance\"}",
+          "expr": "featherquilld_host_cpu_percent{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "cpu %",
           "datasource": {
             "type": "prometheus",
@@ -1595,7 +1595,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_host_memory_used_bytes{instance=~\"$instance\"}",
+          "expr": "featherquilld_host_memory_used_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "used",
           "datasource": {
             "type": "prometheus",
@@ -1604,7 +1604,7 @@
         },
         {
           "refId": "B",
-          "expr": "featherquilld_host_memory_total_bytes{instance=~\"$instance\"}",
+          "expr": "featherquilld_host_memory_total_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "total",
           "datasource": {
             "type": "prometheus",
@@ -1656,7 +1656,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_host_load{instance=~\"$instance\"}",
+          "expr": "featherquilld_host_load{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{window}}",
           "datasource": {
             "type": "prometheus",
@@ -1708,7 +1708,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "1 - featherquilld_data_disk_free_bytes{instance=~\"$instance\"} / featherquilld_data_disk_total_bytes{instance=~\"$instance\"}",
+          "expr": "1 - featherquilld_data_disk_free_bytes{job=~\"$job\",instance=~\"$instance\"} / featherquilld_data_disk_total_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{path}}",
           "datasource": {
             "type": "prometheus",
@@ -1768,7 +1768,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "featherquilld_data_disk_free_bytes{instance=~\"$instance\"}",
+          "expr": "featherquilld_data_disk_free_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "{{path}}",
           "datasource": {
             "type": "prometheus",
@@ -1833,7 +1833,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (code) (rate(http_requests_received_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "expr": "sum by (code) (rate(http_requests_received_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{code}}",
           "datasource": {
             "type": "prometheus",
@@ -1885,7 +1885,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])))",
           "legendFormat": "{{endpoint}}",
           "datasource": {
             "type": "prometheus",
@@ -1937,7 +1937,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(http_requests_in_progress{instance=~\"$instance\"})",
+          "expr": "sum(http_requests_in_progress{job=~\"$job\",instance=~\"$instance\"})",
           "legendFormat": "in progress",
           "datasource": {
             "type": "prometheus",
@@ -1989,7 +1989,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "process_working_set_bytes{instance=~\"$instance\"}",
+          "expr": "process_working_set_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "working set",
           "datasource": {
             "type": "prometheus",
@@ -1998,7 +1998,7 @@
         },
         {
           "refId": "B",
-          "expr": "dotnet_total_memory_bytes{instance=~\"$instance\"}",
+          "expr": "dotnet_total_memory_bytes{job=~\"$job\",instance=~\"$instance\"}",
           "legendFormat": "GC heap",
           "datasource": {
             "type": "prometheus",
@@ -2050,7 +2050,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[$__rate_interval])",
+          "expr": "rate(process_cpu_seconds_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])",
           "legendFormat": "cpu cores",
           "datasource": {
             "type": "prometheus",
@@ -2102,7 +2102,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (generation) (rate(dotnet_collection_count_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "expr": "sum by (generation) (rate(dotnet_collection_count_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "gen {{generation}}",
           "datasource": {
             "type": "prometheus",
