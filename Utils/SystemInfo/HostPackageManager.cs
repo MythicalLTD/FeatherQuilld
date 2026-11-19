@@ -528,7 +528,9 @@ public sealed class HostPackageManager
             IReadOnlyList<string>? localAddresses = null;
             var stubs = PowerDnsInstallConfig.FindLoopbackPort53Listeners(
                 ReadAllTextOrNull("/proc/net/udp"),
-                ReadAllTextOrNull("/proc/net/tcp"));
+                ReadAllTextOrNull("/proc/net/tcp"),
+                ReadAllTextOrNull("/proc/net/udp6"),
+                ReadAllTextOrNull("/proc/net/tcp6"));
             if (stubs.Count > 0)
             {
                 localAddresses = PowerDnsInstallConfig.BuildLocalAddresses(PowerDnsInstallConfig.HostUnicastAddresses(), stubs);
@@ -583,8 +585,12 @@ public sealed class HostPackageManager
 
         Directory.CreateDirectory(Path.GetDirectoryName(db)!);
         var dir = Path.GetDirectoryName(db)!;
-        var cmd = $"rm -f '{db}' && sqlite3 '{db}' < '{schema}' && "
-            + $"(chown pdns:pdns '{dir}' '{db}' 2>/dev/null || true) && chmod 0640 '{db}'";
+        // Build at a temp path and rename only once the whole schema applied, so a failed run never
+        // leaves a half-initialized database at the final path.
+        var tmp = db + ".featherquilld-init";
+        var cmd = $"rm -f '{tmp}' && sqlite3 -bail '{tmp}' < '{schema}' && "
+            + $"(chown pdns:pdns '{dir}' '{tmp}' 2>/dev/null || true) && chmod 0640 '{tmp}' && mv -f '{tmp}' '{db}' "
+            + $"|| {{ rm -f '{tmp}'; exit 1; }}";
         var result = await RunShellAsync(packageId, cmd, logger, ct).ConfigureAwait(false);
         return result.Success ? null : "could not create the PowerDNS sqlite database: " + result.Message;
     }

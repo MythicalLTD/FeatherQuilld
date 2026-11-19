@@ -54,8 +54,8 @@ public static class PowerDnsInstallConfig
     }
 
     /// <summary>
-    /// Returns the loopback IPv4 addresses that already listen on port 53, from the contents of
-    /// /proc/net/udp and /proc/net/tcp (e.g. systemd-resolved's stub on 127.0.0.53 / 127.0.0.54).
+    /// Returns the loopback addresses that already listen on port 53, from the contents of
+    /// /proc/net/udp, tcp, udp6 and tcp6 (e.g. systemd-resolved's stub on 127.0.0.53 / 127.0.0.54).
     /// When any exist, binding the wildcard 0.0.0.0:53 fails, so pdns must bind explicit addresses.
     /// </summary>
     public static IReadOnlyList<IPAddress> FindLoopbackPort53Listeners(params string?[] procNetTables)
@@ -71,23 +71,34 @@ public static class PowerDnsInstallConfig
                 if (parts.Length < 2 || !parts[0].EndsWith(':'))
                     continue;
                 var local = parts[1].Split(':');
-                if (local.Length != 2 || local[0].Length != 8)
+                if (local.Length != 2 || local[0].Length is not (8 or 32))
                     continue;
                 if (!int.TryParse(local[1], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var port) || port != 53)
                     continue;
-                if (!uint.TryParse(local[0], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hostOrder))
-                    continue;
-                // /proc/net prints the address in host byte order (little-endian on x86_64/arm64).
-                var bytes = BitConverter.GetBytes(hostOrder);
-                if (!BitConverter.IsLittleEndian)
-                    Array.Reverse(bytes);
-                var ip = new IPAddress(bytes);
-                if (IPAddress.IsLoopback(ip) && !found.Contains(ip))
+                var ip = ParseProcNetAddress(local[0]);
+                if (ip is not null && IPAddress.IsLoopback(ip) && !found.Contains(ip))
                     found.Add(ip);
             }
         }
 
         return found;
+    }
+
+    /// <summary>Decodes an address from /proc/net/{udp,tcp}[6]: 32-bit words printed in host byte order.</summary>
+    private static IPAddress? ParseProcNetAddress(string hex)
+    {
+        var bytes = new byte[hex.Length / 2];
+        for (var w = 0; w < hex.Length / 8; w++)
+        {
+            if (!uint.TryParse(hex.AsSpan(w * 8, 8), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var word))
+                return null;
+            var wordBytes = BitConverter.GetBytes(word);
+            if (!BitConverter.IsLittleEndian)
+                Array.Reverse(wordBytes);
+            wordBytes.CopyTo(bytes, w * 4);
+        }
+
+        return new IPAddress(bytes);
     }
 
     /// <summary>
@@ -112,7 +123,8 @@ public static class PowerDnsInstallConfig
 
         if (!loopbackListeners.Contains(IPAddress.Loopback))
             result.Add("127.0.0.1");
-        result.Add("::1");
+        if (!loopbackListeners.Contains(IPAddress.IPv6Loopback))
+            result.Add("::1");
         return result;
     }
 

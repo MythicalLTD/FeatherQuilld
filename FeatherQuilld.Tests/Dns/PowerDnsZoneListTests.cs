@@ -205,6 +205,21 @@ public class PowerDnsInstallConfigTests
     }
 
     [Fact]
+    public void FindLoopbackPort53Listeners_DetectsIpv6Loopback()
+    {
+        const string udp6 = """
+              sl  local_address                         remote_address                        st
+             100: 00000000000000000000000001000000:0035 00000000000000000000000000000000:0000 07
+             101: 00000000000000000000000000000000:0035 00000000000000000000000000000000:0000 07
+            """;
+        var stubs = PowerDnsInstallConfig.FindLoopbackPort53Listeners(null, udp6);
+        Assert.Equal([IPAddress.IPv6Loopback], stubs);
+
+        var addrs = PowerDnsInstallConfig.BuildLocalAddresses([IPAddress.Parse("203.0.113.10")], [IPAddress.Parse("127.0.0.53"), IPAddress.IPv6Loopback]);
+        Assert.Equal(["203.0.113.10", "127.0.0.1"], addrs);
+    }
+
+    [Fact]
     public void FindLoopbackPort53Listeners_NoStub_ReturnsEmpty()
     {
         const string table = "  sl  local_address\n   0: 00000000:0044 00000000:0000 07\n";
