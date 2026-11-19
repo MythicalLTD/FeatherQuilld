@@ -499,46 +499,106 @@ public sealed class HostPackageManager
 
         var apt = await InstallViaPackageManagerAsync(
             packageId,
-            "pdns-server pdns-backend-sqlite3",
+            "pdns-server pdns-backend-sqlite3 sqlite3",
             logger,
             ct).ConfigureAwait(false);
-        if (!apt.Success)
+        // pdns-server's postinst tries to start the daemon with the distro's bind backend, which can fail
+        // and make the package manager report an error even though the binaries are installed.
+        if (!apt.Success && PowerDnsProbe.ResolveBinary() is null)
             return apt;
 
+        var warnings = new List<string>();
         try
         {
             var apiKey = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
-            var dropInDir = "/etc/powerdns/pdns.d";
+            var dropInDir = PowerDnsInstallConfig.DropInDir;
             Directory.CreateDirectory(dropInDir);
-            var conf = $"""
-                api=yes
-                api-key={apiKey}
-                webserver=yes
-                webserver-address=127.0.0.1
-                webserver-port=8081
-                webserver-allow-from=127.0.0.1,::1
-                launch=gsqlite3
-                gsqlite3-database=/var/lib/powerdns/pdns.sqlite3
-                local-address=0.0.0.0,::
-                """;
-            await File.WriteAllTextAsync(Path.Combine(dropInDir, "featherquilld.conf"), conf, ct).ConfigureAwait(false);
+
+            // Ubuntu/Debian ship pdns.d/bind.conf (launch+=bind); it keeps pdns from starting next to gsqlite3.
+            foreach (var name in PowerDnsInstallConfig.ConflictingDropIns)
+            {
+                var path = Path.Combine(dropInDir, name);
+                if (!File.Exists(path))
+                    continue;
+                File.Move(path, path + ".disabled-by-featherquilld", overwrite: true);
+                logger?.Info(LoggerTypes.Application, $"PowerDNS: disabled {path}");
+            }
+
+            // systemd-resolved owns 127.0.0.53:53, so a wildcard bind fails; listen on explicit addresses instead.
+            IReadOnlyList<string>? localAddresses = null;
+            var stubs = PowerDnsInstallConfig.FindLoopbackPort53Listeners(
+                ReadAllTextOrNull("/proc/net/udp"),
+                ReadAllTextOrNull("/proc/net/tcp"));
+            if (stubs.Count > 0)
+            {
+                localAddresses = PowerDnsInstallConfig.BuildLocalAddresses(PowerDnsInstallConfig.HostUnicastAddresses(), stubs);
+                logger?.Info(
+                    LoggerTypes.Application,
+                    $"PowerDNS: port 53 already used on {string.Join(", ", stubs)}; binding to {string.Join(", ", localAddresses)}");
+            }
+
+            await File.WriteAllTextAsync(
+                Path.Combine(dropInDir, "featherquilld.conf"),
+                PowerDnsInstallConfig.BuildConfig(apiKey, localAddresses),
+                ct).ConfigureAwait(false);
+
+            var dbWarning = await EnsurePowerDnsSqliteDatabaseAsync(packageId, logger, ct).ConfigureAwait(false);
+            if (dbWarning is not null)
+                warnings.Add(dbWarning);
 
             var root = Environment.GetEnvironmentVariable("FEATHERQUILLD_ROOT") ?? "/var/lib/featherquilld";
             var keyDir = Path.Combine(root, "dns");
             Directory.CreateDirectory(keyDir);
             await File.WriteAllTextAsync(Path.Combine(keyDir, "powerdns-api-key"), apiKey + "\n", ct).ConfigureAwait(false);
 
-            await RunShellAsync(packageId, "systemctl enable --now pdns 2>/dev/null || service pdns restart", logger, ct)
+            await RunShellAsync(packageId, "systemctl enable pdns 2>/dev/null; systemctl restart pdns 2>/dev/null || service pdns restart", logger, ct)
                 .ConfigureAwait(false);
+            var active = await RunShellAsync(packageId, "systemctl is-active --quiet pdns", logger, ct).ConfigureAwait(false);
+            if (!active.Success)
+                warnings.Add("pdns did not start, check `journalctl -u pdns`");
         }
         catch (Exception ex)
         {
             logger?.Warning(LoggerTypes.Application, $"PowerDNS post-install config failed: {ex.Message}");
+            warnings.Add($"post-install config failed: {ex.Message}");
         }
 
-        return PowerDnsProbe.ResolveBinary() is not null
-            ? HostPackageOperationResult.Ok("powerdns installed open port 53/tcp+udp on this host for authoritative DNS")
-            : HostPackageOperationResult.Fail("powerdns package installed but pdns_server not found on PATH");
+        if (PowerDnsProbe.ResolveBinary() is null)
+            return HostPackageOperationResult.Fail("powerdns package installed but pdns_server not found on PATH");
+
+        var message = "powerdns installed open port 53/tcp+udp on this host for authoritative DNS";
+        return HostPackageOperationResult.Ok(warnings.Count == 0 ? message : $"{message} (warning: {string.Join("; ", warnings)})");
+    }
+
+    /// <summary>Creates the gsqlite3 database from the schema the backend package ships, owned by the pdns user.</summary>
+    private async Task<string?> EnsurePowerDnsSqliteDatabaseAsync(string packageId, AppLogger? logger, CancellationToken ct)
+    {
+        var db = PowerDnsInstallConfig.DatabasePath;
+        if (File.Exists(db) && new FileInfo(db).Length > 0)
+            return null;
+
+        var schema = PowerDnsInstallConfig.FindSqliteSchema();
+        if (schema is null)
+            return "PowerDNS sqlite schema not found; create " + db + " manually";
+
+        Directory.CreateDirectory(Path.GetDirectoryName(db)!);
+        var dir = Path.GetDirectoryName(db)!;
+        var cmd = $"rm -f '{db}' && sqlite3 '{db}' < '{schema}' && "
+            + $"(chown pdns:pdns '{dir}' '{db}' 2>/dev/null || true) && chmod 0640 '{db}'";
+        var result = await RunShellAsync(packageId, cmd, logger, ct).ConfigureAwait(false);
+        return result.Success ? null : "could not create the PowerDNS sqlite database: " + result.Message;
+    }
+
+    private static string? ReadAllTextOrNull(string path)
+    {
+        try
+        {
+            return File.Exists(path) ? File.ReadAllText(path) : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task<HostPackageOperationResult> InstallClamAvAsync(string packageId, AppLogger? logger, CancellationToken ct)

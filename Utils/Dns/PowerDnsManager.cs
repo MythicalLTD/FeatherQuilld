@@ -39,32 +39,133 @@ public sealed class PowerDnsManager
     public IReadOnlyList<object> ListZones()
     {
         var zones = new List<object>();
-        var url = "/api/v1/servers/localhost/zones";
-        while (!string.IsNullOrEmpty(url))
+        var seenPages = new HashSet<string>(StringComparer.Ordinal);
+        // dnssec=false skips the per-zone DNSSEC/edited_serial lookups, which we don't need here.
+        string? url = "/api/v1/servers/localhost/zones?dnssec=false";
+        while (!string.IsNullOrEmpty(url) && seenPages.Add(url))
         {
             using var response = _client.GetAsync(url).GetAwaiter().GetResult();
-            response.EnsureSuccessStatusCode();
-            using var stream = response.Content.ReadAsStream();
-            using var doc = JsonDocument.Parse(stream);
-            if (doc.RootElement.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var zone in data.EnumerateArray())
-                {
-                    var name = zone.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    var id = zone.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? name : name;
-                    zones.Add(new { id = TrimZoneId(id), name = TrimZoneId(name), status = "active" });
-                }
-            }
+            var body = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            if (!response.IsSuccessStatusCode)
+                throw new InvalidOperationException(DescribeApiError("list zones", (int)response.StatusCode, body));
 
-            url = doc.RootElement.TryGetProperty("next", out var next) ? next.GetString() ?? "" : "";
-            if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            {
-                var uri = new Uri(url);
-                url = uri.PathAndQuery;
-            }
+            var page = ParseZoneList(body, out var next);
+            foreach (var zone in page)
+                zones.Add(new { id = zone.Id, name = zone.Name, kind = zone.Kind, status = "active" });
+            url = next;
         }
 
         return zones;
+    }
+
+    internal sealed record ZoneSummary(string Id, string Name, string? Kind);
+
+    /// <summary>
+    /// Parses a PowerDNS <c>GET /servers/{id}/zones</c> response. The PowerDNS API (4.x and 5.x) returns a
+    /// bare JSON array of Zone objects; a <c>{"data": [...], "next": "..."}</c> envelope is still accepted
+    /// for API proxies that wrap it. Unknown fields, nulls and numeric ids are tolerated.
+    /// </summary>
+    internal static IReadOnlyList<ZoneSummary> ParseZoneList(string json, out string? next)
+    {
+        next = null;
+        var result = new List<ZoneSummary>();
+        if (string.IsNullOrWhiteSpace(json))
+            return result;
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(json);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException($"PowerDNS returned an unreadable zone list: {ex.Message}");
+        }
+
+        using (doc)
+        {
+            var root = doc.RootElement;
+            JsonElement items = default;
+            var hasItems = false;
+            if (root.ValueKind == JsonValueKind.Array)
+            {
+                items = root;
+                hasItems = true;
+            }
+            else if (root.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var key in new[] { "data", "zones" })
+                {
+                    if (root.TryGetProperty(key, out var arr) && arr.ValueKind == JsonValueKind.Array)
+                    {
+                        items = arr;
+                        hasItems = true;
+                        break;
+                    }
+                }
+
+                next = NormalizeNextUrl(ReadString(root, "next"));
+            }
+
+            if (!hasItems)
+                return result;
+
+            foreach (var zone in items.EnumerateArray())
+            {
+                if (zone.ValueKind != JsonValueKind.Object)
+                    continue;
+                var name = ReadString(zone, "name") ?? "";
+                var id = ReadString(zone, "id") ?? name;
+                if (name.Length == 0)
+                    name = id;
+                if (name.Length == 0)
+                    continue;
+                result.Add(new ZoneSummary(TrimZoneId(id), TrimZoneId(name), ReadString(zone, "kind")));
+            }
+        }
+
+        return result;
+    }
+
+    private static string? NormalizeNextUrl(string? next)
+    {
+        if (string.IsNullOrWhiteSpace(next))
+            return null;
+        if (next.StartsWith("http", StringComparison.OrdinalIgnoreCase) && Uri.TryCreate(next, UriKind.Absolute, out var uri))
+            return uri.PathAndQuery;
+        return next;
+    }
+
+    private static string? ReadString(JsonElement obj, string property)
+    {
+        if (obj.ValueKind != JsonValueKind.Object || !obj.TryGetProperty(property, out var el))
+            return null;
+        return el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString(),
+            JsonValueKind.Number => el.GetRawText(),
+            _ => null,
+        };
+    }
+
+    internal static string DescribeApiError(string action, int status, string? body)
+    {
+        string? detail = null;
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                detail = ReadString(doc.RootElement, "error");
+            }
+            catch (JsonException)
+            {
+                detail = body.Length > 200 ? body[..200] : body;
+            }
+        }
+
+        var msg = $"PowerDNS API could not {action} (HTTP {status})";
+        return string.IsNullOrWhiteSpace(detail) ? msg + "." : $"{msg}: {detail.Trim()}";
     }
 
     public string CreateZone(string zoneName, string? nodeIp = null)
@@ -154,7 +255,7 @@ public sealed class PowerDnsManager
             if (nameFilter is not null && !rrName.Equals(nameFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var ttl = rrset.TryGetProperty("ttl", out var ttlEl) ? ttlEl.GetInt32() : 300;
+            var ttl = rrset.TryGetProperty("ttl", out var ttlEl) && ttlEl.ValueKind == JsonValueKind.Number && ttlEl.TryGetInt32(out var ttlVal) ? ttlVal : 300;
             if (!rrset.TryGetProperty("records", out var recs) || recs.ValueKind != JsonValueKind.Array)
                 continue;
 

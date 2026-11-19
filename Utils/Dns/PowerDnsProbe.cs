@@ -73,7 +73,7 @@ public static class PowerDnsProbe
         try
         {
             using var client = BuildClient(config, key);
-            using var response = client.GetAsync("/api/v1/servers/localhost/zones?limit=1")
+            using var response = client.GetAsync("/api/v1/servers/localhost")
                 .GetAwaiter()
                 .GetResult();
             return response.IsSuccessStatusCode;
