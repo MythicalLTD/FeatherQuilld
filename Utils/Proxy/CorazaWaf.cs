@@ -175,7 +175,10 @@ public static class CorazaRules
             var level = Math.Clamp(s.Engine.Sensitivity, 1, 4);
             // The CRS only lets GET, HEAD, POST and OPTIONS through (rule 911100). The customer's own method list decides instead,
             // otherwise PUT/PATCH/DELETE of every REST API on the site is refused although the dashboard says they are allowed.
-            var methods = string.Join(' ', (s.Http?.Methods ?? []).Where(m => m.All(char.IsAsciiLetterUpper)).Distinct());
+            // Every method is wrapped in pipes ("|GET| |HEAD|"). CRS 4.31 compares "|GET|" against this list; with the old plain
+            // "GET HEAD" it refused every request (HTTP 403 on all sites). CRS 4.30 and earlier match the bare method name with
+            // @within, which is a substring test, so the same value works for both.
+            var methods = string.Join(' ', (s.Http?.Methods ?? []).Where(m => m.All(char.IsAsciiLetterUpper)).Distinct().Select(m => $"|{m}|"));
             var setvars = $"setvar:tx.blocking_paranoia_level={level},setvar:tx.detection_paranoia_level={level}";
             if (methods.Length > 0)
                 setvars += $",setvar:'tx.allowed_methods={methods}'";

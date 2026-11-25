@@ -50,10 +50,26 @@ public class CorazaRulesTests : IDisposable
     {
         // The CRS refuses everything except GET/HEAD/POST/OPTIONS (rule 911100) unless tx.allowed_methods says otherwise.
         var all = Build();
-        Assert.Contains("setvar:'tx.allowed_methods=GET HEAD POST PUT PATCH DELETE OPTIONS'", all);
+        Assert.Contains("setvar:'tx.allowed_methods=|GET| |HEAD| |POST| |PUT| |PATCH| |DELETE| |OPTIONS|'", all);
         var readOnly = Build(s => s.Http = new WafHttp { Methods = ["GET", "HEAD"] });
-        Assert.Contains("setvar:'tx.allowed_methods=GET HEAD'", readOnly);
+        Assert.Contains("setvar:'tx.allowed_methods=|GET| |HEAD|'", readOnly);
         Assert.DoesNotContain("PUT", readOnly.Split('\n').First(l => l.Contains("allowed_methods")));
+    }
+
+    [Theory]
+    [InlineData("GET", true)]
+    [InlineData("POST", true)]
+    [InlineData("PUT", false)]
+    [InlineData("TRACE", false)]
+    public void AllowedMethods_AreAcceptedByBothCrsMethodChecks(string method, bool allowed)
+    {
+        // CRS 4.31 (rule 911100) tests "|METHOD|" with @within, CRS 4.30 and older test the bare METHOD with @within.
+        // @within is a substring test on the allowed_methods value, so the value has to satisfy both.
+        var line = Build(s => s.Http = new WafHttp { Methods = ["GET", "HEAD", "POST", "OPTIONS"] }).Split('\n').First(l => l.Contains("allowed_methods"));
+        var value = line.Split("tx.allowed_methods=")[1].Split('\'')[0];
+
+        Assert.Equal(allowed, value.Contains($"|{method}|"));
+        Assert.Equal(allowed, value.Contains(method));
     }
 
     [Fact]
